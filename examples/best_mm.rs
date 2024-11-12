@@ -14,6 +14,7 @@ use rust_decimal::prelude::*;
 struct MyBot {
     pair: String,
     tick_size: Decimal,
+    refresh_cycle: u128,
     lot: Decimal,
     max_lot: Decimal,
     bb_api_client: BitbankPrivateApiClient,
@@ -24,13 +25,14 @@ struct MyBot {
 }
 
 impl MyBot {
-    fn new(pair: String, tick_size: Decimal, lot: Decimal, max_lot: Decimal) -> MyBot {
+    fn new(pair: String, tick_size: Decimal, refresh_cycle:u128, lot: Decimal, max_lot: Decimal) -> MyBot {
         let bitbank_key = BitbankOption::Key(env::var("BITBANK_API_KEY").unwrap());
         let bitbank_secret = BitbankOption::Secret(env::var("BITBANK_API_SECRET").unwrap());
 
         MyBot {
             pair: pair,
             tick_size,
+            refresh_cycle,
             lot,
             max_lot,
             bb_api_client: BitbankPrivateApiClient::new(vec![
@@ -56,7 +58,7 @@ impl MyBot {
 
         assert!(self.last_updated <= now);
 
-        if now - self.last_updated >= 300 {
+        if now - self.last_updated >= self.refresh_cycle {
             log::info!(
                 "{} milliseconds have passed since the last order update",
                 now - self.last_updated
@@ -270,8 +272,8 @@ async fn main() {
 
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 5_usize {
-        log::error!("there should be four argument: pair(like `btc_jpy`), tick size(like: `1`), lot(like `0.0001`), max_lot(like `0.0005`).");
+    if args.len() != 6_usize {
+        log::error!("there should be four argument: pair(like `btc_jpy`), tick size(like: `1`), refresh_cycle(ms)(like `5000`), lot(like `0.0001`), max_lot(like `0.0005`).");
         log::error!("example: cargo run --example rf_mm xrp_jpy 0.001 1 5");
         std::process::exit(-1);
     }
@@ -286,12 +288,13 @@ async fn main() {
 
     let pair = args[1].clone();
     let tick_size: Decimal = args[2].parse().unwrap();
-    let lot: Decimal = args[3].parse().unwrap();
-    let max_lot: Decimal = args[4].parse().unwrap();
+    let refresh_cycle: u128 = args[3].parse().unwrap();
+    let lot: Decimal = args[4].parse().unwrap();
+    let max_lot: Decimal = args[5].parse().unwrap();
 
     assert!(lot <= max_lot);
 
-    let mut bot = MyBot::new(pair.clone(), tick_size, lot, max_lot);
+    let mut bot = MyBot::new(pair.clone(), tick_size, refresh_cycle, lot, max_lot);
 
     let _bot_task = tokio::spawn(async move {
         bot.run(pair.clone(), vec![bitbank_key, bitbank_secret], wsc)
