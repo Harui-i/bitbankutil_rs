@@ -8,7 +8,7 @@ use crate::depth::Depth;
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
 #[allow(dead_code)]
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankTickerResponse {
     pub sell: String, // the lowest price of sell orders
     pub buy: String, // the highest price of buy orders
@@ -22,7 +22,7 @@ pub struct BitbankTickerResponse {
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
 #[allow(dead_code)]
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankTickersDatum {
     pub pair: String, // pair enum
     pub sell: String, // the lowest price of sell orders
@@ -38,7 +38,7 @@ pub struct BitbankTickersDatum {
 
 //https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets
 #[allow(dead_code)]
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankAssetDatum {
     pub asset: String,
     pub free_amount: String,
@@ -54,13 +54,13 @@ pub struct BitbankAssetDatum {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankAssetsData {
     pub assets: Vec<BitbankAssetDatum>,
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankCreateOrderResponse {
     pub order_id: Number,
     pub pair: String,
@@ -104,7 +104,7 @@ pub struct BitbankGetOrderResponse {
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
 #[allow(dead_code)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankCancelOrderResponse {
     pub order_id: Number,
     pub pair: String,
@@ -127,7 +127,7 @@ pub struct BitbankCancelOrderResponse {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankCancelOrdersResponse {
     pub orders: Vec<BitbankCancelOrderResponse>,
 }
@@ -139,26 +139,26 @@ pub struct BitbankActiveOrdersResponse {
 }
 
 #[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankWebSocketMessage {
     pub message: serde_json::Value,
     pub room_name: String,
 }
 
 #[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTransactionMessage {
     pub data: BitbankTransactionsData,
 }
 
 #[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTransactionsData {
     pub transactions: Vec<BitbankTransactionDatum>,
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTransactionDatum {
     #[serde(with = "rust_decimal::serde::float")]
     pub amount: Decimal,
@@ -170,19 +170,19 @@ pub struct BitbankTransactionDatum {
 }
 
 #[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthDiffMessage {
     pub data: BitbankDepthDiff,
 }
 
 #[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthWholeMessage {
     pub data: BitbankDepthWhole,
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthDiff {
     pub a: Vec<Vec<String>>, // ask, amount
     pub b: Vec<Vec<String>>, // bid, amount
@@ -199,7 +199,7 @@ pub struct BitbankDepthDiff {
 
 #[allow(dead_code)]
 #[allow(non_snake_case)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthWhole {
     asks: Vec<Vec<String>>,
     bids: Vec<Vec<String>>,
