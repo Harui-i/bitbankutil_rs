@@ -14,11 +14,18 @@ pub struct BitbankPrivateApiClient {
 }
 
 impl BitbankPrivateApiClient {
-    pub fn new(options: Vec<BitbankOption>) -> BitbankPrivateApiClient {
+    pub fn new(api_key: String, api_secret: String, options: Option<Vec<BitbankOption>>) -> BitbankPrivateApiClient {
         let mut client = Client::new();
 
-        for option in options {
-            client.update_default_option(option);
+        client.update_default_option(BitbankOption::HttpAuth(true));
+        client.update_default_option(BitbankOption::HttpUrl(BitbankHttpUrl::Private));
+        client.update_default_option(BitbankOption::Key(api_key));
+        client.update_default_option(BitbankOption::Secret(api_secret));
+
+        if let Some(options) = options {
+            for option in options {
+                client.update_default_option(option);
+            }
         }
 
         // check whether authentication option is set.
@@ -474,15 +481,10 @@ mod tests {
     }
 
     fn init_client() -> BitbankPrivateApiClient {
-        let bitbank_key = BitbankOption::Key(env::var("BITBANK_API_KEY").unwrap());
-        let bitbank_secret = BitbankOption::Secret(env::var("BITBANK_API_SECRET").unwrap());
+        let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
+        let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
 
-        BitbankPrivateApiClient::new(vec![
-            bitbank_key,
-            bitbank_secret,
-            BitbankOption::HttpAuth(true),
-            BitbankOption::HttpUrl(BitbankHttpUrl::Private),
-        ])
+        BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None)
     }
 
     #[tokio::test]
@@ -594,14 +596,9 @@ mod tests {
     async fn test_exceed_rate_limit() {
         logging_init();
 
-        let bitbank_key = BitbankOption::Key(env::var("BITBANK_API_KEY").unwrap());
-        let bitbank_secret = BitbankOption::Secret(env::var("BITBANK_API_SECRET").unwrap());
-        let bb_client = BitbankPrivateApiClient::new(vec![
-            bitbank_key,
-            bitbank_secret,
-            BitbankOption::HttpAuth(true),
-            BitbankOption::HttpUrl(BitbankHttpUrl::Private),
-        ]);
+        let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
+        let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
+        let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None);
 
         for _ in 0..10 {
             let res = bb_client

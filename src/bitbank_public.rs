@@ -5,7 +5,7 @@ use crypto_botters::{
     Client,
 };
 
-use crate::bitbank_structs::{BitbankDepthWhole, BitbankTickerResponse};
+use crate::bitbank_structs::{BitbankDepthWhole, BitbankTickerResponse, BitbankTickersDatum};
 
 #[derive(Clone)]
 pub struct BitbankPublicApiClient {
@@ -89,7 +89,7 @@ impl BitbankPublicApiClient {
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
     pub async fn get_tickers(
         &self,
-    ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
+    ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
             serde_json::Value,
@@ -104,7 +104,7 @@ impl BitbankPublicApiClient {
 
         match res {
             Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone())
+                match serde_json::from_value::<Vec<BitbankTickersDatum>>(res_val["data"].clone())
                 {
                     Ok(vecbbtr) => Ok(vecbbtr),
                     Err(err) => {
@@ -163,7 +163,7 @@ impl BitbankPublicApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("get_tickers request took {:?}", duration);
+        log::debug!("get_depth request took {:?}", duration);
 
         match res {
             Ok(res_val) => {

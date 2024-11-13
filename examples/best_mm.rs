@@ -6,7 +6,6 @@ use bitbankutil_rs::depth::Depth;
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_bot::{BotTrait, DualWriter, SimplifiedOrder};
 use bitbankutil_rs::bitbank_structs::BitbankDepth;
-use crypto_botters::bitbank::{BitbankHttpUrl, BitbankOption};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
@@ -25,22 +24,18 @@ struct MyBot {
 }
 
 impl MyBot {
-    fn new(pair: String, tick_size: Decimal, refresh_cycle:u128, lot: Decimal, max_lot: Decimal) -> MyBot {
-        let bitbank_key = BitbankOption::Key(env::var("BITBANK_API_KEY").unwrap());
-        let bitbank_secret = BitbankOption::Secret(env::var("BITBANK_API_SECRET").unwrap());
-
+    fn new(bitbank_key: String, bitbank_secret: String, pair: String, tick_size: Decimal, refresh_cycle:u128, lot: Decimal, max_lot: Decimal) -> MyBot {
         MyBot {
             pair: pair,
             tick_size,
             refresh_cycle,
             lot,
             max_lot,
-            bb_api_client: BitbankPrivateApiClient::new(vec![
+            bb_api_client: BitbankPrivateApiClient::new(
                 bitbank_key,
                 bitbank_secret,
-                BitbankOption::HttpAuth(true),
-                BitbankOption::HttpUrl(BitbankHttpUrl::Private),
-            ]),
+                None,
+            ),
 
             last_updated: 0,
             depth: BitbankDepth::new(),
@@ -273,13 +268,13 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() != 6_usize {
-        log::error!("there should be four argument: pair(like `btc_jpy`), tick size(like: `1`), refresh_cycle(ms)(like `5000`), lot(like `0.0001`), max_lot(like `0.0005`).");
+        log::error!("there should be five arguments: pair(like `btc_jpy`), tick size(like: `1`), refresh_cycle(ms)(like `5000`), lot(like `0.0001`), max_lot(like `0.0005`).");
         log::error!("example: cargo run --example rf_mm xrp_jpy 0.001 1 5");
         std::process::exit(-1);
     }
 
-    let bitbank_key = BitbankOption::Key(env::var("BITBANK_API_KEY").unwrap());
-    let bitbank_secret = BitbankOption::Secret(env::var("BITBANK_API_SECRET").unwrap());
+    let bitbank_key: String = env::var("BITBANK_API_KEY").unwrap();
+    let bitbank_secret: String = env::var("BITBANK_API_SECRET").unwrap();
 
     let mut wsc = WebSocketConfig::default();
     wsc.refresh_after = Duration::from_secs(3600);
@@ -294,10 +289,10 @@ async fn main() {
 
     assert!(lot <= max_lot);
 
-    let mut bot = MyBot::new(pair.clone(), tick_size, refresh_cycle, lot, max_lot);
+    let mut bot = MyBot::new(bitbank_key, bitbank_secret, pair.clone(), tick_size, refresh_cycle, lot, max_lot);
 
     let _bot_task = tokio::spawn(async move {
-        bot.run(pair.clone(), vec![bitbank_key, bitbank_secret], wsc)
+        bot.run(pair.clone(), vec![], wsc)
             .await;
     })
     .await

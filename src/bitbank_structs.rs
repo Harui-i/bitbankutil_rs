@@ -20,6 +20,21 @@ pub struct BitbankTickerResponse {
     pub timestamp: Number, // ticked at unix timestamp (milliseconds)
 }
 
+// https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
+#[allow(dead_code)]
+#[derive(serde::Deserialize, Debug)]
+pub struct BitbankTickersDatum {
+    pub pair: String, // pair enum
+    pub sell: String, // the lowest price of sell orders
+    pub buy: String, // the highest price of buy orders
+    pub high: String, // the highest price in last 24 hours
+    pub low: String, // thw lowest price in last 24 hours
+    pub open: String, // the open price at 24 hours ago
+    pub last: String, // the latest price executed
+    pub vol: String, // trading volume in last 24 hours
+    pub timestamp: Number, // ticked at unix timestamp (milliseconds)
+}
+
 
 //https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets
 #[allow(dead_code)]
