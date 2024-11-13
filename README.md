@@ -6,17 +6,10 @@
 `src/bitbank_private.rs`で定義されている、`BitbankPrivateApiClient`を使用することで、次のように簡単に実行することができます。
 
 ```rust
-    let bitbank_key = BitbankOption::Key(env::var("BITBANK_API_KEY").unwrap());
-    let bitbank_secret = BitbankOption::Secret(env::var("BITBANK_API_SECRET").unwrap());
+    let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
+    let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
 
-    BitbankPrivateApiClient::new(vec![
-        bitbank_key,
-        bitbank_secret,
-        BitbankOption::HttpAuth(true),
-        BitbankOption::HttpUrl(BitbankHttpUrl::Private),
-    ])
-
-    let bb_client = init_client();
+    let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None)
     let assets = bb_client.get_assets().await;
     println!("{:?}", assets);
 ```
