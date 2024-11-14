@@ -104,12 +104,11 @@ impl BitbankPublicApiClient {
 
         match res {
             Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickersDatum>>(res_val["data"].clone())
-                {
+                match serde_json::from_value::<Vec<BitbankTickersDatum>>(res_val["data"].clone()) {
                     Ok(vecbbtr) => Ok(vecbbtr),
                     Err(err) => {
                         log::error!(
-                            "failed to convert response value into Vec<BitbankTickerResponse>.\
+                            "failed to convert response value into Vec<BitbankTickersDatum>. \
                             res_val: {:?}, Error: {:?}",
                             res_val.clone(),
                             err
@@ -167,8 +166,7 @@ impl BitbankPublicApiClient {
 
         match res {
             Ok(res_val) => {
-                match serde_json::from_value::<BitbankDepthWhole>(res_val["data"].clone())
-                {
+                match serde_json::from_value::<BitbankDepthWhole>(res_val["data"].clone()) {
                     Ok(bbdw) => Ok(bbdw),
                     Err(err) => {
                         log::error!(
@@ -227,7 +225,9 @@ mod tests {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_ticker("eth_jpy").await;
+
         log::debug!("{:?}", res);
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
@@ -236,6 +236,7 @@ mod tests {
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_tickers().await;
         log::debug!("{:?}", res);
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
