@@ -144,6 +144,64 @@ impl BitbankPublicApiClient {
         }
     }
 
+    //https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
+    pub async fn get_tickers_jpy(
+        &self,
+    ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+        let res: Result<
+            serde_json::Value,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        > = self
+            .client
+            .get_no_query("/tickers_jpy", [BitbankOption::Default])
+            .await;
+
+        let duration = start_time.elapsed();
+        log::debug!("get_tickers_jpy request took {:?}", duration);
+
+        match res {
+            Ok(res_val) => {
+                match serde_json::from_value::<Vec<BitbankTickersDatum>>(res_val["data"].clone()) {
+                    Ok(vecbbtr) => Ok(vecbbtr),
+                    Err(err) => {
+                        log::error!(
+                            "failed to convert response value into Vec<BitbankTickersDatum>. \
+                            res_val: {:?}, Error: {:?}",
+                            res_val.clone(),
+                            err
+                        );
+
+                        Err(None)
+                    }
+                }
+            }
+            Err(err) => match err {
+                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
+                    log::error!("Send request error on get_tickers_jpy. error: {:?}", error);
+
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
+                    log::error!("Receive response error on get_tickers_jpy. error: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
+                    error,
+                ) => {
+                    log::error!("Build request error on get_tickers_jpy. error: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
+                    error,
+                ) => {
+                    log::error!("Bitbank handle error on get_tickers_jpy. error: {:?}", error);
+                    Err(Some(error))
+                }
+            },
+        }
+    }
+
     pub async fn get_depth(
         &self,
         pair: &str,
@@ -239,6 +297,15 @@ mod tests {
         assert!(res.is_ok());
     }
 
+    #[tokio::test]
+    async fn test_get_tickers_jpy() {
+        logging_init();
+        let public_client = BitbankPublicApiClient::new();
+        let res = public_client.get_tickers_jpy().await;
+        log::debug!("{:?}", res);
+        assert!(res.is_ok());
+    }
+    
     #[tokio::test]
     async fn test_get_depth() {
         logging_init();
