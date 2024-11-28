@@ -5,7 +5,9 @@ use crypto_botters::{
     Client,
 };
 
-use crate::bitbank_structs::{BitbankDepthWhole, BitbankTickerResponse, BitbankTickersDatum};
+use crate::bitbank_structs::{
+    BitbankDepthWhole, BitbankTickerResponse, BitbankTickersDatum, BitbankTransactionDatum,
+};
 
 #[derive(Clone)]
 pub struct BitbankPublicApiClient {
@@ -183,7 +185,10 @@ impl BitbankPublicApiClient {
                     Err(None)
                 }
                 crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on get_tickers_jpy. error: {:?}", error);
+                    log::error!(
+                        "Receive response error on get_tickers_jpy. error: {:?}",
+                        error
+                    );
                     Err(None)
                 }
                 crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
@@ -195,7 +200,87 @@ impl BitbankPublicApiClient {
                 crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
                     error,
                 ) => {
-                    log::error!("Bitbank handle error on get_tickers_jpy. error: {:?}", error);
+                    log::error!(
+                        "Bitbank handle error on get_tickers_jpy. error: {:?}",
+                        error
+                    );
+                    Err(Some(error))
+                }
+            },
+        }
+    }
+
+    pub async fn get_transactions(
+        &self,
+        pair: &str,
+        yyyymmdd: Option<&str>,
+    ) -> Result<Vec<BitbankTransactionDatum>, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+
+        let url = {
+            if let Some(yyyymmdd) = yyyymmdd {
+                format!("/{}/transactions/{}", pair, yyyymmdd)
+            } else {
+                format!("/{}/transactions", pair)
+            }
+        };
+
+        let res: Result<
+            serde_json::Value,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        > = self
+            .client
+            .get_no_query(&url, [BitbankOption::Default])
+            .await;
+
+        let duration = start_time.elapsed();
+        log::debug!("get_transactions request took {:?}", duration);
+
+        match res {
+            Ok(res_val) => {
+                match serde_json::from_value::<Vec<BitbankTransactionDatum>>(
+                    res_val["data"]["transactions"].clone(),
+                ) {
+                    Ok(transactions) => Ok(transactions),
+                    Err(err) => {
+                        log::error!(
+                            "failed to convert response value into Vec<BitbankTransactionDatum>. \
+                            res_val: {:?}, Error: {:?}",
+                            res_val.clone(),
+                            err
+                        );
+                        Err(None)
+                    }
+                }
+            }
+            Err(err) => match err {
+                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
+                    log::error!("Send request error on get_transactions. error: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
+                    log::error!(
+                        "Receive response error on get_transactions. error: {:?}",
+                        error
+                    );
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
+                    error,
+                ) => {
+                    log::error!(
+                        "Build request error on get_transactions. error: {:?}",
+                        error
+                    );
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
+                    error,
+                ) => {
+                    log::error!(
+                        "Bitbank handle error on get_transactions. error: {:?}",
+                        error
+                    );
                     Err(Some(error))
                 }
             },
@@ -305,7 +390,21 @@ mod tests {
         log::debug!("{:?}", res);
         assert!(res.is_ok());
     }
-    
+
+    #[tokio::test]
+    async fn test_get_transactions() {
+        logging_init();
+        let public_client = BitbankPublicApiClient::new();
+
+        let res_without_date = public_client.get_transactions("btc_jpy", None).await;
+        log::debug!("{:?}", res_without_date);
+        assert!(res_without_date.is_ok());
+
+        let res_with_date = public_client.get_transactions("btc_jpy", Some("20241127")).await;
+        log::debug!("{:?}", res_with_date);
+        assert!(res_with_date.is_ok());
+    }
+
     #[tokio::test]
     async fn test_get_depth() {
         logging_init();
