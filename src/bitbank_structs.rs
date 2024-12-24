@@ -280,11 +280,14 @@ impl BitbankDepth {
                 self.bids.insert(price.clone(), amount);
             }
         }
+        
+        self.diff_buffer.insert(diff.s.clone(), diff);
     }
 
     pub fn update_whole(&mut self, whole: BitbankDepthWhole) {
         let seq = whole.sequenceId.clone();
 
+        // delete diff items remaining in `diff_buffer` whose sequence id is less than or equal to `whole`'s sequence id.
         let keys_to_remove: Vec<String> = self
             .diff_buffer
             .iter()
@@ -320,7 +323,7 @@ impl BitbankDepth {
     }
 
     fn process_diff_buffer(&mut self) {
-        for depth_diff in self.diff_buffer.values() {
+        for (_sequence_id, depth_diff) in self.diff_buffer.iter() {
             for ask in &depth_diff.a {
                 let price = &ask[0].parse::<Decimal>().unwrap();
                 let amount = ask[1].parse::<f64>().unwrap();
@@ -343,9 +346,5 @@ impl BitbankDepth {
                 }
             }
         }
-
-        self.diff_buffer.clear();
-
-        assert!(self.diff_buffer.is_empty());
     }
 }
