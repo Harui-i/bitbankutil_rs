@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitbankutil_rs::depth::Depth;
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
-use bitbankutil_rs::bitbank_bot::{BotTrait, DualWriter, SimplifiedOrder};
+use bitbankutil_rs::bitbank_bot::{BotTrait, SimplifiedOrder};
 use bitbankutil_rs::bitbank_structs::BitbankDepth;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
@@ -256,12 +256,9 @@ impl BotTrait for MyBot {
 #[tokio::main]
 async fn main() {
     //     Pipe(Box<dyn io::Write + Send + 'static>),
-    let log_target = DualWriter::new("/home/samejima/rustlang/projects/bottanylisys/bot/logs/logs_best_mm.txt").expect("cannot open file?");
     env_logger::builder()
-        .target(env_logger::Target::Pipe(Box::new(log_target)))
         .filter_level(LevelFilter::Debug)
         .format_timestamp_millis()
-        .write_style(env_logger::WriteStyle::Always)
         .init();
 
 

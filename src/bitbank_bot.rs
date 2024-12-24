@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    fs::File,
-    sync::{Arc, Mutex},
-};
+use std::collections::BTreeSet;
 
 use crate::{bitbank_private::BitbankPrivateApiClient, bitbank_structs::BitbankCreateOrderResponse};
 use crate::bitbank_structs::{
@@ -248,30 +244,3 @@ pub enum BotMessage {
     DepthWhole(BitbankDepthWhole),
 }
 
-pub struct DualWriter {
-    file: Arc<Mutex<File>>,
-    stdout: Arc<Mutex<std::io::Stdout>>,
-}
-
-impl DualWriter {
-    pub fn new(file_path: &str) -> std::io::Result<Self> {
-        let file = File::create(file_path)?;
-        Ok(DualWriter {
-            file: Arc::new(Mutex::new(file)),
-            stdout: Arc::new(Mutex::new(std::io::stdout())),
-        })
-    }
-}
-
-impl std::io::Write for DualWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let bytes_written_file = self.file.lock().unwrap().write(buf)?;
-        let bytes_written_stdout = self.stdout.lock().unwrap().write(buf)?;
-        Ok(bytes_written_file.min(bytes_written_stdout))
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.lock().unwrap().flush()?;
-        self.stdout.lock().unwrap().flush()
-    }
-}
