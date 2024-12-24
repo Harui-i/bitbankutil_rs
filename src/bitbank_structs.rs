@@ -224,6 +224,7 @@ pub struct BitbankDepth {
     bids: BTreeMap<Decimal, f64>,
 
     is_complete: bool,
+    last_timestamp: i64,
 }
 
 impl Depth for BitbankDepth {
@@ -250,12 +251,17 @@ impl BitbankDepth {
             diff_buffer: BTreeMap::new(),
             asks: BTreeMap::new(),
             bids: BTreeMap::new(),
+            last_timestamp: 0,
             is_complete: false,
         }
     }
 
     pub fn is_complete(&self) -> bool {
         self.is_complete
+    }
+
+    pub fn last_timestamp(&self) -> i64 {
+        self.last_timestamp
     }
 
     pub fn insert_diff(&mut self, diff: BitbankDepthDiff) {
@@ -280,7 +286,10 @@ impl BitbankDepth {
                 self.bids.insert(price.clone(), amount);
             }
         }
-        
+
+        if self.last_timestamp < diff.t {
+            self.last_timestamp = diff.t;
+        }        
         self.diff_buffer.insert(diff.s.clone(), diff);
     }
 
@@ -316,6 +325,10 @@ impl BitbankDepth {
 
             assert_ne!(amount, f64::zero());
             self.bids.insert(price.clone(), amount);
+        }
+
+        if self.last_timestamp < whole.timestamp {
+            self.last_timestamp = whole.timestamp;
         }
 
         self.process_diff_buffer();
