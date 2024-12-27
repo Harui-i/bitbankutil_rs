@@ -27,20 +27,6 @@ pub mod depth {
             self.bids().iter().nth_back(k)
         }
 
-        // return maximum price p, s.t. Sigma_{p <= price} (volume) >= r
-        // To think intuitively, it is the lowest price when you execute a market sell order of size r.
-        fn r_depth_bid_price(&self, r: f64) -> Option<&Decimal> {
-            let mut sum = f64::zero();
-            for (price, amount) in self.bids().iter().rev() {
-                sum += amount;
-                if sum >= r {
-                    return Some(price);
-                }
-            }
-
-            None
-        }
-
         // return minimum price p, s.t. Sigma_{price <= p} (volume) >= r
         // To think intuitively, it is the highest price when you execute a market buy order of size r.
         fn r_depth_ask_price(&self, r: f64) -> Option<&Decimal> {
@@ -55,14 +41,18 @@ pub mod depth {
             None
         }
 
-        fn r_depth_bid_logdiff(&self, r: f64) -> Option<f64> {
-            let bid_price = self.r_depth_bid_price(r)?;
-            let best_bid_price = self.best_bid()?.0;
+        // return maximum price p, s.t. Sigma_{p <= price} (volume) >= r
+        // To think intuitively, it is the lowest price when you execute a market sell order of size r.
+        fn r_depth_bid_price(&self, r: f64) -> Option<&Decimal> {
+            let mut sum = f64::zero();
+            for (price, amount) in self.bids().iter().rev() {
+                sum += amount;
+                if sum >= r {
+                    return Some(price);
+                }
+            }
 
-            let bid_price_f64 = bid_price.to_f64().unwrap();
-            let best_bid_price_f64 = best_bid_price.to_f64().unwrap();
-
-            Some(bid_price_f64.ln() - best_bid_price_f64.ln())
+            None
         }
 
         // return log(r-depth ask price) - log(best ask price))
@@ -75,6 +65,17 @@ pub mod depth {
 
             Some(ask_price_f64.ln() - best_ask_price_f64.ln())
         }
+
+        fn r_depth_bid_logdiff(&self, r: f64) -> Option<f64> {
+            let bid_price = self.r_depth_bid_price(r)?;
+            let best_bid_price = self.best_bid()?.0;
+
+            let bid_price_f64 = bid_price.to_f64().unwrap();
+            let best_bid_price_f64 = best_bid_price.to_f64().unwrap();
+
+            Some(bid_price_f64.ln() - best_bid_price_f64.ln())
+        }
+
 
         fn bidask_spread(&self) -> Option<Decimal> {
             if self.best_ask().is_some() && self.best_bid().is_some() {
