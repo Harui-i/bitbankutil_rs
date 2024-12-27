@@ -373,11 +373,15 @@ impl BitbankPrivateApiClient {
 
     // TODO
     // Fetch multiple orders. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-multiple-orders
-    pub fn post_orders_info(&self) {}
+    pub fn post_orders_info(&self) {
+        todo!();
+    }
 
     // TODO
     // get exchange status. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
-    pub async fn get_status(&self) {}
+    pub async fn get_status(&self) {
+        todo!();
+    }
 
     // Fetch active orders. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-active-orders
     pub async fn get_active_orders(

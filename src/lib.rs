@@ -27,7 +27,7 @@ pub mod depth {
             self.bids().iter().nth_back(k)
         }
 
-        // return minimum price p, s.t. Sigma_{price <= p} (volume) >= r
+        // return minimum price p, s.t. Sum_{bestask <= price <= p} (amount) >= r
         // To think intuitively, it is the highest price when you execute a market buy order of size r.
         fn r_depth_ask_price(&self, r: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
@@ -41,13 +41,41 @@ pub mod depth {
             None
         }
 
-        // return maximum price p, s.t. Sigma_{p <= price} (volume) >= r
+        // return maximum price p, s.t. Sum_{p <= price <= bestbid} (amount) >= r
         // To think intuitively, it is the lowest price when you execute a market sell order of size r.
         fn r_depth_bid_price(&self, r: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.bids().iter().rev() {
                 sum += amount;
                 if sum >= r {
+                    return Some(price);
+                }
+            }
+
+            None
+        }
+
+        // return minimum price p, s.t. Sum_{bestask <= price <= p} (amount * price) >= s
+        // To think intuitively, it is the highest price when you execute a market buy order of size s (in dollar).
+        fn s_depth_ask_price(&self, s: Decimal) -> Option<&Decimal> {
+            let mut sum = Decimal::zero();
+            for (price, amount) in self.asks().iter() {
+                sum += price.clone() * Decimal::from_f64_retain(amount.clone())?;
+                if sum >= s {
+                    return Some(price);
+                }
+            }
+
+            None
+        }
+
+        // return maximum price p, s.t. Sum_{p <= price <= bestbid} (amount * price) >= s
+        // To think intuitively, it is the lowest price when you execute a market sell order of size s (in dollar).
+        fn s_depth_bid_price(&self, s: Decimal) -> Option<&Decimal> {
+            let mut sum = Decimal::zero();
+            for (price, amount) in self.bids().iter().rev() {
+                sum += price.clone() * Decimal::from_f64_retain(amount.clone())?;
+                if sum >= s {
                     return Some(price);
                 }
             }
@@ -75,6 +103,7 @@ pub mod depth {
 
             Some(bid_price_f64.ln() - best_bid_price_f64.ln())
         }
+
 
 
         fn bidask_spread(&self) -> Option<Decimal> {
