@@ -14,7 +14,11 @@ pub struct BitbankPrivateApiClient {
 }
 
 impl BitbankPrivateApiClient {
-    pub fn new(api_key: String, api_secret: String, options: Option<Vec<BitbankOption>>) -> BitbankPrivateApiClient {
+    pub fn new(
+        api_key: String,
+        api_secret: String,
+        options: Option<Vec<BitbankOption>>,
+    ) -> BitbankPrivateApiClient {
         let mut client = Client::new();
 
         client.update_default_option(BitbankOption::HttpAuth(true));
@@ -471,17 +475,21 @@ impl BitbankPrivateApiClient {
     }
 }
 
+// if you want to see stdout in succeed test, you should do `RUST_LOG=debug cargo test -- --nocapture`
+// To avoid parallel execution, you have to add `--test-threads=1` after `--`
+// Recommended form: `cargo test XXX -- --test-threads=1`
 #[cfg(test)]
 mod tests {
-    use std::env;
+    use std::{env, time::Duration};
 
     use super::*;
 
     fn logging_init() {
-        let _ = env_logger::builder()
+        let _a = env_logger::builder()
             .format_timestamp_millis()
             .is_test(true)
-            .try_init();
+            .try_init()
+            .ok();
     }
 
     fn init_client() -> BitbankPrivateApiClient {
@@ -501,23 +509,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_order() {
-        logging_init();
-
-        log::debug!("dbg!");
-        log::info!("info!");
-        log::warn!("warrn!");
-
-        let bb_client = init_client();
-        let res = bb_client
-            .post_order("btc_jpy", "1", Some("12"), "buy", "limit", Some(true), None)
-            .await
-            .expect("post_order returned Err");
-
-        println!("{:?}", res);
-    }
-
-    #[tokio::test]
     async fn test_get_order() {
         logging_init();
         let bb_client = init_client();
@@ -528,25 +519,37 @@ mod tests {
             .unwrap();
         log::info!("post order: {:?}", post_order_res);
 
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+
         let get_order_res = bb_client
             .get_order("btc_jpy", post_order_res.order_id.as_u64().unwrap())
             .await
             .unwrap();
 
         log::info!("fetched order information: {:?}", get_order_res);
+
+        let cancel_res = bb_client
+            .post_cancel_order("btc_jpy", post_order_res.order_id.as_u64().unwrap())
+            .await
+            .unwrap();
+
+        log::info!("cancelled response: {:?}", cancel_res);
     }
 
+    // it's flakey test!
     #[tokio::test]
     async fn test_post_cancel_order() {
         logging_init();
         let bb_client = init_client();
 
         let post_order_res: BitbankCreateOrderResponse = bb_client
-            .post_order("btc_jpy", "1", Some("12"), "buy", "limit", Some(true), None)
+            .post_order("btc_jpy", "1", Some("14"), "buy", "limit", Some(true), None)
             .await
             .unwrap();
 
         log::info!("order posted: {:?}", post_order_res);
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         let cancel_order_res: BitbankCancelOrderResponse = bb_client
             .post_cancel_order("btc_jpy", post_order_res.order_id.as_u64().unwrap())
@@ -574,20 +577,24 @@ mod tests {
         logging_init();
         let bb_client = init_client();
 
-        let active_orders_res: BitbankActiveOrdersResponse = bb_client
-            .get_active_orders(Some("btc_jpy"), None, None, None, None, None)
+        let post_order_res1: BitbankCreateOrderResponse = bb_client
+            .post_order("btc_jpy", "1", Some("12"), "buy", "limit", Some(true), None)
             .await
             .unwrap();
-        log::info!("active orders response: {:?}", active_orders_res);
 
-        let active_orders_id: Vec<u64> = active_orders_res
-            .orders
-            .iter()
-            .map(|order| order.order_id.as_u64().unwrap())
-            .collect();
+        log::info!("post_order_res1: {:?}", post_order_res1);
+
+        let post_order_res2: BitbankCreateOrderResponse = bb_client
+            .post_order("btc_jpy", "1", Some("13"), "buy", "limit", Some(true), None)
+            .await
+            .unwrap();
+
+        log::info!("post_order_res1: {:?}", post_order_res2);
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         let cancel_orders_res: BitbankCancelOrdersResponse = bb_client
-            .post_cancel_orders("btc_jpy", active_orders_id)
+            .post_cancel_orders("btc_jpy", vec![post_order_res1.order_id.as_u64().unwrap(), post_order_res2.order_id.as_u64().unwrap()])
             .await
             .unwrap();
 
