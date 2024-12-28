@@ -137,6 +137,20 @@ pub struct BitbankActiveOrdersResponse {
     pub orders: Vec<BitbankGetOrderResponse>,
 }
 
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct BitbankSpotStatus {
+    pub pair: String,
+    pub status: String,
+    pub min_amount: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct BitbankSpotStatusResponse {
+    pub statuses: Vec<BitbankSpotStatus>,
+}
+
 #[allow(dead_code, non_snake_case)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankWebSocketMessage {

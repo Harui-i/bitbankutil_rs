@@ -76,7 +76,7 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`GET /user/withdrawal_account`|❌️ |
 |`POST /user/request_withdrawal`|❌️ |
 |`GET /user/withdrawal_history`|❌️ |
-|`GET /spot/status`|❌️ |
+|`GET /spot/status`|✅ |
 |`GET /spot/pairs`|❌️ |
 
 ## Usage
@@ -171,7 +171,7 @@ The developers of this project are not responsible for any losses incurred throu
 |`GET /user/withdrawal_account`|❌️ |
 |`POST /user/request_withdrawal`|❌️ |
 |`GET /user/withdrawal_history`|❌️ |
-|`GET /spot/status`|❌️ |
+|`GET /spot/status`|️✅ |
 |`GET /spot/pairs`|❌️ |
 
 ## 使い方

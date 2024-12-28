@@ -1,6 +1,6 @@
 use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankAssetsData, BitbankCancelOrderResponse,
-    BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
+    BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse, BitbankSpotStatusResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
@@ -381,12 +381,6 @@ impl BitbankPrivateApiClient {
         todo!();
     }
 
-    // TODO
-    // get exchange status. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
-    pub async fn get_status(&self) {
-        todo!();
-    }
-
     // Fetch active orders. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-active-orders
     pub async fn get_active_orders(
         &self,
@@ -471,6 +465,61 @@ impl BitbankPrivateApiClient {
                     Err(None)
                 }
             },
+        }
+    }
+
+    // TODO
+    // get exchange status. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
+    pub async fn get_status(
+        &self,
+    ) -> Result<BitbankSpotStatusResponse, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+
+        let res: Result<serde_json::Value, crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>> = self
+            .client
+            .get_no_query(
+                "/spot/status",
+                [BitbankOption::Default],
+            )
+            .await;
+
+        let duration = start_time.elapsed();
+        log::debug!("get_status request took {:?}", duration);
+
+        match res  {
+            Ok(res) => {
+                match serde_json::from_value::<BitbankSpotStatusResponse>(res["data"].clone()) {
+                    Ok(bssr) => {
+                        Ok(bssr)
+                    },
+
+                    Err(err) => {
+                        log::error!("failed to convert res into BitbankSpotStatusResponse: {:?}", err);
+                        Err(None)
+                    }
+                }
+            },
+
+            Err(err) => {
+                match err {
+                    crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
+                        log::error!("Send request error on get_status: {:?}", error);
+                        Err(None)
+                    },
+                    crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
+                        log::error!("Receive response error on get_status: {:?}", error);
+                        Err(None)
+                    },
+                    crypto_botters::generic_api_client::http::RequestError::BuildRequestError(error) => {
+                        log::error!("Build request error on get_status: {:?}", error);
+                        Err(None)
+                    },
+                    crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(error) => {
+                        log::error!("Response handle error on get_status: {:?}", error);
+                        Err(Some(error))
+                    },
+                }
+            }
         }
     }
 }
@@ -594,11 +643,28 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
         let cancel_orders_res: BitbankCancelOrdersResponse = bb_client
-            .post_cancel_orders("btc_jpy", vec![post_order_res1.order_id.as_u64().unwrap(), post_order_res2.order_id.as_u64().unwrap()])
+            .post_cancel_orders(
+                "btc_jpy",
+                vec![
+                    post_order_res1.order_id.as_u64().unwrap(),
+                    post_order_res2.order_id.as_u64().unwrap(),
+                ],
+            )
             .await
             .unwrap();
 
         log::info!("cancel orders respones: {:?}", cancel_orders_res);
+    }
+
+    #[tokio::test]
+    async fn test_get_status() {
+        logging_init();
+        let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
+        let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
+        let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None);
+
+        let status = bb_client.get_status().await.unwrap();
+        log::info!("Bitbank spot status: {:?}", status);
     }
 
     // intentionaly exceed Rate Limit. if you want to run it, you should add `-- --ignored` option like: `cargo test -- --ignored`.
