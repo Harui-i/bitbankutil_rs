@@ -83,7 +83,7 @@ pub mod depth {
             None
         }
 
-        // return log(r-depth ask price) - log(best ask pric))
+        // return log(r-depth ask price) - log(best ask price))
         fn r_depth_ask_logdiff(&self, r: f64) -> Option<f64> {
             let ask_price = self.r_depth_ask_price(r)?;
             let best_ask_price = self.best_ask()?.0;
@@ -94,6 +94,7 @@ pub mod depth {
             Some(ask_price_f64.ln() - best_ask_price_f64.ln())
         }
 
+        // return log(r-depth bid price) - log(best bid price)
         fn r_depth_bid_logdiff(&self, r: f64) -> Option<f64> {
             let bid_price = self.r_depth_bid_price(r)?;
             let best_bid_price = self.best_bid()?.0;
@@ -102,6 +103,28 @@ pub mod depth {
             let best_bid_price_f64 = best_bid_price.to_f64().unwrap();
 
             Some(bid_price_f64.ln() - best_bid_price_f64.ln())
+        }
+
+        // return log(s-depth ask price) - log(best ask price)
+        fn s_depth_ask_logdiff(&self, s: Decimal) -> Option<f64> {
+            let ask_price = self.s_depth_ask_price(s)?;
+            let best_ask_price = self.best_ask()?.0;
+
+            let ask_price = ask_price.to_f64().unwrap();
+            let best_ask_price = best_ask_price.to_f64().unwrap();
+
+            Some(ask_price.ln() - best_ask_price.ln())
+        }
+
+        // return log(s-depth bid price) - log(best bid price)
+        fn s_depth_bid_logdiff(&self, s: Decimal) -> Option<f64> {
+            let bid_price = self.s_depth_bid_price(s)?;
+            let best_bid_price = self.best_bid()?.0;
+
+            let bid_price = bid_price.to_f64().unwrap();
+            let best_bid_price = best_bid_price.to_f64().unwrap();
+
+            Some(bid_price.ln() - best_bid_price.ln())
         }
 
         fn bidask_spread(&self) -> Option<Decimal> {
