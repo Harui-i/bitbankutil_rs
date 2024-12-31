@@ -57,10 +57,10 @@ pub mod depth {
 
         // return minimum price p, s.t. Sum_{bestask <= price <= p} (amount * price) >= s
         // To think intuitively, it is the highest price when you execute a market buy order of size s (in dollar).
-        fn s_depth_ask_price(&self, s: Decimal) -> Option<&Decimal> {
-            let mut sum = Decimal::zero();
+        fn s_depth_ask_price(&self, s: f64) -> Option<&Decimal> {
+            let mut sum = f64::zero();
             for (price, amount) in self.asks().iter() {
-                sum += price.clone() * Decimal::from_f64_retain(amount.clone())?;
+                sum += price.to_f64().unwrap() * amount.clone();
                 if sum >= s {
                     return Some(price);
                 }
@@ -71,10 +71,10 @@ pub mod depth {
 
         // return maximum price p, s.t. Sum_{p <= price <= bestbid} (amount * price) >= s
         // To think intuitively, it is the lowest price when you execute a market sell order of size s (in dollar).
-        fn s_depth_bid_price(&self, s: Decimal) -> Option<&Decimal> {
-            let mut sum = Decimal::zero();
+        fn s_depth_bid_price(&self, s: f64) -> Option<&Decimal> {
+            let mut sum = f64::zero();
             for (price, amount) in self.bids().iter().rev() {
-                sum += price.clone() * Decimal::from_f64_retain(amount.clone())?;
+                sum += price.to_f64().unwrap() * amount.clone();
                 if sum >= s {
                     return Some(price);
                 }
@@ -106,7 +106,7 @@ pub mod depth {
         }
 
         // return log(s-depth ask price) - log(best ask price)
-        fn s_depth_ask_logdiff(&self, s: Decimal) -> Option<f64> {
+        fn s_depth_ask_logdiff(&self, s: f64) -> Option<f64> {
             let ask_price = self.s_depth_ask_price(s)?;
             let best_ask_price = self.best_ask()?.0;
 
@@ -117,7 +117,7 @@ pub mod depth {
         }
 
         // return log(s-depth bid price) - log(best bid price)
-        fn s_depth_bid_logdiff(&self, s: Decimal) -> Option<f64> {
+        fn s_depth_bid_logdiff(&self, s: f64) -> Option<f64> {
             let bid_price = self.s_depth_bid_price(s)?;
             let best_bid_price = self.best_bid()?.0;
 
