@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitbankutil_rs::depth::Depth;
-use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_bot::{BotTrait, SimplifiedOrder};
+use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_structs::BitbankDepth;
+use bitbankutil_rs::depth::Depth;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
@@ -24,18 +24,22 @@ struct MyBot {
 }
 
 impl MyBot {
-    fn new(bitbank_key: String, bitbank_secret: String, pair: String, tick_size: Decimal, refresh_cycle:u128, lot: Decimal, max_lot: Decimal) -> MyBot {
+    fn new(
+        bitbank_key: String,
+        bitbank_secret: String,
+        pair: String,
+        tick_size: Decimal,
+        refresh_cycle: u128,
+        lot: Decimal,
+        max_lot: Decimal,
+    ) -> MyBot {
         MyBot {
             pair: pair,
             tick_size,
             refresh_cycle,
             lot,
             max_lot,
-            bb_api_client: BitbankPrivateApiClient::new(
-                bitbank_key,
-                bitbank_secret,
-                None,
-            ),
+            bb_api_client: BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None),
 
             last_updated: 0,
             depth: BitbankDepth::new(),
@@ -161,8 +165,7 @@ impl MyBot {
             let sell_price = {
                 if has_bestask_order || best_ask_price - self.tick_size == best_bid_price {
                     best_ask_price
-                }
-                else {
+                } else {
                     best_ask_price - self.tick_size
                 }
             };
@@ -170,12 +173,11 @@ impl MyBot {
             let buy_price = {
                 if has_bestbid_order || best_bid_price + self.tick_size == best_ask_price {
                     best_bid_price
-                }
-                else {
+                } else {
                     best_bid_price + self.tick_size
                 }
             };
-            
+
             log::info!("target spread: {}", sell_price - buy_price);
 
             let can_buy =
@@ -215,7 +217,10 @@ impl MyBot {
                 .await;
             }
         }
-        log::info!("update_orders has finished within {} ms", now_inst.elapsed().as_millis());
+        log::info!(
+            "update_orders has finished within {} ms",
+            now_inst.elapsed().as_millis()
+        );
     }
 }
 
@@ -261,7 +266,6 @@ async fn main() {
         .format_timestamp_millis()
         .init();
 
-
     let args: Vec<String> = env::args().collect();
 
     if args.len() != 6_usize {
@@ -286,11 +290,18 @@ async fn main() {
 
     assert!(lot <= max_lot);
 
-    let mut bot = MyBot::new(bitbank_key, bitbank_secret, pair.clone(), tick_size, refresh_cycle, lot, max_lot);
+    let mut bot = MyBot::new(
+        bitbank_key,
+        bitbank_secret,
+        pair.clone(),
+        tick_size,
+        refresh_cycle,
+        lot,
+        max_lot,
+    );
 
     let _bot_task = tokio::spawn(async move {
-        bot.run(pair.clone(), vec![], wsc)
-            .await;
+        bot.run(pair.clone(), vec![], wsc).await;
     })
     .await
     .unwrap();

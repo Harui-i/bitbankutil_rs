@@ -5,13 +5,11 @@ use bitbankutil_rs::bitbank_bot::BotTrait;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 
-struct MyBot {
-}
+struct MyBot {}
 
 impl MyBot {
     fn new() -> MyBot {
-        MyBot {
-        }
+        MyBot {}
     }
 }
 
@@ -23,7 +21,7 @@ impl BotTrait for MyBot {
     }
 
     async fn on_depth_update(&mut self, depth: &bitbankutil_rs::bitbank_structs::BitbankDepth) {
-        log::info!("{}",depth);        
+        log::info!("{}", depth);
     }
 }
 
@@ -34,14 +32,12 @@ async fn main() {
         .format_timestamp_millis()
         .init();
 
-
     let args: Vec<String> = env::args().collect();
 
     if args.len() != 2_usize {
         log::error!("there should be one arguments: pair(like `btc_jpy`).");
         std::process::exit(-1);
     }
-
 
     let mut wsc = WebSocketConfig::default();
     wsc.refresh_after = Duration::from_secs(3600);
@@ -52,8 +48,7 @@ async fn main() {
     let mut bot = MyBot::new();
 
     let _bot_task = tokio::spawn(async move {
-        bot.run(pair.clone(), vec![], wsc)
-            .await;
+        bot.run(pair.clone(), vec![], wsc).await;
     })
     .await
     .unwrap();

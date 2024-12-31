@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 
-use crate::{bitbank_private::BitbankPrivateApiClient, bitbank_structs::BitbankCreateOrderResponse};
 use crate::bitbank_structs::{
     BitbankDepth, BitbankDepthDiff, BitbankDepthDiffMessage, BitbankDepthWhole,
     BitbankDepthWholeMessage, BitbankGetOrderResponse, BitbankTransactionDatum,
     BitbankTransactionMessage,
+};
+use crate::{
+    bitbank_private::BitbankPrivateApiClient, bitbank_structs::BitbankCreateOrderResponse,
 };
 use crypto_botters::{
     bitbank::BitbankOption, generic_api_client::websocket::WebSocketConfig, Client,
@@ -243,4 +245,3 @@ pub enum BotMessage {
     DepthDiff(BitbankDepthDiff),
     DepthWhole(BitbankDepthWhole),
 }
-

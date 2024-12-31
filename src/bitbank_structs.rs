@@ -303,7 +303,7 @@ impl BitbankDepth {
 
         if self.last_timestamp < diff.t {
             self.last_timestamp = diff.t;
-        }        
+        }
         self.diff_buffer.insert(diff.s.clone(), diff);
     }
 

@@ -400,7 +400,9 @@ mod tests {
         log::debug!("{:?}", res_without_date);
         assert!(res_without_date.is_ok());
 
-        let res_with_date = public_client.get_transactions("btc_jpy", Some("20241127")).await;
+        let res_with_date = public_client
+            .get_transactions("btc_jpy", Some("20241127"))
+            .await;
         log::debug!("{:?}", res_with_date);
         assert!(res_with_date.is_ok());
     }

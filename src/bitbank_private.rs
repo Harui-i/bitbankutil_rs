@@ -1,6 +1,7 @@
 use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankAssetsData, BitbankCancelOrderResponse,
-    BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse, BitbankSpotStatusResponse,
+    BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
+    BitbankSpotStatusResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
@@ -475,51 +476,54 @@ impl BitbankPrivateApiClient {
     ) -> Result<BitbankSpotStatusResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
 
-        let res: Result<serde_json::Value, crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>> = self
+        let res: Result<
+            serde_json::Value,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        > = self
             .client
-            .get_no_query(
-                "/spot/status",
-                [BitbankOption::Default],
-            )
+            .get_no_query("/spot/status", [BitbankOption::Default])
             .await;
 
         let duration = start_time.elapsed();
         log::debug!("get_status request took {:?}", duration);
 
-        match res  {
+        match res {
             Ok(res) => {
                 match serde_json::from_value::<BitbankSpotStatusResponse>(res["data"].clone()) {
-                    Ok(bssr) => {
-                        Ok(bssr)
-                    },
+                    Ok(bssr) => Ok(bssr),
 
                     Err(err) => {
-                        log::error!("failed to convert res into BitbankSpotStatusResponse: {:?}", err);
+                        log::error!(
+                            "failed to convert res into BitbankSpotStatusResponse: {:?}",
+                            err
+                        );
                         Err(None)
                     }
                 }
-            },
-
-            Err(err) => {
-                match err {
-                    crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                        log::error!("Send request error on get_status: {:?}", error);
-                        Err(None)
-                    },
-                    crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                        log::error!("Receive response error on get_status: {:?}", error);
-                        Err(None)
-                    },
-                    crypto_botters::generic_api_client::http::RequestError::BuildRequestError(error) => {
-                        log::error!("Build request error on get_status: {:?}", error);
-                        Err(None)
-                    },
-                    crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(error) => {
-                        log::error!("Response handle error on get_status: {:?}", error);
-                        Err(Some(error))
-                    },
-                }
             }
+
+            Err(err) => match err {
+                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
+                    log::error!("Send request error on get_status: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
+                    log::error!("Receive response error on get_status: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
+                    error,
+                ) => {
+                    log::error!("Build request error on get_status: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
+                    error,
+                ) => {
+                    log::error!("Response handle error on get_status: {:?}", error);
+                    Err(Some(error))
+                }
+            },
         }
     }
 }

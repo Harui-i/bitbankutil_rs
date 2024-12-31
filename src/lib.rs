@@ -1,7 +1,7 @@
-pub mod bitbank_structs;
 pub mod bitbank_bot;
 pub mod bitbank_private;
 pub mod bitbank_public;
+pub mod bitbank_structs;
 
 pub mod depth {
     use core::fmt;
@@ -83,7 +83,7 @@ pub mod depth {
             None
         }
 
-        // return log(r-depth ask price) - log(best ask price))
+        // return log(r-depth ask price) - log(best ask pric))
         fn r_depth_ask_logdiff(&self, r: f64) -> Option<f64> {
             let ask_price = self.r_depth_ask_price(r)?;
             let best_ask_price = self.best_ask()?.0;
@@ -103,8 +103,6 @@ pub mod depth {
 
             Some(bid_price_f64.ln() - best_bid_price_f64.ln())
         }
-
-
 
         fn bidask_spread(&self) -> Option<Decimal> {
             if self.best_ask().is_some() && self.best_bid().is_some() {
