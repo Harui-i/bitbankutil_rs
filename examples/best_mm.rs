@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -124,7 +123,7 @@ impl MyBot {
             let mut btc_locked_jpy_amount: Decimal = Decimal::zero();
             // calculate locked jpy for this pair
             for current_order in active_orders_info.clone().orders {
-                if current_order.r#type == "limit" {
+                if current_order.r#type == "limit" && current_order.side == "buy" {
                     btc_locked_jpy_amount +=
                         current_order.price.unwrap().parse::<Decimal>().unwrap()
                             * current_order
@@ -135,11 +134,14 @@ impl MyBot {
                 }
             }
 
-            let btc_amount = btc_asset.free_amount.clone().parse::<Decimal>().unwrap()
-                + btc_asset.locked_amount.clone().parse::<Decimal>().unwrap();
-            let jpy_amount =
-                jpy_asset.free_amount.clone().parse::<Decimal>().unwrap() + btc_locked_jpy_amount;
+            let btc_free_amount = btc_asset.free_amount.clone().parse::<Decimal>().unwrap();
+            let btc_locked_amount = btc_asset.locked_amount.clone().parse::<Decimal>().unwrap();
+            let btc_amount = btc_free_amount + btc_locked_amount;
+            let btc_amount_remainder = btc_amount - (btc_amount / self.lot).floor() * self.lot;
+            let jpy_free_amount = jpy_asset.free_amount.clone().parse::<Decimal>().unwrap();
+            let jpy_amount = jpy_free_amount + btc_locked_jpy_amount;
 
+            log::debug!("btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}", btc_free_amount, btc_locked_amount, jpy_free_amount, btc_locked_jpy_amount);
             log::info!(
                 "{}_amount: {}, jpy_amount: {}",
                 self.pair.clone(),
@@ -184,10 +186,10 @@ impl MyBot {
                 jpy_amount >= buy_price * self.lot && btc_amount + self.lot <= self.max_lot;
             let can_sell = btc_amount >= self.lot;
 
-            let mut wanna_place_orders = BTreeSet::new();
+            let mut wanna_place_orders = Vec::new();
 
             if can_buy {
-                wanna_place_orders.insert(SimplifiedOrder {
+                wanna_place_orders.push(SimplifiedOrder {
                     pair: self.pair.clone(),
                     side: "buy".to_owned(),
                     amount: self.lot,
@@ -196,10 +198,10 @@ impl MyBot {
             }
 
             if can_sell {
-                wanna_place_orders.insert(SimplifiedOrder {
+                wanna_place_orders.push(SimplifiedOrder {
                     pair: self.pair.clone(),
                     side: "sell".to_owned(),
-                    amount: self.lot,
+                    amount: self.lot + btc_amount_remainder,
                     price: sell_price,
                 });
             }
@@ -208,9 +210,11 @@ impl MyBot {
             log::info!("evaluated asset: {}", btc_amount * sell_price + jpy_amount);
             {
                 let bb_client = self.bb_api_client.clone();
-                MyBot::place_wanna_orders(
+                MyBot::place_wanna_orders_concurrent(
                     wanna_place_orders,
                     active_orders_info.orders,
+                    btc_free_amount,
+                    jpy_free_amount,
                     self.pair.clone(),
                     bb_client,
                 )
@@ -270,12 +274,12 @@ async fn main() {
 
     if args.len() != 6_usize {
         log::error!("there should be five arguments: pair(like `btc_jpy`), tick size(like: `1`), refresh_cycle(ms)(like `5000`), lot(like `0.0001`), max_lot(like `0.0005`).");
-        log::error!("example: cargo run --example rf_mm xrp_jpy 0.001 1 5");
+        log::error!("example: cargo run --example best_mm xrp_jpy 0.001 300 1 5");
         std::process::exit(-1);
     }
 
-    let bitbank_key: String = env::var("BITBANK_API_KEY").unwrap();
-    let bitbank_secret: String = env::var("BITBANK_API_SECRET").unwrap();
+    let bitbank_key: String = env::var("BITBANK_API_KEY").expect("there should be BITBANK_API_KEY in enviroment variables");
+    let bitbank_secret: String = env::var("BITBANK_API_SECRET").expect("there should be BITBANK_API_SECRET in environment variables");
 
     let mut wsc = WebSocketConfig::default();
     wsc.refresh_after = Duration::from_secs(3600);

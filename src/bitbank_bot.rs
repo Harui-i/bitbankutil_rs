@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::bitbank_structs::{
-    BitbankDepth, BitbankDepthDiff, BitbankDepthDiffMessage, BitbankDepthWhole,
-    BitbankDepthWholeMessage, BitbankGetOrderResponse, BitbankTransactionDatum,
+    BitbankCancelOrdersResponse, BitbankDepth, BitbankDepthDiff, BitbankDepthDiffMessage,
+    BitbankDepthWhole, BitbankDepthWholeMessage, BitbankGetOrderResponse, BitbankTransactionDatum,
     BitbankTransactionMessage,
 };
 use crate::{
@@ -236,6 +236,202 @@ pub trait BotTrait {
             }
 
             log::debug!("Replaced orders within {} ms.", start.elapsed().as_millis());
+        }
+    }
+
+    /*   現在出されている注文と(`current_orders`)、あるべき注文の状態(`wanna_place_orders`)を受け取って、新規注文や注文のキャンセルを行う。
+    可能であれば(新規注文→キャンセルの順番に行っても十分な資金がある場合)、注文のキャンセルと新規注文は並列に処理される。
+    wanna_place_ordersで
+
+    `btc_free_amount`: 取引するペアの仮想通貨で、注文に出していない数量
+    `btc_locked_amount`取引するペアの仮想通貨で、注文に出している数量
+
+    `jpy_free_amount`: 注文に出していいない日本円の数量
+    `jpy_btc_locked_amount`: 取引するペアで注文に出している日本円の数量
+    */
+    fn place_wanna_orders_concurrent(
+        mut wanna_place_orders: Vec<SimplifiedOrder>,
+        current_orders: Vec<BitbankGetOrderResponse>,
+        btc_free_amount: Decimal,
+        jpy_free_amount: Decimal,
+        pair: String,
+        api_client: BitbankPrivateApiClient,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async move {
+            let start = Instant::now();
+            let mut should_cancelled_orderids = vec![];
+
+            for cur_order in current_orders {
+                let current_sord = SimplifiedOrder {
+                    pair: cur_order.pair.clone(),
+                    side: cur_order.side.to_string(),
+                    amount: cur_order
+                        .remaining_amount
+                        .clone()
+                        .unwrap()
+                        .parse::<Decimal>()
+                        .unwrap(),
+                    price: cur_order.price.clone().unwrap().parse::<Decimal>().unwrap(),
+                };
+
+                // this order shoulb be canceled
+                if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
+                    log::debug!("this order will be cancelled. {:?}", current_sord);
+                    should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
+                }
+                // this current order is in wanna_place_orders. (i.e. already placed order)
+                // wanna_place_orders.contains(&current_sord) || current_sord.pair != pair
+                else {
+                    // wanna_place_ordersからcurrent_sordを削除する( O(wanna_place_orders.len())かかるが、wanna_place_orders.len()は十分小さいだろうしOK)
+                    // 一つだけ消したいので愚直に判定する
+                    log::debug!("this order already exists: {:?}", current_sord);
+                    for (i, wanna_sord) in wanna_place_orders.iter().enumerate() {
+                        if current_sord == *wanna_sord {
+                            wanna_place_orders.remove(i);
+                            break;
+                        } 
+                    }
+                }
+            }
+
+            let mut next_btc_free_amount = btc_free_amount;
+            let mut next_jpy_free_amount = jpy_free_amount;
+
+            let mut first_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
+            let mut second_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
+
+            // wanna_place_ordersの順序が出したい注文の優先度だとする。
+            for sord in wanna_place_orders {
+                if sord.side == "buy" {
+                    let consumed_jpy = sord.amount * sord.price;
+
+                    if next_jpy_free_amount >= consumed_jpy {
+                        log::debug!("{:?} posted firstly.", sord);
+                        first_posted_orders.insert(sord);
+                        next_jpy_free_amount -= consumed_jpy;
+                    } else {
+                        log::debug!("{:?} posted secondly.", sord);
+                        second_posted_orders.insert(sord);
+                    }
+                } else if sord.side == "sell" {
+                    let consumed_btc = sord.amount;
+
+                    if next_btc_free_amount >= consumed_btc {
+                        log::debug!("{:?} posted firstly.", sord);
+                        first_posted_orders.insert(sord);
+                        next_btc_free_amount -= consumed_btc;
+                    } else {
+                        log::debug!("{:?} posted secondly.", sord);
+                        second_posted_orders.insert(sord);
+                    }
+                } else {
+                    panic!(
+                        "unexpected side in place_wanna_orders_concurrent: {}",
+                        sord.side
+                    );
+                }
+            }
+
+            enum FirstJoinSetResponse {
+                CancelResponse(
+                    Result<
+                        BitbankCancelOrdersResponse,
+                        Option<crypto_botters::bitbank::BitbankHandleError>,
+                    >,
+                ),
+                PostResponse(
+                    Result<
+                        BitbankCreateOrderResponse,
+                        Option<crypto_botters::bitbank::BitbankHandleError>,
+                    >,
+                ),
+            }
+
+            // first_posted_ordersの注文と、should_cancelled_orderidsのキャンセルを行うJoinSet
+            let mut first_js = JoinSet::new();
+
+            // have to cancell some orders
+            if !should_cancelled_orderids.is_empty() {
+                let bbc2 = api_client.clone();
+                let pair2 = pair.clone();
+
+                first_js.spawn(async move {
+                    FirstJoinSetResponse::CancelResponse(
+                        bbc2.post_cancel_orders(&pair2.clone(), should_cancelled_orderids)
+                            .await,
+                    )
+                });
+            }
+
+            for sord in first_posted_orders {
+                let bbc2 = api_client.clone();
+                let pair2 = pair.clone();
+
+                first_js.spawn(async move {
+                    FirstJoinSetResponse::PostResponse(
+                        bbc2.post_order(
+                            &pair2,
+                            &sord.amount.to_string(),
+                            Some(&sord.price.to_string()),
+                            &sord.side,
+                            "limit",
+                            Some(true),
+                            None,
+                        )
+                        .await,
+                    )
+                });
+            }
+
+            while let Some(first_js_res) = first_js.join_next().await {
+                let fjsr = first_js_res.unwrap();
+
+                match fjsr {
+                    FirstJoinSetResponse::CancelResponse(bitbank_cancel_orders_response) => {
+                        log::info!(
+                            "cancel order response in first_joinset: {:?}",
+                            bitbank_cancel_orders_response
+                        );
+                    }
+                    FirstJoinSetResponse::PostResponse(bitbank_create_order_response) => {
+                        log::info!(
+                            "create order response in first_joinset: {:?}",
+                            bitbank_create_order_response
+                        );
+                    }
+                }
+            }
+
+            if !second_posted_orders.is_empty() {
+                let mut second_js = JoinSet::new();
+
+                for sord in second_posted_orders {
+                    let bbc2 = api_client.clone();
+                    let pair2 = pair.clone();
+                    second_js.spawn(async move {
+                        bbc2.post_order(
+                            &pair2,
+                            &sord.amount.to_string(),
+                            Some(&sord.price.to_string()),
+                            &sord.side,
+                            "limit",
+                            Some(true),
+                            None,
+                        )
+                        .await
+                    });
+                }
+
+                while let Some(second_js_res) = second_js.join_next().await {
+                    let bcor = second_js_res.unwrap();
+                    log::debug!("post order response in second_js: {:?}", bcor);
+                }
+            }
+
+            log::debug!(
+                "Replaced orders(concurrently) within {} ms.",
+                start.elapsed().as_millis()
+            );
         }
     }
 }
