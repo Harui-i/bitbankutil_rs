@@ -278,8 +278,10 @@ async fn main() {
         std::process::exit(-1);
     }
 
-    let bitbank_key: String = env::var("BITBANK_API_KEY").expect("there should be BITBANK_API_KEY in enviroment variables");
-    let bitbank_secret: String = env::var("BITBANK_API_SECRET").expect("there should be BITBANK_API_SECRET in environment variables");
+    let bitbank_key: String = env::var("BITBANK_API_KEY")
+        .expect("there should be BITBANK_API_KEY in enviroment variables");
+    let bitbank_secret: String = env::var("BITBANK_API_SECRET")
+        .expect("there should be BITBANK_API_SECRET in environment variables");
 
     let mut wsc = WebSocketConfig::default();
     wsc.refresh_after = Duration::from_secs(3600);

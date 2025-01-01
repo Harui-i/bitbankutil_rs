@@ -289,7 +289,7 @@ pub trait BotTrait {
                         if current_sord == *wanna_sord {
                             wanna_place_orders.remove(i);
                             break;
-                        } 
+                        }
                     }
                 }
             }
