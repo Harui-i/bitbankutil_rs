@@ -1,7 +1,7 @@
 use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankAssetsData, BitbankCancelOrderResponse,
     BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
-    BitbankSpotStatusResponse,
+    BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
@@ -248,6 +248,92 @@ impl BitbankPrivateApiClient {
         }
     }
 
+    // Fetch trade history: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-trade-history
+    pub async fn get_trade_history(
+        &self,
+        pair: Option<&str>,    // pair enum
+        count: Option<i64>,    // take limit (up to 1000)
+        order_id: Option<i64>, // order id
+        since: Option<i64>,    // since unix timestamp
+        end: Option<i64>,      // end unix time stamp
+        order: Option<&str>,   // histories in order(order enum: `asc` or `desc`, default to `desc`)
+    ) -> Result<BitbankTradeHistoryResponse, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+        let mut request_body = serde_json::Map::new();
+
+        if let Some(pair) = pair {
+            request_body.insert("pair".to_string(), serde_json::json!(pair));
+        }
+        if let Some(count) = count {
+            request_body.insert("count".to_string(), serde_json::json!(count));
+        }
+
+        if let Some(order_id) = order_id {
+            request_body.insert("order_id".to_string(), serde_json::json!(order_id));
+        }
+
+        if let Some(since) = since {
+            request_body.insert("since".to_string(), serde_json::json!(since));
+        }
+        if let Some(end) = end {
+            request_body.insert("end".to_string(), serde_json::json!(end));
+        }
+
+        if let Some(order) = order {
+            request_body.insert("order".to_string(), serde_json::json!(order));
+        }
+
+        let request_body = request_body; // immutalize
+
+        let res: Result<
+            serde_json::Value,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        > = self
+            .client
+            .get(
+                "/user/spot/trade_history",
+                Some(&serde_json::Value::Object(request_body)),
+                [BitbankOption::Default],
+            )
+            .await;
+
+        let duration = start_time.elapsed();
+        log::debug!("trade_history request took {:?}", duration);
+
+        match res {
+            Ok(res_val) => {
+                match serde_json::from_value::<BitbankTradeHistoryResponse>(res_val["data"].clone())
+                {
+                    Ok(bbthr) => Ok(bbthr),
+                    Err(e) => {
+                        log::error!("failed to convert res into BitbankTradeHistoryResponse. response: {:?}, Error: {}", res_val, e);
+                        Err(None)
+                    }
+                }
+            }
+            Err(x) => match x {
+                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
+                    err,
+                ) => {
+                    log::error!("error on get_trade_history: {:?}", err);
+                    Err(Some(err))
+                }
+                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(e) => {
+                    println!("BuildRequestError : {}", e);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(e) => {
+                    println!("ReceiveResponse: {}", e);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::SendRequest(e) => {
+                    println!("SendRequest: {}", e);
+                    Err(None)
+                }
+            },
+        }
+    }
+
     // Cancel order. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
     pub async fn post_cancel_order(
         &self,
@@ -469,7 +555,6 @@ impl BitbankPrivateApiClient {
         }
     }
 
-    // TODO
     // get exchange status. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
     pub async fn get_status(
         &self,
@@ -658,6 +743,20 @@ mod tests {
             .unwrap();
 
         log::info!("cancel orders respones: {:?}", cancel_orders_res);
+    }
+
+    #[tokio::test]
+    async fn test_get_trade_history() {
+        logging_init();
+        let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
+        let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
+        let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None);
+
+        let history = bb_client
+            .get_trade_history(Some("eth_jpy"), None, None, None, None, Some("asc"))
+            .await
+            .unwrap();
+        log::info!("Bitbank trade history: {:?}", history);
     }
 
     #[tokio::test]

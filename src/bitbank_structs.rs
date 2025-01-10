@@ -60,6 +60,32 @@ pub struct BitbankAssetsData {
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
+pub struct BitbankTradeHistoryDatum {
+    pub trade_id: Number,                  // trade id
+    pub pair: String,                      // pair enum
+    pub order_id: Number,                  // order id
+    pub side: String,                      // "buy" or "sell"
+    pub position_side: Option<String>,     // "long" or "short"
+    pub r#type: String, // one of "limit", "market", "stop", "stop_limit", "take_profit", "stop_loss"
+    pub amount: String, // amount
+    pub price: String,  // order price
+    pub maker_taker: String, // maker or taker
+    pub fee_amount_base: String, // base asset fee amount
+    pub fee_amount_quote: String, // quote asset fee amount
+    pub fee_occurred_amount_quote: String, // quote fee occurred amount which taken later. In case of spot trading, this value is same as fee_amount_quote
+    pub profit_loss: Option<String>,       // realized profit and loss
+    pub interest: Option<String>,          //  interest
+    pub executed_at: Number,               // order executed at unix timestamp (milliseconds)
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct BitbankTradeHistoryResponse {
+    pub trades: Vec<BitbankTradeHistoryDatum>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankCreateOrderResponse {
     pub order_id: Number,
     pub pair: String,

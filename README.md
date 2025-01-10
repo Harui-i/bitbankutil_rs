@@ -67,7 +67,7 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`POST /user/spot/orders_info`|❌️ |
 |`GET /user/spot/active_orders`|✅ |
 |`GET /user/margin/positions`|❌️ |
-|`GET /user/spot/trade_history`|❌️ |
+|`GET /user/spot/trade_history`|✅ |
 |`GET /user/deposit_history`|❌️ |
 |`GET /user/unconfirmed_deposits`|❌️ |
 |`GET /user/deposit_originators`|❌️ |
@@ -160,9 +160,9 @@ The developers of this project are not responsible for any losses incurred throu
 |`POST /user/spot/cancel_order`|✅ |
 |`POST /user/spot/cancel_orders`|✅ |
 |`POST /user/spot/orders_info`|❌️ |
-|`GET /user/spot/active_orders`|✅ |
+|`GET /user/spot/active_orders`|✅|
 |`GET /user/margin/positions`|❌️ |
-|`GET /user/spot/trade_history`|❌️ |
+|`GET /user/spot/trade_history`|✅|
 |`GET /user/deposit_history`|❌️ |
 |`GET /user/unconfirmed_deposits`|❌️ |
 |`GET /user/deposit_originators`|❌️ |
