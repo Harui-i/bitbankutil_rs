@@ -137,7 +137,7 @@ pub trait BotTrait {
                 }
             }
 
-            let _ = ws_task.await; // ws_taskの終了を待つ
+            let _ = ws_task.await; // Wait for the termination of ws_task
         }
     }
     fn on_transactions(
@@ -239,15 +239,15 @@ pub trait BotTrait {
         }
     }
 
-    /*   現在出されている注文と(`current_orders`)、あるべき注文の状態(`wanna_place_orders`)を受け取って、新規注文や注文のキャンセルを行う。
-    可能であれば(新規注文→キャンセルの順番に行っても十分な資金がある場合)、注文のキャンセルと新規注文は並列に処理される。
-    wanna_place_ordersで
+    /*   Receive the currently placed orders (`current_orders`) and the desired order state (`wanna_place_orders`), and perform new orders or order cancellations.
+    If possible (if there is enough funds to place new orders and then cancel orders), order cancellations and new orders are processed in parallel.
+    wanna_place_orders
 
-    `btc_free_amount`: 取引するペアの仮想通貨で、注文に出していない数量
-    `btc_locked_amount`取引するペアの仮想通貨で、注文に出している数量
+    `btc_free_amount`: The amount of the cryptocurrency of the trading pair that is not used for orders.
+    `btc_locked_amount`: The amount of the cryptocurrency of the trading pair that is used for orders.
 
-    `jpy_free_amount`: 注文に出していいない日本円の数量
-    `jpy_btc_locked_amount`: 取引するペアで注文に出している日本円の数量
+    `jpy_free_amount`: The amount of Japanese yen that is not used for orders.
+    `jpy_btc_locked_amount`: The amount of Japanese yen that is used for orders in the trading pair.
     */
     fn place_wanna_orders_concurrent(
         mut wanna_place_orders: Vec<SimplifiedOrder>,
@@ -280,10 +280,10 @@ pub trait BotTrait {
                     should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
                 }
                 // this current order is in wanna_place_orders. (i.e. already placed order)
-                // wanna_place_orders.contains(&current_sord) || current_sord.pair != pair
+                // wanna_place_orders.contains(¤t_sord) || current_sord.pair != pair
                 else {
-                    // wanna_place_ordersからcurrent_sordを削除する( O(wanna_place_orders.len())かかるが、wanna_place_orders.len()は十分小さいだろうしOK)
-                    // 一つだけ消したいので愚直に判定する
+                    // Remove current_sord from wanna_place_orders (It takes O(wanna_place_orders.len()), but wanna_place_orders.len() should be small enough, so it's OK)
+                    // Since we want to delete only one, we will judge it straightforwardly.
                     log::debug!("this order already exists: {:?}", current_sord);
                     for (i, wanna_sord) in wanna_place_orders.iter().enumerate() {
                         if current_sord == *wanna_sord {
@@ -300,7 +300,7 @@ pub trait BotTrait {
             let mut first_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
             let mut second_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
 
-            // wanna_place_ordersの順序が出したい注文の優先度だとする。
+            // Assume that the order of wanna_place_orders is the priority of the orders you want to place.
             for sord in wanna_place_orders {
                 if sord.side == "buy" {
                     let consumed_jpy = sord.amount * sord.price;
@@ -347,7 +347,7 @@ pub trait BotTrait {
                 ),
             }
 
-            // first_posted_ordersの注文と、should_cancelled_orderidsのキャンセルを行うJoinSet
+            // JoinSet that places orders in first_posted_orders and cancels orders in should_cancelled_orderids.
             let mut first_js = JoinSet::new();
 
             // have to cancell some orders
