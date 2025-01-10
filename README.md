@@ -43,7 +43,7 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 
 # API Coverage
 
-## Public API
+## Public API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md))
 
 | Endpoint                    | Status | 
 | --------------------------- | ----------- | 
@@ -55,7 +55,7 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`GET /{pair}/candlestick/{candle-type}/{YYYY}`|❌ |
 |`GET /{pair}/circut_break_info`|❌ |
 
-## REST API
+## REST API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md))
 
 | Endpoint                    | Status | 
 | --------------------------- | ----------- | 
@@ -138,7 +138,7 @@ The developers of this project are not responsible for any losses incurred throu
 
 # API カバレッジ
 
-## Public API
+## Public API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md))
 
 | エンドポイント                    | 実装状況 | 
 | --------------------------- | ----------- | 
@@ -150,7 +150,7 @@ The developers of this project are not responsible for any losses incurred throu
 |`GET /{pair}/candlestick/{candle-type}/{YYYY}`|❌ |
 |`GET /{pair}/circut_break_info`|❌ |
 
-## REST API
+## REST API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md))
 
 | エンドポイント                    | 実装状況 | 
 | --------------------------- | ----------- | 
