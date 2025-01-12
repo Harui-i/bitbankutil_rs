@@ -210,7 +210,7 @@ impl MyBot {
             log::info!("evaluated asset: {}", btc_amount * sell_price + jpy_amount);
             {
                 let bb_client = self.bb_api_client.clone();
-                MyBot::place_wanna_orders_concurrent(
+                bitbankutil_rs::bitbank_bot::place_wanna_orders_concurrent(
                     wanna_place_orders,
                     active_orders_info.orders,
                     btc_free_amount,
