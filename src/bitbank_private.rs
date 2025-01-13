@@ -34,12 +34,12 @@ impl BitbankPrivateApiClient {
         }
 
         // check whether authentication option is set.
-        assert_eq!(client.default_options().http_auth, true);
+        assert_eq!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).http_auth, true);
 
-        assert_eq!(client.default_options().http_url, BitbankHttpUrl::Private);
+        assert_eq!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).http_url, BitbankHttpUrl::Private);
 
-        assert_ne!(client.default_options().key, Some("".to_owned()));
-        assert_ne!(client.default_options().secret, Some("".to_owned()));
+        assert_ne!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).key, Some("".to_owned()));
+        assert_ne!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).secret, Some("".to_owned()));
 
         BitbankPrivateApiClient { client: client }
     }
