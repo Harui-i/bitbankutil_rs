@@ -220,22 +220,22 @@ pub mod bybit {
     #[derive(Deserialize, Debug)]
     #[allow(non_snake_case, dead_code)]
     pub struct BybitOrderbookWebSocketMessage {
-        topic: String,  // topic, like "publicTrade.BTCUSDT"
-        r#type: String, // Data type. snapshot
+        pub topic: String,  // topic, like "publicTrade.BTCUSDT"
+        pub r#type: String, // Data type. `snapshot`, `delta`
         pub ts: i64,    // timestamp
-        pub data: serde_json::Value,
+        pub data: BybitOrderbookData,
         cts: Number, // The timestamp from the match engine when this orderbook data is produced. It can be correlated with T from public trade channel
     }
 
     #[derive(Deserialize, Debug)]
     #[allow(non_snake_case, dead_code)]
     pub struct BybitOrderbookData {
-        s: String,           // symbol
-        b: Vec<Vec<String>>, // bids
-        a: Vec<Vec<String>>, // asks
-        u: i64,              // Update ID. Is a sequence. Occasionally, you'll receive "u"=1,
+        pub s: String,           // symbol
+        pub b: Vec<Vec<String>>, // bids
+        pub a: Vec<Vec<String>>, // asks
+        pub u: i64,              // Update ID. Is a sequence. Occasionally, you'll receive "u"=1,
         // which is a snapshot data due to the restart of the service. So please overwrite your local orderbook
-        seq: i64, // Cross sequenc.
+        pub seq: i64, // Cross sequenc.
                   //You can use this field to compare different levels orderbook data, and for the smaller seq, then it means the data is generated earlier.
     }
 
