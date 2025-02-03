@@ -202,7 +202,7 @@ pub fn place_wanna_orders(
             }
             let cancel_order_response = cancel_order_response_result.unwrap();
 
-            log::info!(
+            log::debug!(
                 "cancel current orders. response: {:?}",
                 cancel_order_response
             );
@@ -233,7 +233,7 @@ pub fn place_wanna_orders(
                 Option<crypto_botters::bitbank::BitbankHandleError>,
             > = js_res.unwrap();
 
-            log::info!("order result: {:?}", bcor);
+            log::debug!("order result: {:?}", bcor);
         }
 
         log::debug!("Replaced orders within {} ms.", start.elapsed().as_millis());
@@ -389,13 +389,13 @@ pub fn place_wanna_orders_concurrent(
 
             match fjsr {
                 FirstJoinSetResponse::CancelResponse(bitbank_cancel_orders_response) => {
-                    log::info!(
+                    log::debug!(
                         "cancel order response in first_joinset: {:?}",
                         bitbank_cancel_orders_response
                     );
                 }
                 FirstJoinSetResponse::PostResponse(bitbank_create_order_response) => {
-                    log::info!(
+                    log::debug!(
                         "create order response in first_joinset: {:?}",
                         bitbank_create_order_response
                     );
