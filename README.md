@@ -79,7 +79,7 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`GET /spot/status`|✅ |
 |`GET /spot/pairs`|❌️ |
 
-## Usage
+# Usage
 
 Add the following to the `[dependencies]` section of your `Cargo.toml` file:
 
@@ -174,7 +174,7 @@ The developers of this project are not responsible for any losses incurred throu
 |`GET /spot/status`|️✅ |
 |`GET /spot/pairs`|❌️ |
 
-## 使い方
+# 使い方
 
 `Cargo.toml`の`[dependencies]`の欄に
 ```
