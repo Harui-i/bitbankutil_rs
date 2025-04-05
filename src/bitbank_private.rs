@@ -1,7 +1,7 @@
 use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankAssetsData, BitbankCancelOrderResponse,
-    BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
-    BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
+    BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
+    BitbankGetOrderResponse, BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
@@ -611,6 +611,75 @@ impl BitbankPrivateApiClient {
             },
         }
     }
+
+    // Get channel and token for private stream. cf: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#private-stream
+    pub async fn get_channel_and_token(
+        &self,
+    ) -> Result<BitbankChannelAndTokenResponse, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+
+        let res: Result<
+            serde_json::Value,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        > = self
+            .client
+            .get_no_query("/user/subscribe", [BitbankOption::Default])
+            .await;
+        let duration = start_time.elapsed();
+        log::debug!("get_status request took {:?}", duration);
+
+        match res {
+            Ok(res_val) => {
+                log::info!("get_channel_and_token response: {:?}", res_val);
+                match serde_json::from_value::<BitbankChannelAndTokenResponse>(
+                    res_val["data"].clone(),
+                ) {
+                    Ok(res) => {
+                        log::info!("channel and token: {:?}", res);
+                        Ok(res)
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "failed to convert response value into channel and token. res_val: {:?}, err: {:?}",
+                            res_val,
+                            err
+                        );
+
+                        Err(None)
+                    }
+                }
+            }
+            Err(err) => match err {
+                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
+                    log::error!("Send request error on get_channel_and_token: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
+                    log::error!(
+                        "Receive response error on get_channel_and_token: {:?}",
+                        error
+                    );
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
+                    error,
+                ) => {
+                    log::error!("Build request error on get_channel_and_token: {:?}", error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
+                    error,
+                ) => {
+                    log::error!(
+                        "Response handle error on get_channel_and_token: {:?}",
+                        error
+                    );
+
+                    Err(Some(error))
+                }
+            },
+        }
+    }
 }
 
 // if you want to see stdout in succeed test, you should do `RUST_LOG=debug cargo test -- --nocapture`
@@ -768,6 +837,18 @@ mod tests {
 
         let status = bb_client.get_status().await.unwrap();
         log::info!("Bitbank spot status: {:?}", status);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_and_token() {
+        logging_init();
+        let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
+        let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
+        let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None);
+
+        let channel_and_token = bb_client.get_channel_and_token().await;
+        log::info!("Bitbank channel and token: {:?}", channel_and_token);
+        assert!(channel_and_token.is_ok());
     }
 
     // intentionaly exceed Rate Limit. if you want to run it, you should add `-- --ignored` option like: `cargo test -- --ignored`.

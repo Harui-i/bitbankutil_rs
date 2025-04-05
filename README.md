@@ -78,6 +78,11 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`GET /user/withdrawal_history`|❌️ |
 |`GET /spot/status`|✅ |
 |`GET /spot/pairs`|❌️ |
+|`GET /user/subscribe`| ✅ |
+
+# Planned feature enhancements
+
+- Private Streaming API 
 
 # Usage
 
@@ -173,6 +178,11 @@ The developers of this project are not responsible for any losses incurred throu
 |`GET /user/withdrawal_history`|❌️ |
 |`GET /spot/status`|️✅ |
 |`GET /spot/pairs`|❌️ |
+|`GET /user/subscribe`| ✅ |
+
+# 今後の実装予定
+
+- Private Streaming APIへの対応
 
 # 使い方
 
