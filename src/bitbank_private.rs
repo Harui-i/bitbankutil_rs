@@ -626,8 +626,7 @@ impl BitbankPrivateApiClient {
             .get_no_query("/user/subscribe", [BitbankOption::Default])
             .await;
         let duration = start_time.elapsed();
-        log::debug!("get_status request took {:?}", duration);
-
+        log::debug!("get_channel_and_token request took {:?}", duration);
         match res {
             Ok(res_val) => {
                 log::info!("get_channel_and_token response: {:?}", res_val);
