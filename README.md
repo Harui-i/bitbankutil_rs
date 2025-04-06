@@ -78,8 +78,13 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`GET /user/withdrawal_history`|❌️ |
 |`GET /spot/status`|✅ |
 |`GET /spot/pairs`|❌️ |
+|`GET /user/subscribe`| ✅ |
 
-## Usage
+# Planned feature enhancements
+
+- Private Streaming API 
+
+# Usage
 
 Add the following to the `[dependencies]` section of your `Cargo.toml` file:
 
@@ -173,8 +178,13 @@ The developers of this project are not responsible for any losses incurred throu
 |`GET /user/withdrawal_history`|❌️ |
 |`GET /spot/status`|️✅ |
 |`GET /spot/pairs`|❌️ |
+|`GET /user/subscribe`| ✅ |
 
-## 使い方
+# 今後の実装予定
+
+- Private Streaming APIへの対応
+
+# 使い方
 
 `Cargo.toml`の`[dependencies]`の欄に
 ```

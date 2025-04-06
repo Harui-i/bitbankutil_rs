@@ -165,6 +165,13 @@ pub struct BitbankActiveOrdersResponse {
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
+pub struct BitbankChannelAndTokenResponse {
+    pub pubnub_channel: String,
+    pub pubnub_token: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankSpotStatus {
     pub pair: String,
     pub status: String,

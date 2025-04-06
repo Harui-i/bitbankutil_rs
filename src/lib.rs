@@ -222,7 +222,7 @@ pub mod bybit {
     pub struct BybitOrderbookWebSocketMessage {
         pub topic: String,  // topic, like "publicTrade.BTCUSDT"
         pub r#type: String, // Data type. `snapshot`, `delta`
-        pub ts: i64,    // timestamp
+        pub ts: i64,        // timestamp
         pub data: BybitOrderbookData,
         cts: Number, // The timestamp from the match engine when this orderbook data is produced. It can be correlated with T from public trade channel
     }
@@ -236,7 +236,7 @@ pub mod bybit {
         pub u: i64,              // Update ID. Is a sequence. Occasionally, you'll receive "u"=1,
         // which is a snapshot data due to the restart of the service. So please overwrite your local orderbook
         pub seq: i64, // Cross sequenc.
-                  //You can use this field to compare different levels orderbook data, and for the smaller seq, then it means the data is generated earlier.
+                      //You can use this field to compare different levels orderbook data, and for the smaller seq, then it means the data is generated earlier.
     }
 
     pub struct BybitDepth {
