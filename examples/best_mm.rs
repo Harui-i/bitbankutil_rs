@@ -16,10 +16,24 @@ struct MyBot {
     lot: Decimal,
     max_lot: Decimal,
     bb_api_client: BitbankPrivateApiClient,
-    last_updated: u128,
+}
+
+struct MyBotState {
     depth: BitbankDepth,
+    last_updated: u128,
     last_bestbid: Decimal,
     last_bestask: Decimal,
+}
+
+impl MyBotState {
+    fn new() -> MyBotState {
+        MyBotState {
+            depth: BitbankDepth::new(),
+            last_updated: 0,
+            last_bestbid: Decimal::zero(),
+            last_bestask: Decimal::zero(),
+        }
+    }
 }
 
 impl MyBot {
@@ -39,36 +53,34 @@ impl MyBot {
             lot,
             max_lot,
             bb_api_client: BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None),
-
-            last_updated: 0,
-            depth: BitbankDepth::new(),
-            last_bestask: Decimal::zero(),
-            last_bestbid: Decimal::zero(),
         }
     }
 
-    async fn update_orders(&mut self) {
+    async fn update_orders(&self, state: MyBotState) -> MyBotState {
         let now_inst = std::time::Instant::now();
         let now: u128 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
 
-        assert!(self.last_updated <= now);
+        assert!(state.last_updated <= now);
 
-        if now - self.last_updated >= self.refresh_cycle {
+        let mut state = state; // make it mutable
+
+        if now - state.last_updated >= self.refresh_cycle {
             log::info!(
                 "{} milliseconds have passed since the last order update",
-                now - self.last_updated
+                now - state.last_updated
             );
 
-            if !self.depth.is_complete() {
+            if !state.depth.is_complete() {
                 log::info!("depth is not complete");
-                return;
+                return state;
             }
 
             // update `self.last_updated` here, in order to prevent call api too frequently
-            self.last_updated = SystemTime::now()
+            // mutable reference needed here.
+            state.last_updated = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis();
@@ -92,7 +104,7 @@ impl MyBot {
 
             if let Err(err) = active_orders_info_res {
                 log::error!("order info cannot get properly due to an error : {:?}", err);
-                return;
+                return state;
             }
             let active_orders_info = active_orders_info_res.unwrap();
 
@@ -101,7 +113,7 @@ impl MyBot {
                     "current asset cannot get properly due to an error: {:?}",
                     err
                 );
-                return;
+                return state;
             }
             let current_asset = current_asset_res.unwrap();
 
@@ -149,8 +161,8 @@ impl MyBot {
                 jpy_amount
             );
 
-            let best_ask_price = self.depth.best_ask().unwrap().0.clone();
-            let best_bid_price = self.depth.best_bid().unwrap().0.clone();
+            let best_ask_price = state.depth.best_ask().unwrap().0.clone();
+            let best_bid_price = state.depth.best_bid().unwrap().0.clone();
 
             let has_bestask_order = active_orders_info.clone().orders.iter().any(|ord| {
                 ord.side == "sell"
@@ -225,40 +237,53 @@ impl MyBot {
             "update_orders has finished within {} ms",
             now_inst.elapsed().as_millis()
         );
+
+        state
     }
 }
 
-impl BotTrait for MyBot {
+impl BotTrait<MyBotState> for MyBot {
     async fn on_transactions(
-        &mut self,
+        &self,
         transactions: &Vec<bitbankutil_rs::bitbank_structs::BitbankTransactionDatum>,
-    ) {
+        state: MyBotState,
+    ) -> MyBotState {
         log::debug!("transaction updated: {:?}", transactions);
 
-        self.update_orders().await;
+        let state = self.update_orders(state).await;
+
+        state
     }
 
-    async fn on_depth_update(&mut self, depth: &bitbankutil_rs::bitbank_structs::BitbankDepth) {
+    async fn on_depth_update(
+        &self,
+        depth: &bitbankutil_rs::bitbank_structs::BitbankDepth,
+        state: MyBotState,
+    ) -> MyBotState {
         log::debug!("depth updated");
+
+        let mut state = state;
 
         if depth.is_complete() {
             let bestask = depth.best_ask().unwrap().0.clone();
             let bestbid = depth.best_bid().unwrap().0.clone();
 
-            if bestask != self.last_bestask || bestbid != self.last_bestbid {
+            if bestask != state.last_bestask || bestbid != state.last_bestbid {
                 log::debug!(
                     "best ask diff: {}, best bid diff: {}",
-                    bestask - self.last_bestask,
-                    bestbid - self.last_bestbid
+                    bestask - state.last_bestask,
+                    bestbid - state.last_bestbid
                 );
-                self.last_bestask = bestask;
-                self.last_bestbid = bestbid;
+                state.last_bestask = bestask;
+                state.last_bestbid = bestbid;
             }
 
-            self.update_orders().await;
+            state = self.update_orders(state).await;
         }
 
-        self.depth = depth.clone();
+        state.depth = depth.clone();
+
+        state
     }
 }
 
@@ -296,7 +321,7 @@ async fn main() {
 
     assert!(lot <= max_lot);
 
-    let mut bot = MyBot::new(
+    let bot = MyBot::new(
         bitbank_key,
         bitbank_secret,
         pair.clone(),
@@ -306,8 +331,10 @@ async fn main() {
         max_lot,
     );
 
+    let initial_state = MyBotState::new();
+
     let _bot_task = tokio::spawn(async move {
-        bot.run(pair.clone(), vec![], wsc).await;
+        bot.run(pair.clone(), vec![], wsc, initial_state).await;
     })
     .await
     .unwrap();
