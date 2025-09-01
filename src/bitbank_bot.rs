@@ -23,18 +23,21 @@ pub struct SimplifiedOrder {
     pub price: Decimal,
 }
 
-pub trait BotTrait {
+pub trait BotTrait<T> {
     // async fn run(...);
     fn run(
-        &mut self,
+        &self,
         pair: String,
         client_options: Vec<BitbankOption>,
         wsc: WebSocketConfig,
+        initial_state: T,
     ) -> impl std::future::Future<Output = ()> + Send
     where
         Self: Sync + Send,
+        T: Sync + Send,
     {
         async {
+            let mut state = initial_state;
             let mut ws_client = Client::new();
 
             for option in client_options {
@@ -62,6 +65,7 @@ pub trait BotTrait {
                             let msg: serde_json::Value =
                                 serde_json::from_value(val[1].clone()).unwrap();
 
+                            // メッセージのディスパッチ
                             if room_name.starts_with("transactions") {
                                 let transaction_message: BitbankTransactionMessage =
                                     serde_json::from_value(msg["message"].clone()).unwrap();
@@ -116,14 +120,14 @@ pub trait BotTrait {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     BotMessage::Transactions(transactions) => {
-                        self.on_transactions(&transactions).await;
+                        state = self.on_transactions(&transactions, state).await;
                     }
 
                     BotMessage::DepthDiff(depth_diff) => {
                         depth.insert_diff(depth_diff);
 
                         if depth.is_complete() {
-                            self.on_depth_update(&depth).await;
+                            state = self.on_depth_update(&depth, state).await;
                         }
                     }
 
@@ -131,7 +135,7 @@ pub trait BotTrait {
                         depth.update_whole(depth_whole);
 
                         if depth.is_complete() {
-                            self.on_depth_update(&depth).await;
+                            state = self.on_depth_update(&depth, state).await;
                         }
                     }
                 }
@@ -141,13 +145,15 @@ pub trait BotTrait {
         }
     }
     fn on_transactions(
-        &mut self,
+        &self,
         transactions: &Vec<BitbankTransactionDatum>,
-    ) -> impl std::future::Future<Output = ()> + Send;
+        state: T,
+    ) -> impl std::future::Future<Output = T> + Send;
     fn on_depth_update(
-        &mut self,
+        &self,
         depth: &BitbankDepth,
-    ) -> impl std::future::Future<Output = ()> + Send;
+        state: T,
+    ) -> impl std::future::Future<Output = T> + Send;
 }
 
 // Replace active orders

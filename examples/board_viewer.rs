@@ -13,15 +13,18 @@ impl MyBot {
     }
 }
 
-impl BotTrait for MyBot {
+impl BotTrait<()> for MyBot {
     async fn on_transactions(
-        &mut self,
+        &self,
         _transactions: &Vec<bitbankutil_rs::bitbank_structs::BitbankTransactionDatum>,
-    ) {
+        _state: ()
+    ) -> (){
+        ()
     }
 
-    async fn on_depth_update(&mut self, depth: &bitbankutil_rs::bitbank_structs::BitbankDepth) {
+    async fn on_depth_update(&self, depth: &bitbankutil_rs::bitbank_structs::BitbankDepth, _state: ()) {
         log::info!("{}", depth);
+        ()
     }
 }
 
@@ -45,10 +48,10 @@ async fn main() {
     let wsc = wsc; // make it immutable
 
     let pair = args[1].clone();
-    let mut bot = MyBot::new();
+    let bot = MyBot::new();
 
     let _bot_task = tokio::spawn(async move {
-        bot.run(pair.clone(), vec![], wsc).await;
+        bot.run(pair.clone(), vec![], wsc, ()).await;
     })
     .await
     .unwrap();
