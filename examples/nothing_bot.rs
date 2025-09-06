@@ -17,12 +17,16 @@ impl BotTrait<()> for MyBot {
     async fn on_transactions(
         &self,
         _transactions: &Vec<bitbankutil_rs::bitbank_structs::BitbankTransactionDatum>,
-        _state: ()
-    ) -> (){
+        _state: (),
+    ) -> () {
         ()
     }
 
-    async fn on_depth_update(&self, _depth: &bitbankutil_rs::bitbank_structs::BitbankDepth, _state: ()) {
+    async fn on_depth_update(
+        &self,
+        _depth: &bitbankutil_rs::bitbank_structs::BitbankDepth,
+        _state: (),
+    ) {
         ()
     }
 }

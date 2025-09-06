@@ -189,7 +189,6 @@ pub struct BitbankTransactionDatum {
     pub transaction_id: i64,
 }
 
-
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthDiff {

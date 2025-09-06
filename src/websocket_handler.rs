@@ -1,7 +1,7 @@
 use crate::bitbank_bot::BotMessage;
 use crate::bitbank_structs::websocket_struct::BitbankWebSocketMessage;
 use crate::bitbank_structs::{
-    BitbankDepthDiff, BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionsData
+    BitbankDepthDiff, BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionsData,
 };
 use crypto_botters::{
     bitbank::BitbankOption, generic_api_client::websocket::WebSocketConfig, Client,
@@ -34,16 +34,17 @@ pub async fn run_websocket(
         .websocket(
             "",
             move |val: serde_json::Value| {
-                let ws_msg: BitbankWebSocketMessage = serde_json::from_value(val[1].clone()).unwrap();
+                let ws_msg: BitbankWebSocketMessage =
+                    serde_json::from_value(val[1].clone()).unwrap();
                 let room_name = ws_msg.room_name;
 
                 // dispatch according to room_name
                 if room_name.starts_with("ticker") {
-                    let ticker: BitbankTickerResponse = serde_json::from_value(ws_msg.message.data).unwrap();
+                    let ticker: BitbankTickerResponse =
+                        serde_json::from_value(ws_msg.message.data).unwrap();
                     log::debug!("ticker: {:?}", ticker);
                     // TODO: make tx, spawn(send ticker to bot)
-                }
-                else if room_name.starts_with("transactions") {
+                } else if room_name.starts_with("transactions") {
                     let transaction_message: BitbankTransactionsData =
                         serde_json::from_value(ws_msg.message.data).unwrap();
                     let transactions = transaction_message.transactions;
@@ -77,11 +78,9 @@ pub async fn run_websocket(
                             .await
                             .unwrap();
                     });
-                }
-                else if room_name.starts_with("circuit_break_info") {
+                } else if room_name.starts_with("circuit_break_info") {
                     log::debug!("circuit_break_info: {:?}", ws_msg.message);
-                }
-                else {
+                } else {
                     panic!("unknown room name: {}", room_name);
                 }
             },

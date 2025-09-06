@@ -5,7 +5,6 @@ pub struct BitbankWebSocketMessage {
     pub room_name: String,
 }
 
-
 #[allow(dead_code, non_snake_case)]
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankWebSocketContent {

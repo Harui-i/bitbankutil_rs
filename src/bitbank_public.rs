@@ -5,9 +5,7 @@ use crypto_botters::{
     Client,
 };
 
-use crate::bitbank_structs::{
-    BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum,
-};
+use crate::bitbank_structs::{BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum};
 
 #[derive(Clone)]
 pub struct BitbankPublicApiClient {
@@ -106,7 +104,8 @@ impl BitbankPublicApiClient {
 
         match res {
             Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone()) {
+                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone())
+                {
                     Ok(vecbbtr) => Ok(vecbbtr),
                     Err(err) => {
                         log::error!(
@@ -164,7 +163,8 @@ impl BitbankPublicApiClient {
 
         match res {
             Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone()) {
+                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone())
+                {
                     Ok(vecbbtr) => Ok(vecbbtr),
                     Err(err) => {
                         log::error!(
