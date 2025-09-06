@@ -80,6 +80,16 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`GET /spot/pairs`|❌️ |
 |`GET /user/subscribe`| ✅ |
 
+## Public Stream API
+
+| channel | status | 
+| --------------------------- | ----------- | 
+|`ticker_{pair}`|✅ |
+|`transactions_{pair}`|✅ |
+|`depth_diff_{pair}`|✅ |
+|`depth_whole_{pair}`|✅ |
+|`circuit_break_info_{pair}`|✅ |
+
 # Planned feature enhancements
 
 - Private Streaming API 
@@ -179,6 +189,17 @@ The developers of this project are not responsible for any losses incurred throu
 |`GET /spot/status`|️✅ |
 |`GET /spot/pairs`|❌️ |
 |`GET /user/subscribe`| ✅ |
+
+## Public Stream API
+
+|チャンネル | 実装状況 | 
+| --------------------------- | ----------- | 
+|`ticker_{pair}`|✅ |
+|`transactions_{pair}`|✅ |
+|`depth_diff_{pair}`|✅ |
+|`depth_whole_{pair}`|✅ |
+|`circuit_break_info_{pair}`|✅ |
+
 
 # 今後の実装予定
 
