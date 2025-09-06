@@ -5,7 +5,9 @@ use crypto_botters::{
     Client,
 };
 
-use crate::bitbank_structs::{BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum};
+use crate::bitbank_structs::{
+    BitbankCircuitBreakInfo, BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum,
+};
 
 #[derive(Clone)]
 pub struct BitbankPublicApiClient {
@@ -348,6 +350,79 @@ impl BitbankPublicApiClient {
             },
         }
     }
+
+    pub async fn get_circuit_break_info(
+        &self,
+        pair: &str,
+    ) -> Result<BitbankCircuitBreakInfo, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+        let res: Result<
+            serde_json::Value,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        > = self
+            .client
+            .get(
+                &format!("/{}/circuit_break_info", pair),
+                Some(&serde_json::json!({"pair": pair})),
+                [BitbankOption::Default],
+            )
+            .await;
+        let duration = start_time.elapsed();
+        log::debug!("get_circuit_break_info request took {:?}", duration);
+
+        match res {
+            Ok(res_val) => {
+                match serde_json::from_value::<BitbankCircuitBreakInfo>(res_val["data"].clone()) {
+                    Ok(info) => Ok(info),
+                    Err(err) => {
+                        log::error!(
+                            "failed to convert response value into BitbankCircuitBreakInfo.\
+                            res_val: {:?}, Error: {:?}",
+                            res_val.clone(),
+                            err
+                        );
+
+                        Err(None)
+                    }
+                }
+            }
+            Err(err) => match err {
+                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
+                    log::error!(
+                        "Send request error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
+
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
+                    log::error!(
+                        "Receive response error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
+                    error,
+                ) => {
+                    log::error!(
+                        "Build request error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
+                    error,
+                ) => {
+                    log::error!(
+                        "Bitbank handle error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
+                    Err(Some(error))
+                }
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -416,5 +491,16 @@ mod tests {
         let mut depth = BitbankDepth::new();
         depth.update_whole(res.unwrap());
         log::debug!("{}", depth);
+    }
+
+    #[tokio::test]
+    async fn test_public_get_circuit_break_info() {
+        logging_init();
+        let public_client = BitbankPublicApiClient::new();
+        let res = public_client.get_circuit_break_info("eth_jpy").await;
+        log::debug!("{:?}", res);
+        assert!(res.is_ok());
+        let circuit_break_info = res.unwrap();
+        log::debug!("Circuit Break Info: {:?}", circuit_break_info);
     }
 }

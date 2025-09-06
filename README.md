@@ -53,7 +53,7 @@ pair, tick size, order refresh interval (milliseconds), order size, and maximum 
 |`GET /{pair}/depth`|✅ |
 |`GET /{pair}/transactions/{YYYYMMDD}`|✅ |
 |`GET /{pair}/candlestick/{candle-type}/{YYYY}`|❌ |
-|`GET /{pair}/circut_break_info`|❌ |
+|`GET /{pair}/circuit_break_info`|✅ |
 
 ## REST API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md))
 
@@ -163,7 +163,7 @@ The developers of this project are not responsible for any losses incurred throu
 |`GET /{pair}/depth`|✅ |
 |`GET /{pair}/transactions/{YYYYMMDD}`|✅ |
 |`GET /{pair}/candlestick/{candle-type}/{YYYY}`|❌ |
-|`GET /{pair}/circut_break_info`|❌ |
+|`GET /{pair}/circuit_break_info`| ✅ |
 
 ## REST API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md))
 
