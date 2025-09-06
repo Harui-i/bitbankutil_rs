@@ -2,6 +2,8 @@ pub mod bitbank_bot;
 pub mod bitbank_private;
 pub mod bitbank_public;
 pub mod bitbank_structs;
+pub mod order_manager;
+pub mod websocket_handler;
 
 pub mod depth {
     use core::fmt;

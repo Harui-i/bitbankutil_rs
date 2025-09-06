@@ -1,7 +1,7 @@
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitbankutil_rs::bitbank_bot::{BotTrait, SimplifiedOrder};
+use bitbankutil_rs::bitbank_bot::BotTrait;
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_structs::BitbankDepth;
 use bitbankutil_rs::depth::Depth;
@@ -201,7 +201,7 @@ impl MyBot {
             let mut wanna_place_orders = Vec::new();
 
             if can_buy {
-                wanna_place_orders.push(SimplifiedOrder {
+                wanna_place_orders.push(bitbankutil_rs::order_manager::SimplifiedOrder {
                     pair: self.pair.clone(),
                     side: "buy".to_owned(),
                     amount: self.lot,
@@ -210,7 +210,7 @@ impl MyBot {
             }
 
             if can_sell {
-                wanna_place_orders.push(SimplifiedOrder {
+                wanna_place_orders.push(bitbankutil_rs::order_manager::SimplifiedOrder {
                     pair: self.pair.clone(),
                     side: "sell".to_owned(),
                     amount: self.lot + btc_amount_remainder,
@@ -222,7 +222,7 @@ impl MyBot {
             log::info!("evaluated asset: {}", btc_amount * sell_price + jpy_amount);
             {
                 let bb_client = self.bb_api_client.clone();
-                bitbankutil_rs::bitbank_bot::place_wanna_orders_concurrent(
+               bitbankutil_rs::order_manager::place_wanna_orders_concurrent(
                     wanna_place_orders,
                     active_orders_info.orders,
                     btc_free_amount,

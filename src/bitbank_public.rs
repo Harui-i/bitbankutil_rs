@@ -6,7 +6,7 @@ use crypto_botters::{
 };
 
 use crate::bitbank_structs::{
-    BitbankDepthWhole, BitbankTickerResponse, BitbankTickersDatum, BitbankTransactionDatum,
+    BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum,
 };
 
 #[derive(Clone)]
@@ -91,7 +91,7 @@ impl BitbankPublicApiClient {
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
     pub async fn get_tickers(
         &self,
-    ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
+    ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
             serde_json::Value,
@@ -106,11 +106,11 @@ impl BitbankPublicApiClient {
 
         match res {
             Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickersDatum>>(res_val["data"].clone()) {
+                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone()) {
                     Ok(vecbbtr) => Ok(vecbbtr),
                     Err(err) => {
                         log::error!(
-                            "failed to convert response value into Vec<BitbankTickersDatum>. \
+                            "failed to convert response value into Vec<BitbankTickerResponse>. \
                             res_val: {:?}, Error: {:?}",
                             res_val.clone(),
                             err
@@ -149,7 +149,7 @@ impl BitbankPublicApiClient {
     //https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
     pub async fn get_tickers_jpy(
         &self,
-    ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
+    ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
             serde_json::Value,
@@ -164,11 +164,11 @@ impl BitbankPublicApiClient {
 
         match res {
             Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickersDatum>>(res_val["data"].clone()) {
+                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone()) {
                     Ok(vecbbtr) => Ok(vecbbtr),
                     Err(err) => {
                         log::error!(
-                            "failed to convert response value into Vec<BitbankTickersDatum>. \
+                            "failed to convert response value into Vec<BitbankTickerResponse>. \
                             res_val: {:?}, Error: {:?}",
                             res_val.clone(),
                             err
