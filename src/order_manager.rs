@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use crate::{
     bitbank_private::BitbankPrivateApiClient,
-    bitbank_structs::{BitbankCreateOrderResponse, BitbankGetOrderResponse, BitbankCancelOrdersResponse},
+    bitbank_structs::{
+        BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
+    },
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
