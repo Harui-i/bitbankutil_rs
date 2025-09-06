@@ -6,25 +6,12 @@ use std::fmt;
 
 use crate::depth::Depth;
 
-// https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
-#[allow(dead_code)]
-#[derive(serde::Deserialize, Debug, Clone)]
-pub struct BitbankTickerResponse {
-    pub sell: Option<String>, // the lowest price of sell orders
-    pub buy: Option<String>,  // the highest price of buy orders
-    pub high: String,         // the highest price in last 24 hours
-    pub low: String,          // thw lowest price in last 24 hours
-    pub open: String,         // the open price at 24 hours ago
-    pub last: String,         // the latest price executed
-    pub vol: String,          // trading volume in last 24 hours
-    pub timestamp: Number,    // ticked at unix timestamp (milliseconds)
-}
+pub mod websocket_struct;
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
 #[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
-pub struct BitbankTickersDatum {
-    pub pair: String,         // pair enum
+pub struct BitbankTickerResponse {
     pub sell: Option<String>, // the lowest price of sell orders
     pub buy: Option<String>,  // the highest price of buy orders
     pub high: String,         // the highest price in last 24 hours
@@ -186,19 +173,6 @@ pub struct BitbankSpotStatusResponse {
 
 #[allow(dead_code, non_snake_case)]
 #[derive(Deserialize, Debug, Clone)]
-pub struct BitbankWebSocketMessage {
-    pub message: serde_json::Value,
-    pub room_name: String,
-}
-
-#[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug, Clone)]
-pub struct BitbankTransactionMessage {
-    pub data: BitbankTransactionsData,
-}
-
-#[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTransactionsData {
     pub transactions: Vec<BitbankTransactionDatum>,
 }
@@ -215,17 +189,6 @@ pub struct BitbankTransactionDatum {
     pub transaction_id: i64,
 }
 
-#[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug, Clone)]
-pub struct BitbankDepthDiffMessage {
-    pub data: BitbankDepthDiff,
-}
-
-#[allow(dead_code, non_snake_case)]
-#[derive(Deserialize, Debug, Clone)]
-pub struct BitbankDepthWholeMessage {
-    pub data: BitbankDepthWhole,
-}
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
