@@ -5,7 +5,9 @@ use crypto_botters::{
     Client,
 };
 
-use crate::bitbank_structs::{BitbankCircuitBreakInfo, BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum};
+use crate::bitbank_structs::{
+    BitbankCircuitBreakInfo, BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum,
+};
 
 #[derive(Clone)]
 pub struct BitbankPublicApiClient {
@@ -351,7 +353,7 @@ impl BitbankPublicApiClient {
 
     pub async fn get_circuit_break_info(
         &self,
-        pair: &str
+        pair: &str,
     ) -> Result<BitbankCircuitBreakInfo, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
@@ -367,7 +369,7 @@ impl BitbankPublicApiClient {
             .await;
         let duration = start_time.elapsed();
         log::debug!("get_circuit_break_info request took {:?}", duration);
-            
+
         match res {
             Ok(res_val) => {
                 match serde_json::from_value::<BitbankCircuitBreakInfo>(res_val["data"].clone()) {
@@ -386,29 +388,40 @@ impl BitbankPublicApiClient {
             }
             Err(err) => match err {
                 crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_circuit_break_info. error: {:?}", error);
+                    log::error!(
+                        "Send request error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
 
                     Err(None)
                 }
                 crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on get_circuit_break_info. error: {:?}", error);
+                    log::error!(
+                        "Receive response error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
                     Err(None)
                 }
                 crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
                     error,
                 ) => {
-                    log::error!("Build request error on get_circuit_break_info. error: {:?}", error);
+                    log::error!(
+                        "Build request error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
                     Err(None)
                 }
                 crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
                     error,
                 ) => {
-                    log::error!("Bitbank handle error on get_circuit_break_info. error: {:?}", error);
+                    log::error!(
+                        "Bitbank handle error on get_circuit_break_info. error: {:?}",
+                        error
+                    );
                     Err(Some(error))
                 }
             },
         }
-        
     }
 }
 
