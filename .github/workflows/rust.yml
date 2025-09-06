@@ -22,4 +22,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --verbose
-      - run: cargo test --verbose
+      - run: cargo test test_public --verbose

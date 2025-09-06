@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_assets() {
+    async fn test_private_get_assets() {
         logging_init();
 
         let bb_client = init_client();
@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_order() {
+    async fn test_private_get_order() {
         logging_init();
         let bb_client = init_client();
 
@@ -744,7 +744,7 @@ mod tests {
 
     // it's flakey test!
     #[tokio::test]
-    async fn test_post_cancel_order() {
+    async fn test_private_post_cancel_order() {
         logging_init();
         let bb_client = init_client();
 
@@ -766,7 +766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_active_orders() {
+    async fn test_private_get_active_orders() {
         logging_init();
         let bb_client = init_client();
 
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_cancel_orders() {
+    async fn test_private_post_cancel_orders() {
         logging_init();
         let bb_client = init_client();
 
@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_trade_history() {
+    async fn test_private_get_trade_history() {
         logging_init();
         let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
         let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
@@ -828,7 +828,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_status() {
+    async fn test_private_get_status() {
         logging_init();
         let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
         let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_channel_and_token() {
+    async fn test_private_get_channel_and_token() {
         logging_init();
         let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
         let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
@@ -853,7 +853,7 @@ mod tests {
     // intentionaly exceed Rate Limit. if you want to run it, you should add `-- --ignored` option like: `cargo test -- --ignored`.
     #[tokio::test]
     #[ignore]
-    async fn test_exceed_rate_limit() {
+    async fn test_private_exceed_rate_limit() {
         logging_init();
 
         let bitbank_key = env::var("BITBANK_API_KEY").unwrap();

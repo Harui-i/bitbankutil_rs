@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_ticker() {
+    async fn test_public_get_ticker() {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_ticker("eth_jpy").await;
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_tickers() {
+    async fn test_public_get_tickers() {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_tickers().await;
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_tickers_jpy() {
+    async fn test_public_get_tickers_jpy() {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_tickers_jpy().await;
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_transactions() {
+    async fn test_public_get_transactions() {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
 
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_depth() {
+    async fn test_public_get_depth() {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_depth("eth_jpy").await;
