@@ -1,7 +1,8 @@
 use crate::bitbank_bot::BotMessage;
 use crate::bitbank_structs::websocket_struct::BitbankWebSocketMessage;
 use crate::bitbank_structs::{
-    BitbankDepthDiff, BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionsData,
+    BitbankCircuitBreakInfo, BitbankDepthDiff, BitbankDepthWhole, BitbankTickerResponse,
+    BitbankTransactionsData,
 };
 use crypto_botters::{
     bitbank::BitbankOption, generic_api_client::websocket::WebSocketConfig, Client,
@@ -42,8 +43,10 @@ pub async fn run_websocket(
                 if room_name.starts_with("ticker") {
                     let ticker: BitbankTickerResponse =
                         serde_json::from_value(ws_msg.message.data).unwrap();
-                    log::debug!("ticker: {:?}", ticker);
-                    // TODO: make tx, spawn(send ticker to bot)
+                    let tx2 = tx.clone();
+                    tokio::spawn(async move {
+                        tx2.send(BotMessage::Ticker(ticker)).await.unwrap();
+                    });
                 } else if room_name.starts_with("transactions") {
                     let transaction_message: BitbankTransactionsData =
                         serde_json::from_value(ws_msg.message.data).unwrap();
@@ -79,7 +82,14 @@ pub async fn run_websocket(
                             .unwrap();
                     });
                 } else if room_name.starts_with("circuit_break_info") {
-                    log::debug!("circuit_break_info: {:?}", ws_msg.message);
+                    let circuit_break_info: BitbankCircuitBreakInfo =
+                        serde_json::from_value(ws_msg.message.data).unwrap();
+                    let tx2 = tx.clone();
+                    tokio::spawn(async move {
+                        tx2.send(BotMessage::CircuitBreakInfo(circuit_break_info))
+                            .await
+                            .unwrap();
+                    });
                 } else {
                     panic!("unknown room name: {}", room_name);
                 }

@@ -8,7 +8,6 @@ use bitbankutil_rs::depth::Depth;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
-
 struct MyBot {
     pair: String,
     tick_size: Decimal,
@@ -283,6 +282,22 @@ impl BotTrait<MyBotState> for MyBot {
 
         state.depth = depth.clone();
 
+        state
+    }
+
+    async fn on_ticker(
+        &self,
+        _ticker: &bitbankutil_rs::bitbank_structs::BitbankTickerResponse,
+        state: MyBotState,
+    ) -> MyBotState {
+        state
+    }
+
+    async fn on_circuit_break_info(
+        &self,
+        _circuit_break_info: &bitbankutil_rs::bitbank_structs::BitbankCircuitBreakInfo,
+        state: MyBotState,
+    ) -> MyBotState {
         state
     }
 }

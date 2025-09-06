@@ -14,6 +14,13 @@ impl MyBot {
 }
 
 impl BotTrait<()> for MyBot {
+    async fn on_ticker(
+        &self,
+        _ticker: &bitbankutil_rs::bitbank_structs::BitbankTickerResponse,
+        state: (),
+    ) -> () {
+        state
+    }
     async fn on_transactions(
         &self,
         _transactions: &Vec<bitbankutil_rs::bitbank_structs::BitbankTransactionDatum>,
@@ -29,6 +36,14 @@ impl BotTrait<()> for MyBot {
     ) {
         log::info!("{}", depth);
         ()
+    }
+
+    async fn on_circuit_break_info(
+        &self,
+        _circuit_break_info: &bitbankutil_rs::bitbank_structs::BitbankCircuitBreakInfo,
+        state: (),
+    ) -> () {
+        state
     }
 }
 

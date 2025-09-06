@@ -22,6 +22,22 @@ pub struct BitbankTickerResponse {
     pub timestamp: Number,    // ticked at unix timestamp (milliseconds)
 }
 
+// https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#circuit-break-info
+#[allow(dead_code)]
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct BitbankCircuitBreakInfo {
+    pub mode: String, // enum: `NONE`, `CIRCUIT_BREAK`, `FULL_RANGE_CIRCUIT_BREAK`, `RESUMPTION`, `LISTING`.
+    pub estimated_itayose_price: Option<String>, // estimated price. Null if mode is `NONE` or when there is no estimated price.
+    pub estimated_itayose_amount: Option<String>, // estimated amount. Null if model is `NONE`.
+    pub itayose_upper_price: Option<String>, // itayose price range upper limit. Null if mode is in `NONE`, `FULL_RANGE_CIRCUIT_BREAK` or `LISTING`.
+    pub itayose_lower_price: Option<String>, // itayose price range lower limit. Null if mode is in `NONE`, `FULL_RANGE_CIRCUIT_BREAK` or `LISTING`.
+    pub upper_trigger_price: Option<String>, // upper trigger price. Null if mode is not `NONE`.
+    pub lower_trigger_price: Option<String>, // lower trigger price. Null if mode is not `NONE`.
+    pub fee_type: String,                    // enum: `NORMAL`, `SELL_MAKER`, `BUY_MAKER`, `DYNAMIC`
+    pub reopen_timestamp: Option<Number>, // reopen timestamp (milliseconds). Null if mode is `NONE`, or reopen timestamp is undetermined yet.
+    pub timestamp: Number,                // ticked at unix timestamp (milliseconds)
+}
+
 //https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets
 #[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
