@@ -8,8 +8,13 @@ use crate::depth::Depth;
 
 pub mod websocket_struct;
 
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct BitbankApiResponse {
+    pub success: Number,
+    pub data: serde_json::Value,
+}
+
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
-#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankTickerResponse {
     pub sell: Option<String>, // the lowest price of sell orders
@@ -23,7 +28,6 @@ pub struct BitbankTickerResponse {
 }
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#circuit-break-info
-#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankCircuitBreakInfo {
     pub mode: String, // enum: `NONE`, `CIRCUIT_BREAK`, `FULL_RANGE_CIRCUIT_BREAK`, `RESUMPTION`, `LISTING`.
@@ -39,7 +43,6 @@ pub struct BitbankCircuitBreakInfo {
 }
 
 //https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets
-#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankAssetDatum {
     pub asset: String,
@@ -55,13 +58,11 @@ pub struct BitbankAssetDatum {
     pub collateral_ratio: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankAssetsData {
     pub assets: Vec<BitbankAssetDatum>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTradeHistoryDatum {
     pub trade_id: Number,                  // trade id
@@ -81,13 +82,11 @@ pub struct BitbankTradeHistoryDatum {
     pub executed_at: Number,               // order executed at unix timestamp (milliseconds)
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTradeHistoryResponse {
     pub trades: Vec<BitbankTradeHistoryDatum>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankCreateOrderResponse {
     pub order_id: Number,
@@ -109,7 +108,6 @@ pub struct BitbankCreateOrderResponse {
 }
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-order-information
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankGetOrderResponse {
     pub order_id: Number,
@@ -131,7 +129,6 @@ pub struct BitbankGetOrderResponse {
 }
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankCancelOrderResponse {
     pub order_id: Number,
@@ -154,26 +151,22 @@ pub struct BitbankCancelOrderResponse {
     pub status: String, // status enum: `INACTIVE`, `UNFILLED`, `PARTIALLY_FILLED`, `FULLY_FILLED`, `CANCELED_UNFILLED`, `CANCELED_PARTIALLY_FILLED`
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankCancelOrdersResponse {
     pub orders: Vec<BitbankCancelOrderResponse>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankActiveOrdersResponse {
     pub orders: Vec<BitbankGetOrderResponse>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankChannelAndTokenResponse {
     pub pubnub_channel: String,
     pub pubnub_token: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankSpotStatus {
     pub pair: String,
@@ -181,19 +174,17 @@ pub struct BitbankSpotStatus {
     pub min_amount: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankSpotStatusResponse {
     pub statuses: Vec<BitbankSpotStatus>,
 }
 
-#[allow(dead_code, non_snake_case)]
+#[allow(non_snake_case)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTransactionsData {
     pub transactions: Vec<BitbankTransactionDatum>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTransactionDatum {
     #[serde(with = "rust_decimal::serde::float")]
@@ -205,7 +196,6 @@ pub struct BitbankTransactionDatum {
     pub transaction_id: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthDiff {
     pub a: Vec<Vec<String>>, // ask, amount
@@ -221,21 +211,26 @@ pub struct BitbankDepthDiff {
     pub s: String, // sequence id. increasing-order but not necessarily consecutive
 }
 
-#[allow(dead_code)]
 #[allow(non_snake_case)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthWhole {
     asks: Vec<Vec<String>>,
     bids: Vec<Vec<String>>,
+    #[allow(dead_code)]
     asks_over: String, // asks sum s.t. its price is higher than asks_highest value.
     // Without Circut Breaker, 200 offers from best-bid are sent via websocket.
     // So, asks_over is the sum of the rest of the offers.
+    #[allow(dead_code)]
     bids_under: String, // bids sum s.t. its price is lower than bids_lowest value.
 
     // these four values are 0 in non-CB mode.
+    #[allow(dead_code)]
     asks_under: String, // asks sum s.t. its price is lower than bids_lowest. (so low price)
-    bids_over: String,  // bids sum s.t. its price is higher than asks_highest. (so high price)
+    #[allow(dead_code)]
+    bids_over: String, // bids sum s.t. its price is higher than asks_highest. (so high price)
+    #[allow(dead_code)]
     ask_market: String, // the quantity of market sell orders. Usually "0" in NORMAL mode.
+    #[allow(dead_code)]
     bid_market: String, // the quantity of market buy orders. Usually "0" in NORMAL mode.
 
     pub timestamp: i64,

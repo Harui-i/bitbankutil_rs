@@ -1,5 +1,5 @@
 use crate::bitbank_structs::{
-    BitbankActiveOrdersResponse, BitbankAssetsData, BitbankCancelOrderResponse,
+    BitbankActiveOrdersResponse, BitbankApiResponse, BitbankAssetsData, BitbankCancelOrderResponse,
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
     BitbankGetOrderResponse, BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
 };
@@ -48,7 +48,7 @@ impl BitbankPrivateApiClient {
     pub async fn get_assets(&self) -> Result<BitbankAssetsData, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<
                 &str,
                 crypto_botters::bitbank::BitbankHandleError,
@@ -61,44 +61,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_assets request took {:?}", duration);
 
-        match res {
-            Ok(res) => match serde_json::from_value::<BitbankAssetsData>(res["data"].clone()) {
-                Ok(bbad) => Ok(bbad),
-                Err(err) => {
-                    log::error!(
-                        "failed to convert res into BitbankAssetData. res: {:?}, err: {:?}",
-                        res,
-                        err
-                    );
-                    Err(None)
-                }
-            },
-
-            Err(x) => match x {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_assets: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on get_assets: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on get_assets: {:?}", error);
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    err,
-                ) => {
-                    log::error!("Response handle error on get_assets: {:?}", err);
-
-                    Err(Some(err))
-                }
-            },
-        }
+        crate::response_handler::handle_response("get_assets", res)
     }
 
     // Fetch order information. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-order-information
@@ -109,7 +72,7 @@ impl BitbankPrivateApiClient {
     ) -> Result<BitbankGetOrderResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -123,38 +86,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_order request took {:?}", duration);
 
-        match res {
-            Ok(res) => {
-                match serde_json::from_value::<BitbankGetOrderResponse>(res["data"].clone()) {
-                    Ok(bbgor) => Ok(bbgor),
-                    Err(e) => {
-                        log::error!("failed to convert res into BitbankCreateOrderResponse. response: {:?}, Error: {}", res, e);
-                        Err(None)
-                    }
-                }
-            }
-            Err(x) => match x {
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(x) => {
-                    log::error!("error on get_order: {:?}", x);
-                    Err(Some(x))
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(e) => {
-                    println!("BuildRequestError : {}", e);
-
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(er) => {
-                    println!("ReceiveResponse: {}", er);
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(e) => {
-                    println!("SendRequest: {}", e);
-                    Err(None)
-                }
-            },
-        }
+        crate::response_handler::handle_response("get_order", res)
     }
 
     // Create new order. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#create-new-order
@@ -200,7 +132,7 @@ impl BitbankPrivateApiClient {
         }
 
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -214,38 +146,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("post_order request took {:?}", duration);
 
-        match res {
-            Ok(res) => {
-                match serde_json::from_value::<BitbankCreateOrderResponse>(res["data"].clone()) {
-                    Ok(bbcor) => Ok(bbcor),
-                    Err(e) => {
-                        log::error!("failed to convert res into BitbankCreateOrderResponse. response: {:?}, Error: {}", res, e);
-                        Err(None)
-                    }
-                }
-            }
-            Err(x) => match x {
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(x) => {
-                    log::error!("error on post_order: {:?}", x);
-                    Err(Some(x))
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(e) => {
-                    println!("BuildRequestError : {}", e);
-
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(er) => {
-                    println!("ReceiveResponse: {}", er);
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(e) => {
-                    println!("SendRequest: {}", e);
-                    Err(None)
-                }
-            },
-        }
+        crate::response_handler::handle_response("post_order", res)
     }
 
     // Fetch trade history: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-trade-history
@@ -286,7 +187,7 @@ impl BitbankPrivateApiClient {
         let request_body = request_body; // immutalize
 
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -300,38 +201,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("trade_history request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<BitbankTradeHistoryResponse>(res_val["data"].clone())
-                {
-                    Ok(bbthr) => Ok(bbthr),
-                    Err(e) => {
-                        log::error!("failed to convert res into BitbankTradeHistoryResponse. response: {:?}, Error: {}", res_val, e);
-                        Err(None)
-                    }
-                }
-            }
-            Err(x) => match x {
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    err,
-                ) => {
-                    log::error!("error on get_trade_history: {:?}", err);
-                    Err(Some(err))
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(e) => {
-                    println!("BuildRequestError : {}", e);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(e) => {
-                    println!("ReceiveResponse: {}", e);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(e) => {
-                    println!("SendRequest: {}", e);
-                    Err(None)
-                }
-            },
-        }
+        crate::response_handler::handle_response("get_trade_history", res)
     }
 
     // Cancel order. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
@@ -342,7 +212,7 @@ impl BitbankPrivateApiClient {
     ) -> Result<BitbankCancelOrderResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -356,43 +226,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("post_cancel_order request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<BitbankCancelOrderResponse>(res_val["data"].clone())
-                {
-                    Ok(bbcor) => Ok(bbcor),
-
-                    Err(err) => {
-                        log::error!("failed to convert response value into BitbankCancelOrderResponse. res_val: {:?}, Error: {:?}", res_val.clone(), err);
-                        Err(None)
-                    }
-                }
-            }
-
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    bhe,
-                ) => {
-                    log::error!("error on post_cancel_order: {:?}", bhe);
-                    Err(Some(bhe))
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(er) => {
-                    println!("BuildRequestError : {}", er);
-
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(er) => {
-                    println!("ReceiveResponse: {}", er);
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(er) => {
-                    println!("SendRequest: {}", er);
-                    Err(None)
-                }
-            },
-        }
+        crate::response_handler::handle_response("post_cancel_order", res)
     }
 
     // Cancel multiple orders. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-multiple-orders
@@ -405,7 +239,7 @@ impl BitbankPrivateApiClient {
         assert!(0 < order_ids.len() && order_ids.len() <= 30_usize);
 
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -419,47 +253,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("post_cancel_orders request took {:?}", duration);
 
-        match res {
-            Ok(res) => {
-                match serde_json::from_value::<BitbankCancelOrdersResponse>(res["data"].clone()) {
-                    Ok(bbcor) => Ok(bbcor),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert res into BitbankCancelOrdersResponse: {:?}",
-                            err
-                        );
-                        Err(None)
-                    }
-                }
-            }
-
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!(
-                        "Send request error on post_cancel_orders. error: {:?}",
-                        error
-                    );
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on post_cancel_orders: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error : {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!("Bitbank handle error : {:?}", error);
-                    Err(Some(error))
-                }
-            },
-        }
+        crate::response_handler::handle_response("post_cancel_orders", res)
     }
 
     // TODO
@@ -502,7 +296,7 @@ impl BitbankPrivateApiClient {
         let request_body = request_body; // immutalize
 
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -516,43 +310,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_active_orders request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<BitbankActiveOrdersResponse>(res_val["data"].clone())
-                {
-                    Ok(bbcor) => Ok(bbcor),
-
-                    Err(err) => {
-                        log::error!("failed to convert response value into BitbankActiveOrdersResponse. res_val: {:?}, Error: {:?}", res_val.clone(), err);
-                        Err(None)
-                    }
-                }
-            }
-
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    bhe,
-                ) => {
-                    log::error!("error on post_order: {:?}", bhe);
-                    Err(Some(bhe))
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(er) => {
-                    println!("BuildRequestError : {}", er);
-
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(er) => {
-                    println!("ReceiveResponse: {}", er);
-                    Err(None)
-                }
-
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(er) => {
-                    println!("SendRequest: {}", er);
-                    Err(None)
-                }
-            },
-        }
+        crate::response_handler::handle_response("get_active_orders", res)
     }
 
     // get exchange status. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
@@ -562,7 +320,7 @@ impl BitbankPrivateApiClient {
         let start_time = Instant::now();
 
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -572,44 +330,7 @@ impl BitbankPrivateApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_status request took {:?}", duration);
 
-        match res {
-            Ok(res) => {
-                match serde_json::from_value::<BitbankSpotStatusResponse>(res["data"].clone()) {
-                    Ok(bssr) => Ok(bssr),
-
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert res into BitbankSpotStatusResponse: {:?}",
-                            err
-                        );
-                        Err(None)
-                    }
-                }
-            }
-
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_status: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on get_status: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on get_status: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!("Response handle error on get_status: {:?}", error);
-                    Err(Some(error))
-                }
-            },
-        }
+        crate::response_handler::handle_response("get_status", res)
     }
 
     // Get channel and token for private stream. cf: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#private-stream
@@ -619,7 +340,7 @@ impl BitbankPrivateApiClient {
         let start_time = Instant::now();
 
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -627,57 +348,8 @@ impl BitbankPrivateApiClient {
             .await;
         let duration = start_time.elapsed();
         log::debug!("get_channel_and_token request took {:?}", duration);
-        match res {
-            Ok(res_val) => {
-                log::info!("get_channel_and_token response: {:?}", res_val);
-                match serde_json::from_value::<BitbankChannelAndTokenResponse>(
-                    res_val["data"].clone(),
-                ) {
-                    Ok(res) => {
-                        log::info!("channel and token: {:?}", res);
-                        Ok(res)
-                    }
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert response value into channel and token. res_val: {:?}, err: {:?}",
-                            res_val,
-                            err
-                        );
 
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_channel_and_token: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!(
-                        "Receive response error on get_channel_and_token: {:?}",
-                        error
-                    );
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on get_channel_and_token: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!(
-                        "Response handle error on get_channel_and_token: {:?}",
-                        error
-                    );
-
-                    Err(Some(error))
-                }
-            },
-        }
+        crate::response_handler::handle_response("get_channel_and_token", res)
     }
 }
 
