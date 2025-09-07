@@ -6,7 +6,8 @@ use crypto_botters::{
 };
 
 use crate::bitbank_structs::{
-    BitbankCircuitBreakInfo, BitbankDepthWhole, BitbankTickerResponse, BitbankTransactionDatum,
+    BitbankApiResponse, BitbankCircuitBreakInfo, BitbankDepthWhole, BitbankTickerResponse,
+    BitbankTransactionsData,
 };
 
 #[derive(Clone)]
@@ -22,6 +23,57 @@ impl BitbankPublicApiClient {
         BitbankPublicApiClient { client }
     }
 
+    fn handle_response<T: serde::de::DeserializeOwned>(
+        &self,
+        api_name: &str,
+        res: Result<
+            BitbankApiResponse,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        >,
+    ) -> Result<T, Option<BitbankHandleError>> {
+        match res {
+            Ok(api_response) => {
+                // deserialize
+                match serde_json::from_value::<T>(api_response.data.clone()) {
+                    Ok(ret) => Ok(ret),
+                    Err(err) => {
+                        log::error!(
+                            "failed to convert api_response into certain type.\
+                            api_response: {:?}, Error: {:?}",
+                            api_response.clone(),
+                            err
+                        );
+
+                        Err(None)
+                    }
+                }
+            }
+            Err(err) => match err {
+                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
+                    log::error!("Send request error on {}. error: {:?}", api_name, error);
+
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
+                    log::error!("Receive response error on {}. error: {:?}", api_name, error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
+                    error,
+                ) => {
+                    log::error!("Build request error on {}. error: {:?}", api_name, error);
+                    Err(None)
+                }
+                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
+                    error,
+                ) => {
+                    log::error!("Bitbank handle error on {}. error : {:?}", api_name, error);
+                    Err(Some(error))
+                }
+            },
+        }
+    }
+
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
     pub async fn get_ticker(
         &self,
@@ -29,7 +81,7 @@ impl BitbankPublicApiClient {
     ) -> Result<BitbankTickerResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<
                 &str,
                 crypto_botters::bitbank::BitbankHandleError,
@@ -46,46 +98,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_ticker request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<BitbankTickerResponse>(res_val["data"].clone()) {
-                    Ok(bbtr) => Ok(bbtr),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert response value into BitbankTickerResponse.\
-                            res_val: {:?}, Error: {:?}",
-                            res_val.clone(),
-                            err
-                        );
-
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_ticker. error: {:?}", error);
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on get_ticker. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on get_ticker. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!("Bitbank handle error on get_ticker. error : {:?}", error);
-                    Err(Some(error))
-                }
-            },
-        }
+        self.handle_response("get_ticker", res)
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
@@ -94,7 +107,7 @@ impl BitbankPublicApiClient {
     ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -104,47 +117,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_tickers request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone())
-                {
-                    Ok(vecbbtr) => Ok(vecbbtr),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert response value into Vec<BitbankTickerResponse>. \
-                            res_val: {:?}, Error: {:?}",
-                            res_val.clone(),
-                            err
-                        );
-
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_tickers. error: {:?}", error);
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on get_tickers. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on get_tickers. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!("Bitbank handle error on get_tickers. error: {:?}", error);
-                    Err(Some(error))
-                }
-            },
-        }
+        self.handle_response("get_tickers", res)
     }
 
     //https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
@@ -153,7 +126,7 @@ impl BitbankPublicApiClient {
     ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -163,60 +136,14 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_tickers_jpy request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTickerResponse>>(res_val["data"].clone())
-                {
-                    Ok(vecbbtr) => Ok(vecbbtr),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert response value into Vec<BitbankTickerResponse>. \
-                            res_val: {:?}, Error: {:?}",
-                            res_val.clone(),
-                            err
-                        );
-
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_tickers_jpy. error: {:?}", error);
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!(
-                        "Receive response error on get_tickers_jpy. error: {:?}",
-                        error
-                    );
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on get_tickers_jpy. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!(
-                        "Bitbank handle error on get_tickers_jpy. error: {:?}",
-                        error
-                    );
-                    Err(Some(error))
-                }
-            },
-        }
+        self.handle_response("get_tickers_jpy", res)
     }
 
     pub async fn get_transactions(
         &self,
         pair: &str,
         yyyymmdd: Option<&str>,
-    ) -> Result<Vec<BitbankTransactionDatum>, Option<BitbankHandleError>> {
+    ) -> Result<BitbankTransactionsData, Option<BitbankHandleError>> {
         let start_time = Instant::now();
 
         let url = {
@@ -228,7 +155,7 @@ impl BitbankPublicApiClient {
         };
 
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -238,55 +165,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_transactions request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<Vec<BitbankTransactionDatum>>(
-                    res_val["data"]["transactions"].clone(),
-                ) {
-                    Ok(transactions) => Ok(transactions),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert response value into Vec<BitbankTransactionDatum>. \
-                            res_val: {:?}, Error: {:?}",
-                            res_val.clone(),
-                            err
-                        );
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_transactions. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!(
-                        "Receive response error on get_transactions. error: {:?}",
-                        error
-                    );
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!(
-                        "Build request error on get_transactions. error: {:?}",
-                        error
-                    );
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!(
-                        "Bitbank handle error on get_transactions. error: {:?}",
-                        error
-                    );
-                    Err(Some(error))
-                }
-            },
-        }
+        self.handle_response("get_transactions", res)
     }
 
     pub async fn get_depth(
@@ -295,7 +174,7 @@ impl BitbankPublicApiClient {
     ) -> Result<BitbankDepthWhole, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -309,46 +188,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_depth request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<BitbankDepthWhole>(res_val["data"].clone()) {
-                    Ok(bbdw) => Ok(bbdw),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert response value into BitbankDepthWhole.\
-                            res_val: {:?}, Error: {:?}",
-                            res_val.clone(),
-                            err
-                        );
-
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on get_depth. error: {:?}", error);
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on get_depth. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on get_depth. error: {:?}", error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!("Bitbank handle error on get_depth. error: {:?}", error);
-                    Err(Some(error))
-                }
-            },
-        }
+        self.handle_response("get_depth", res)
     }
 
     pub async fn get_circuit_break_info(
@@ -357,7 +197,7 @@ impl BitbankPublicApiClient {
     ) -> Result<BitbankCircuitBreakInfo, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
-            serde_json::Value,
+            BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
             .client
@@ -370,58 +210,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_circuit_break_info request took {:?}", duration);
 
-        match res {
-            Ok(res_val) => {
-                match serde_json::from_value::<BitbankCircuitBreakInfo>(res_val["data"].clone()) {
-                    Ok(info) => Ok(info),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert response value into BitbankCircuitBreakInfo.\
-                            res_val: {:?}, Error: {:?}",
-                            res_val.clone(),
-                            err
-                        );
-
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!(
-                        "Send request error on get_circuit_break_info. error: {:?}",
-                        error
-                    );
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!(
-                        "Receive response error on get_circuit_break_info. error: {:?}",
-                        error
-                    );
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!(
-                        "Build request error on get_circuit_break_info. error: {:?}",
-                        error
-                    );
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!(
-                        "Bitbank handle error on get_circuit_break_info. error: {:?}",
-                        error
-                    );
-                    Err(Some(error))
-                }
-            },
-        }
+        self.handle_response("get_circuit_break_info", res)
     }
 }
 

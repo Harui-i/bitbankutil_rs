@@ -8,6 +8,13 @@ use crate::depth::Depth;
 
 pub mod websocket_struct;
 
+#[allow(dead_code)]
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct BitbankApiResponse {
+    pub success: Number,
+    pub data: serde_json::Value,
+}
+
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
 #[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
