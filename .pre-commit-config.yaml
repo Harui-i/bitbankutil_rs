@@ -1,0 +1,14 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+      - id: cargo-test
+        name: cargo test test_public
+        entry: cargo test test_public
+        language: system
+        files: '(\.rs$|^Cargo\.(toml|lock)$)'
+        pass_filenames: false
