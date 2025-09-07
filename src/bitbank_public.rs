@@ -23,57 +23,6 @@ impl BitbankPublicApiClient {
         BitbankPublicApiClient { client }
     }
 
-    fn handle_response<T: serde::de::DeserializeOwned>(
-        &self,
-        api_name: &str,
-        res: Result<
-            BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
-        >,
-    ) -> Result<T, Option<BitbankHandleError>> {
-        match res {
-            Ok(api_response) => {
-                // deserialize
-                match serde_json::from_value::<T>(api_response.data.clone()) {
-                    Ok(ret) => Ok(ret),
-                    Err(err) => {
-                        log::error!(
-                            "failed to convert api_response into certain type.\
-                            api_response: {:?}, Error: {:?}",
-                            api_response.clone(),
-                            err
-                        );
-
-                        Err(None)
-                    }
-                }
-            }
-            Err(err) => match err {
-                crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                    log::error!("Send request error on {}. error: {:?}", api_name, error);
-
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                    log::error!("Receive response error on {}. error: {:?}", api_name, error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::BuildRequestError(
-                    error,
-                ) => {
-                    log::error!("Build request error on {}. error: {:?}", api_name, error);
-                    Err(None)
-                }
-                crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(
-                    error,
-                ) => {
-                    log::error!("Bitbank handle error on {}. error : {:?}", api_name, error);
-                    Err(Some(error))
-                }
-            },
-        }
-    }
-
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
     pub async fn get_ticker(
         &self,
@@ -98,7 +47,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_ticker request took {:?}", duration);
 
-        self.handle_response("get_ticker", res)
+        crate::response_handler::handle_response("get_ticker", res)
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
@@ -117,7 +66,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_tickers request took {:?}", duration);
 
-        self.handle_response("get_tickers", res)
+        crate::response_handler::handle_response("get_tickers", res)
     }
 
     //https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
@@ -136,7 +85,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_tickers_jpy request took {:?}", duration);
 
-        self.handle_response("get_tickers_jpy", res)
+        crate::response_handler::handle_response("get_tickers_jpy", res)
     }
 
     pub async fn get_transactions(
@@ -165,7 +114,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_transactions request took {:?}", duration);
 
-        self.handle_response("get_transactions", res)
+        crate::response_handler::handle_response("get_transactions", res)
     }
 
     pub async fn get_depth(
@@ -188,7 +137,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_depth request took {:?}", duration);
 
-        self.handle_response("get_depth", res)
+        crate::response_handler::handle_response("get_depth", res)
     }
 
     pub async fn get_circuit_break_info(
@@ -210,7 +159,7 @@ impl BitbankPublicApiClient {
         let duration = start_time.elapsed();
         log::debug!("get_circuit_break_info request took {:?}", duration);
 
-        self.handle_response("get_circuit_break_info", res)
+        crate::response_handler::handle_response("get_circuit_break_info", res)
     }
 }
 

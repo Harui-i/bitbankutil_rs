@@ -3,6 +3,7 @@ pub mod bitbank_private;
 pub mod bitbank_public;
 pub mod bitbank_structs;
 pub mod order_manager;
+pub mod response_handler;
 pub mod websocket_handler;
 
 pub mod depth {
