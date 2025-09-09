@@ -7,7 +7,7 @@ use crypto_botters::{bitbank::BitbankOption, generic_api_client::websocket::WebS
 
 use tokio::sync::mpsc;
 
-pub trait BotTrait<T> {
+pub trait BotTrait<T: Send> {
     // async fn run(...);
     fn run(
         &self,
@@ -18,7 +18,6 @@ pub trait BotTrait<T> {
     ) -> impl std::future::Future<Output = ()> + Send
     where
         Self: Sync + Send,
-        T: Sync + Send,
     {
         async {
             let mut state = initial_state;
@@ -63,27 +62,35 @@ pub trait BotTrait<T> {
 
     fn on_ticker(
         &self,
-        ticker: &BitbankTickerResponse,
+        _ticker: &BitbankTickerResponse,
         state: T,
-    ) -> impl std::future::Future<Output = T> + Send;
+    ) -> impl std::future::Future<Output = T> + Send {
+        async { state }
+    }
 
     fn on_transactions(
         &self,
-        transactions: &Vec<BitbankTransactionDatum>,
+        _transactions: &Vec<BitbankTransactionDatum>,
         state: T,
-    ) -> impl std::future::Future<Output = T> + Send;
+    ) -> impl std::future::Future<Output = T> + Send {
+        async { state }
+    }
 
     fn on_depth_update(
         &self,
-        depth: &BitbankDepth,
+        _depth: &BitbankDepth,
         state: T,
-    ) -> impl std::future::Future<Output = T> + Send;
+    ) -> impl std::future::Future<Output = T> + Send {
+        async { state }
+    }
 
     fn on_circuit_break_info(
         &self,
-        circuit_break_info: &BitbankCircuitBreakInfo,
+        _circuit_break_info: &BitbankCircuitBreakInfo,
         state: T,
-    ) -> impl std::future::Future<Output = T> + Send;
+    ) -> impl std::future::Future<Output = T> + Send {
+        async { state }
+    }
 }
 
 pub enum BotMessage {
