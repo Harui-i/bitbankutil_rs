@@ -3,7 +3,8 @@ use crate::bitbank_structs::{
     BitbankTickerResponse, BitbankTransactionDatum,
 };
 use crate::websocket_handler::run_websocket;
-use crypto_botters::{bitbank::BitbankOption, generic_api_client::websocket::WebSocketConfig};
+use crypto_botters::bitbank::BitbankOption;
+use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 
 use tokio::sync::mpsc;
 
