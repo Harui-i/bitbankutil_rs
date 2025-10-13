@@ -1,9 +1,7 @@
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitbankutil_rs::bitbank_bot::{
-    BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy, BoxFuture,
-};
+use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy};
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_structs::BitbankDepth;
 use bitbankutil_rs::depth::Depth;
@@ -243,48 +241,40 @@ impl MyBot {
 
 impl BotStrategy for MyBot {
     type Event = BitbankEvent;
+    async fn handle_event(&mut self, event: Self::Event, _ctx: &BotContext<Self::Event>) {
+        match event {
+            BitbankEvent::Transactions { transactions, .. } => {
+                log::debug!("transaction updated: {:?}", transactions);
+                self.update_orders().await;
+            }
+            BitbankEvent::DepthUpdated { depth, .. } => {
+                log::debug!("depth updated");
 
-    fn handle_event(
-        &mut self,
-        event: Self::Event,
-        _ctx: &BotContext<Self::Event>,
-    ) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            match event {
-                BitbankEvent::Transactions { transactions, .. } => {
-                    log::debug!("transaction updated: {:?}", transactions);
+                if depth.is_complete() {
+                    let bestask = depth.best_ask().unwrap().0.clone();
+                    let bestbid = depth.best_bid().unwrap().0.clone();
+
+                    if bestask != self.state.last_bestask || bestbid != self.state.last_bestbid {
+                        log::debug!(
+                            "best ask diff: {}, best bid diff: {}",
+                            bestask - self.state.last_bestask,
+                            bestbid - self.state.last_bestbid
+                        );
+                        self.state.last_bestask = bestask;
+                        self.state.last_bestbid = bestbid;
+                    }
+                }
+
+                self.state.depth = depth;
+                if self.state.depth.is_complete() {
                     self.update_orders().await;
                 }
-                BitbankEvent::DepthUpdated { depth, .. } => {
-                    log::debug!("depth updated");
-
-                    if depth.is_complete() {
-                        let bestask = depth.best_ask().unwrap().0.clone();
-                        let bestbid = depth.best_bid().unwrap().0.clone();
-
-                        if bestask != self.state.last_bestask || bestbid != self.state.last_bestbid
-                        {
-                            log::debug!(
-                                "best ask diff: {}, best bid diff: {}",
-                                bestask - self.state.last_bestask,
-                                bestbid - self.state.last_bestbid
-                            );
-                            self.state.last_bestask = bestask;
-                            self.state.last_bestbid = bestbid;
-                        }
-                    }
-
-                    self.state.depth = depth;
-                    if self.state.depth.is_complete() {
-                        self.update_orders().await;
-                    }
-                }
-                BitbankEvent::CircuitBreakInfo { info, .. } => {
-                    log::debug!("circuit break info updated: {:?}", info);
-                }
-                BitbankEvent::Ticker { .. } => {}
             }
-        })
+            BitbankEvent::CircuitBreakInfo { info, .. } => {
+                log::debug!("circuit break info updated: {:?}", info);
+            }
+            BitbankEvent::Ticker { .. } => {}
+        }
     }
 }
 

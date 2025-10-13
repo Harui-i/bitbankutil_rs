@@ -1,9 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use bitbankutil_rs::bitbank_bot::{
-    BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy, BoxFuture,
-};
+use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 
@@ -18,13 +16,7 @@ impl MyBot {
 impl BotStrategy for MyBot {
     type Event = BitbankEvent;
 
-    fn handle_event(
-        &mut self,
-        _event: Self::Event,
-        _ctx: &BotContext<Self::Event>,
-    ) -> BoxFuture<'_, ()> {
-        Box::pin(async move {})
-    }
+    async fn handle_event(&mut self, _event: Self::Event, _ctx: &BotContext<Self::Event>) {}
 }
 
 #[tokio::main]

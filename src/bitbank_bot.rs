@@ -1,7 +1,3 @@
-use std::future::Future;
-use std::marker::PhantomData;
-use std::pin::Pin;
-
 use crate::bitbank_structs::{
     BitbankCircuitBreakInfo, BitbankDepth, BitbankDepthDiff, BitbankDepthWhole,
     BitbankTickerResponse, BitbankTransactionDatum,
@@ -10,12 +6,10 @@ use crate::websocket_handler::run_websocket;
 use crypto_botters::bitbank::BitbankOption;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::{error, trace, warn};
+use std::marker::PhantomData;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
-
-/// Convenience alias for boxed async callbacks used by [`BotStrategy`].
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Shared context that allows strategies to emit follow-up events back into the
 /// runtime. The context clones the underlying sender so strategies can freely
@@ -55,7 +49,7 @@ pub trait BotStrategy: Send + 'static {
         &mut self,
         event: Self::Event,
         ctx: &BotContext<Self::Event>,
-    ) -> BoxFuture<'_, ()>;
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Handle that keeps the bot actor alive and offers basic lifecycle control.

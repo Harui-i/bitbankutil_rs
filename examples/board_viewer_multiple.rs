@@ -1,7 +1,6 @@
 use std::env;
 use std::time::Duration;
 
-use bitbankutil_rs::bitbank_bot::BoxFuture;
 use bitbankutil_rs::bitbank_multiple_bot::{
     MultiBotBuilder, MultiBotContext, MultiBotEvent, MultiBotStrategyBase,
 };
@@ -19,16 +18,10 @@ impl MyBot {
 impl MultiBotStrategyBase for MyBot {
     type Event = MultiBotEvent;
 
-    fn handle_event(
-        &mut self,
-        event: Self::Event,
-        _ctx: &MultiBotContext<Self::Event>,
-    ) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            if let MultiBotEvent::DepthUpdated { pair, depth } = event {
-                log::info!("pair: {}, depth: {}", pair, depth);
-            }
-        })
+    async fn handle_event(&mut self, event: Self::Event, _ctx: &MultiBotContext<Self::Event>) {
+        if let MultiBotEvent::DepthUpdated { pair, depth } = event {
+            log::info!("pair: {}, depth: {}", pair, depth);
+        }
     }
 }
 

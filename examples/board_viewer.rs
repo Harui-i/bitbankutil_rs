@@ -1,9 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use bitbankutil_rs::bitbank_bot::{
-    BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy, BoxFuture,
-};
+use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 
@@ -18,16 +16,10 @@ impl MyBot {
 impl BotStrategy for MyBot {
     type Event = BitbankEvent;
 
-    fn handle_event(
-        &mut self,
-        event: Self::Event,
-        _ctx: &BotContext<Self::Event>,
-    ) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            if let BitbankEvent::DepthUpdated { pair, depth } = event {
-                log::info!("pair: {}\n{}", pair, depth);
-            }
-        })
+    async fn handle_event(&mut self, event: Self::Event, _ctx: &BotContext<Self::Event>) {
+        if let BitbankEvent::DepthUpdated { pair, depth } = event {
+            log::info!("pair: {}\n{}", pair, depth);
+        }
     }
 }
 
