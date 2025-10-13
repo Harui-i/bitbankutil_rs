@@ -271,6 +271,7 @@ impl BotStrategy for MyBot {
             BitbankEvent::CircuitBreakInfo { info, .. } => {
                 log::debug!("circuit break info updated: {:?}", info);
             }
+            // Ticker events are intentionally ignored in this strategy.
             BitbankEvent::Ticker { .. } => {}
         }
     }
