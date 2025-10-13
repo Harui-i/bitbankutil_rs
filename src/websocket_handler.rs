@@ -1,4 +1,4 @@
-use crate::bitbank_bot::BotMessage;
+use crate::bitbank_bot::BitbankInboundMessage;
 use crate::bitbank_structs::websocket_struct::BitbankWebSocketMessage;
 use crate::bitbank_structs::{
     BitbankCircuitBreakInfo, BitbankDepthDiff, BitbankDepthWhole, BitbankTickerResponse,
@@ -13,7 +13,7 @@ pub async fn run_websocket(
     pair: String,
     client_options: Vec<BitbankOption>,
     wsc: WebSocketConfig,
-    tx: mpsc::Sender<BotMessage>,
+    tx: mpsc::Sender<BitbankInboundMessage>,
 ) {
     let mut ws_client = Client::new();
 
@@ -45,7 +45,13 @@ pub async fn run_websocket(
                         serde_json::from_value(ws_msg.message.data).unwrap();
                     let tx2 = tx.clone();
                     tokio::spawn(async move {
-                        tx2.send(BotMessage::Ticker(ticker)).await.unwrap();
+                        if tx2
+                            .send(BitbankInboundMessage::Ticker(ticker))
+                            .await
+                            .is_err()
+                        {
+                            log::debug!("dropping ticker message; receiver hung up");
+                        }
                     });
                 } else if room_name.starts_with("transactions") {
                     let transaction_message: BitbankTransactionsData =
@@ -54,9 +60,13 @@ pub async fn run_websocket(
 
                     let tx2 = tx.clone();
                     tokio::spawn(async move {
-                        tx2.send(BotMessage::Transactions(transactions))
+                        if tx2
+                            .send(BitbankInboundMessage::Transactions(transactions))
                             .await
-                            .unwrap();
+                            .is_err()
+                        {
+                            log::debug!("dropping transactions message; receiver hung up");
+                        }
                     });
                 } else if room_name.starts_with("depth_diff") {
                     let depth_diff_message: BitbankDepthDiff =
@@ -66,9 +76,13 @@ pub async fn run_websocket(
 
                     // without `move`, tx2 is borrowed. but adding `move`, tx2 is moved to this closure.
                     tokio::spawn(async move {
-                        tx2.send(BotMessage::DepthDiff(depth_diff_message))
+                        if tx2
+                            .send(BitbankInboundMessage::DepthDiff(depth_diff_message))
                             .await
-                            .unwrap();
+                            .is_err()
+                        {
+                            log::debug!("dropping depth diff message; receiver hung up");
+                        }
                     });
                 } else if room_name.starts_with("depth_whole") {
                     let depth_whole_message: BitbankDepthWhole =
@@ -77,18 +91,26 @@ pub async fn run_websocket(
 
                     // without `move`, tx2 is borrowed. but adding `move`, tx2 is moved to this closure.
                     tokio::spawn(async move {
-                        tx2.send(BotMessage::DepthWhole(depth_whole_message))
+                        if tx2
+                            .send(BitbankInboundMessage::DepthWhole(depth_whole_message))
                             .await
-                            .unwrap();
+                            .is_err()
+                        {
+                            log::debug!("dropping depth snapshot; receiver hung up");
+                        }
                     });
                 } else if room_name.starts_with("circuit_break_info") {
                     let circuit_break_info: BitbankCircuitBreakInfo =
                         serde_json::from_value(ws_msg.message.data).unwrap();
                     let tx2 = tx.clone();
                     tokio::spawn(async move {
-                        tx2.send(BotMessage::CircuitBreakInfo(circuit_break_info))
+                        if tx2
+                            .send(BitbankInboundMessage::CircuitBreakInfo(circuit_break_info))
                             .await
-                            .unwrap();
+                            .is_err()
+                        {
+                            log::debug!("dropping circuit break info; receiver hung up");
+                        }
                     });
                 } else {
                     panic!("unknown room name: {}", room_name);

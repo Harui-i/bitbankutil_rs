@@ -35,7 +35,42 @@ These operations require deserializing the exchange's JSON-formatted API respons
 
 ## Creating asynchronous event-driven bots for bitbank's WebSocket trades and order book updates
 
-This can be achieved by using the `BotTrait` defined in `bitbank_bot.rs`.
+This can be achieved by using the actor-based runtime exposed via `BitbankBotBuilder`
+and the `BotStrategy` trait in `bitbank_bot.rs`. The runtime keeps the strategy
+state on `self`, so you can focus on the trading logic while the library
+handles message passing and WebSocket fan-out.
+
+```rust
+use bitbankutil_rs::bitbank_bot::{
+    BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy, BoxFuture,
+};
+
+struct MyBot;
+
+impl BotStrategy for MyBot {
+    type Event = BitbankEvent;
+
+    fn handle_event(
+        &mut self,
+        event: Self::Event,
+        _ctx: &BotContext<Self::Event>,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if let BitbankEvent::DepthUpdated { pair, depth } = event {
+                log::info!("{} depth: {}", pair, depth);
+            }
+        })
+    }
+}
+
+let _runtime = BitbankBotBuilder::new(MyBot)
+    .add_pair("btc_jpy".into())
+    .spawn();
+```
+
+`BotContext::event_sender` lets you feed custom or replayed data into the same
+runtime, which makes it straightforward to mix live Bitbank data with other
+sources when back-testing or building multi-exchange strategies.
 
 `examples/best_mm.rs` is a sample code of an asynchronous event-driven bot that continuously places limit orders at the best price. To actually run it, use a command like
 `cargo run --example best_mm mona_jpy 0.001 8000 0.001 0.002`. Here, the meanings of the arguments after `mona_jpy` are, as described in `examples/best_mm.rs`:
@@ -144,7 +179,10 @@ The developers of this project are not responsible for any losses incurred throu
 
 ## bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
 
-`bitbank_bot.rs`で定義されている、`BotTrait`を利用することで、実現できます。
+`bitbank_bot.rs`で定義されている`BitbankBotBuilder`と`BotStrategy`を利用すると、
+WebSocketイベントを扱う際に状態を自前で受け渡す必要がなくなり、取引ロジックに
+集中できます。`BotContext::event_sender`を使えば、ログのリプレイや他取引所の
+情報などユーザー独自のデータソースも同じランタイムに流し込めます。
 
 `examples/best_mm.rs`は非同期イベント駆動で、best価格に指値注文をし続けるbotのサンプルコードです。実際に実行するには
 `cargo run --example best_mm mona_jpy 0.001 8000 0.001 0.002` のようにしてください。ここで、`mona_jpy`以降の引数の意味は、`examples/best_mm.rs`に書いてあるとおり、
@@ -220,4 +258,3 @@ Twitter: [@Harui_botter](https://twitter.com/Harui_botter)
 # 注意
 
 このライブラリクレートやサンプルプログラムの利用によって生じたいかなる損失についても、当プロジェクトの開発者は責任を負いかねます。自己責任でご利用ください。
-

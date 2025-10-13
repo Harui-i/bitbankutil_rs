@@ -1,5 +1,4 @@
 pub mod bitbank_bot;
-pub mod bitbank_multiple_bot;
 pub mod bitbank_private;
 pub mod bitbank_public;
 pub mod bitbank_structs;

@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use bitbankutil_rs::bitbank_bot::BotTrait;
+use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 
@@ -13,38 +13,10 @@ impl MyBot {
     }
 }
 
-impl BotTrait<()> for MyBot {
-    async fn on_ticker(
-        &self,
-        _ticker: &bitbankutil_rs::bitbank_structs::BitbankTickerResponse,
-        state: (),
-    ) -> () {
-        state
-    }
+impl BotStrategy for MyBot {
+    type Event = BitbankEvent;
 
-    async fn on_transactions(
-        &self,
-        _transactions: &Vec<bitbankutil_rs::bitbank_structs::BitbankTransactionDatum>,
-        _state: (),
-    ) -> () {
-        ()
-    }
-
-    async fn on_depth_update(
-        &self,
-        _depth: &bitbankutil_rs::bitbank_structs::BitbankDepth,
-        _state: (),
-    ) {
-        ()
-    }
-
-    async fn on_circuit_break_info(
-        &self,
-        _circuit_break_info: &bitbankutil_rs::bitbank_structs::BitbankCircuitBreakInfo,
-        state: (),
-    ) -> () {
-        state
-    }
+    async fn handle_event(&mut self, _event: Self::Event, _ctx: &BotContext<Self::Event>) {}
 }
 
 #[tokio::main]
@@ -69,11 +41,12 @@ async fn main() {
     let pair = args[1].clone();
     let bot = MyBot::new();
 
-    let _bot_task = tokio::spawn(async move {
-        bot.run(pair.clone(), vec![], wsc, ()).await;
-    })
-    .await
-    .unwrap();
+    let _runtime = BitbankBotBuilder::new(bot)
+        .add_pair(pair)
+        .websocket_config(wsc)
+        .spawn();
 
-    println!("end");
+    loop {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
 }
