@@ -1,8 +1,10 @@
 use std::env;
 use std::time::Duration;
 
-use bitbankutil_rs::bitbank_multiple_bot::MultiBotTrait;
-use bitbankutil_rs::bitbank_structs::BitbankDepth;
+use bitbankutil_rs::bitbank_bot::BoxFuture;
+use bitbankutil_rs::bitbank_multiple_bot::{
+    MultiBotBuilder, MultiBotContext, MultiBotEvent, MultiBotStrategyBase,
+};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 
@@ -14,10 +16,19 @@ impl MyBot {
     }
 }
 
-impl MultiBotTrait<()> for MyBot {
-    async fn on_depth_update(&self, pair: &str, depth: &BitbankDepth, _state: ()) -> () {
-        log::info!("pair: {}, depth: {}", pair, depth);
-        ()
+impl MultiBotStrategyBase for MyBot {
+    type Event = MultiBotEvent;
+
+    fn handle_event(
+        &mut self,
+        event: Self::Event,
+        _ctx: &MultiBotContext<Self::Event>,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if let MultiBotEvent::DepthUpdated { pair, depth } = event {
+                log::info!("pair: {}, depth: {}", pair, depth);
+            }
+        })
     }
 }
 
@@ -42,7 +53,12 @@ async fn main() {
 
     let pairs = args[1..].to_vec();
     let bot = MyBot::new();
-    bot.run(pairs, vec![], wsc, ()).await;
+    let _runtime = MultiBotBuilder::new(bot)
+        .with_pairs(pairs)
+        .websocket_config(wsc)
+        .spawn();
 
-    println!("end");
+    loop {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
 }

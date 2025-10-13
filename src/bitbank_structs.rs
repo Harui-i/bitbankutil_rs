@@ -237,7 +237,7 @@ pub struct BitbankDepthWhole {
     sequenceId: String,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BitbankDepth {
     diff_buffer: BTreeMap<String, BitbankDepthDiff>,
     asks: BTreeMap<Decimal, f64>, // price, amount
