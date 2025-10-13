@@ -40,7 +40,6 @@ pub async fn run_websocket(
                 let room_name = ws_msg.room_name;
 
                 // dispatch according to room_name
-                // TODO: ここ、 fn dispatch_message(ws_msg: BitbankWebSocketMessage) -> BotMessage　なる関数を作って、ディスパッチ処理をそこに移してもいいかも
                 if room_name.starts_with("ticker") {
                     let ticker: BitbankTickerResponse =
                         serde_json::from_value(ws_msg.message.data).unwrap();
