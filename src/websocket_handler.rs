@@ -13,7 +13,7 @@ pub async fn run_websocket(
     pair: String,
     client_options: Vec<BitbankOption>,
     wsc: WebSocketConfig,
-    tx: mpsc::Sender<BotMessage>,
+    tx: mpsc::Sender<BotMessage>, // TODO: 野望として、ここでmpsc::Senderを渡すのではなくて、それをラップしたHandlerを渡すようにするといいかも
 ) {
     let mut ws_client = Client::new();
 
@@ -40,6 +40,7 @@ pub async fn run_websocket(
                 let room_name = ws_msg.room_name;
 
                 // dispatch according to room_name
+                // TODO: ここ、 fn dispatch_message(ws_msg: BitbankWebSocketMessage) -> BotMessage　なる関数を作って、ディスパッチ処理をそこに移してもいいかも
                 if room_name.starts_with("ticker") {
                     let ticker: BitbankTickerResponse =
                         serde_json::from_value(ws_msg.message.data).unwrap();
