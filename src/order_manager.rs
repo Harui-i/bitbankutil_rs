@@ -17,9 +17,9 @@ pub struct SimplifiedOrder {
     pub price: Decimal,
 }
 
-// Replace active orders
-// `current_orders` : Vec of BitbankGetOrderResponse, represents current orders in the pair
-// `pair` : &str represents the pair you want to replace orders.
+// 有効な注文を置き換えます
+// `current_orders` : BitbankGetOrderResponseのVecで、ペア内の現在の注文を表します
+// `pair` : &str は注文を置き換えたいペアを表します
 pub fn place_wanna_orders(
     mut wanna_place_orders: BTreeSet<SimplifiedOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
@@ -44,12 +44,12 @@ pub fn place_wanna_orders(
                 price: cur_order.price.clone().unwrap().parse::<Decimal>().unwrap(),
             };
 
-            // this order shoulb be canceled
+            // この注文はキャンセルされるべきです
             if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
                 log::debug!("this order is cancelled. {:?}", current_sord);
                 should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
             }
-            // this current order is in wanna_place_orders. (i.e. already placed order)
+            // この現在の注文はwanna_place_ordersにあります（つまり、すでに発注済みです）
             else {
                 wanna_place_orders.remove(&current_sord);
             }
@@ -75,8 +75,8 @@ pub fn place_wanna_orders(
             );
         }
 
-        // side, lot, price
-        // place orders
+        // side、lot、price
+        // 注文を発注します
         for sord in wanna_place_orders {
             let bbc2 = api_client.clone();
             let pair2 = pair.clone();
@@ -107,15 +107,15 @@ pub fn place_wanna_orders(
     }
 }
 
-/*   Receive the currently placed orders (`current_orders`) and the desired order state (`wanna_place_orders`), and perform new orders or order cancellations.
-If possible (if there is enough funds to place new orders and then cancel orders), order cancellations and new orders are processed in parallel.
+/* 現在発注済みの注文（`current_orders`）と希望する注文状態（`wanna_place_orders`）を受け取り、新規注文または注文のキャンセルを実行します。
+可能な場合（新規注文を発注してから注文をキャンセルするのに十分な資金がある場合）、注文のキャンセルと新規注文は並行して処理されます。
 wanna_place_orders
 
-`btc_free_amount`: The amount of the cryptocurrency of the trading pair that is not used for orders.
-`btc_locked_amount`: The amount of the cryptocurrency of the trading pair that is used for orders.
+`btc_free_amount`：注文に使用されていない取引ペアの暗号通貨の量。
+`btc_locked_amount`：注文に使用されている取引ペアの暗号通貨の量。
 
-`jpy_free_amount`: The amount of Japanese yen that is not used for orders.
-`jpy_btc_locked_amount`: The amount of Japanese yen that is used for orders in the trading pair.
+`jpy_free_amount`：注文に使用されていない日本円の量。
+`jpy_btc_locked_amount`：取引ペアの注文に使用されている日本円の量。
 */
 pub fn place_wanna_orders_concurrent(
     mut wanna_place_orders: Vec<SimplifiedOrder>,
@@ -142,16 +142,16 @@ pub fn place_wanna_orders_concurrent(
                 price: cur_order.price.clone().unwrap().parse::<Decimal>().unwrap(),
             };
 
-            // this order shoulb be canceled
+            // この注文はキャンセルされるべきです
             if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
                 log::debug!("this order will be cancelled. {:?}", current_sord);
                 should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
             }
-            // this current order is in wanna_place_orders. (i.e. already placed order)
+            // この現在の注文はwanna_place_ordersにあります（つまり、すでに発注済みです）
             // wanna_place_orders.contains(¤t_sord) || current_sord.pair != pair
             else {
-                // Remove current_sord from wanna_place_orders (It takes O(wanna_place_orders.len()), but wanna_place_orders.len() should be small enough, so it's OK)
-                // Since we want to delete only one, we will judge it straightforwardly.
+                // wanna_place_ordersからcurrent_sordを削除します（O(wanna_place_orders.len())かかりますが、wanna_place_orders.len()は十分に小さいはずなので問題ありません）
+                // 1つだけ削除したいので、素直に判断します。
                 log::debug!("this order already exists: {:?}", current_sord);
                 for (i, wanna_sord) in wanna_place_orders.iter().enumerate() {
                     if current_sord == *wanna_sord {
@@ -168,7 +168,7 @@ pub fn place_wanna_orders_concurrent(
         let mut first_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
         let mut second_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
 
-        // Assume that the order of wanna_place_orders is the priority of the orders you want to place.
+        // wanna_place_ordersの順序が発注したい注文の優先順位であると仮定します。
         for sord in wanna_place_orders {
             if sord.side == "buy" {
                 let consumed_jpy = sord.amount * sord.price;
@@ -215,10 +215,10 @@ pub fn place_wanna_orders_concurrent(
             ),
         }
 
-        // JoinSet that places orders in first_posted_orders and cancels orders in should_cancelled_orderids.
+        // first_posted_ordersの注文を発注し、should_cancelled_orderidsの注文をキャンセルするJoinSet。
         let mut first_js = JoinSet::new();
 
-        // have to cancell some orders
+        // いくつかの注文をキャンセルする必要があります
         if !should_cancelled_orderids.is_empty() {
             let bbc2 = api_client.clone();
             let pair2 = pair.clone();

@@ -11,9 +11,8 @@ use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
-/// Shared context that allows strategies to emit follow-up events back into the
-/// runtime. The context clones the underlying sender so strategies can freely
-/// store it if they need to schedule work later.
+/// 戦略がフォローアップイベントをランタイムに送り返すことを可能にする共有コンテキスト。
+/// コンテキストは基になる送信者をクローンするため、戦略は後で作業をスケジュールする必要がある場合に自由に保存できます。
 #[derive(Clone)]
 pub struct BotContext<E> {
     event_tx: mpsc::Sender<E>,
@@ -24,24 +23,22 @@ impl<E: Send + 'static> BotContext<E> {
         Self { event_tx }
     }
 
-    /// Obtain a clone of the internal event sender. This is useful if the
-    /// strategy wants to pipe custom events or replay data (e.g. from logs)
-    /// into the runtime without going through Bitbank's websocket.
+    /// 内部イベント送信者のクローンを取得します。これは、戦略がBitbankのWebsocketを経由せずに
+    /// カスタムイベントをパイプしたり、データ（ログなどから）を再生したりする場合に便利です。
     pub fn event_sender(&self) -> mpsc::Sender<E> {
         self.event_tx.clone()
     }
 
-    /// Push an event back into the runtime. This helper awaits the channel
-    /// send operation and propagates the result to the caller.
+    /// イベントをランタイムにプッシュバックします。このヘルパーはチャネルの送信操作を待機し、
+    /// 結果を呼び出し元に伝播します。
     pub async fn emit(&self, event: E) -> Result<(), mpsc::error::SendError<E>> {
         self.event_tx.send(event).await
     }
 }
 
-/// Strategies implement this trait to express how incoming events should be
-/// handled. The runtime owns the strategy instance and guarantees exclusive
-/// mutable access per event, so users can keep their state directly on `self`
-/// without external synchronisation primitives such as `Mutex`.
+/// 戦略は、受信イベントの処理方法を表現するためにこのトレイトを実装します。
+/// ランタイムは戦略インスタンスを所有し、イベントごとに排他的な可変アクセスを保証するため、
+/// ユーザーは`Mutex`などの外部同期プリミティブなしで`self`に直接状態を保持できます。
 pub trait BotStrategy: Send + 'static {
     type Event: Send + 'static;
 
@@ -52,7 +49,7 @@ pub trait BotStrategy: Send + 'static {
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
-/// Handle that keeps the bot actor alive and offers basic lifecycle control.
+/// ボットアクターを生かし続け、基本的なライフサイクル制御を提供するハンドル。
 pub struct BotHandle<E> {
     event_tx: mpsc::Sender<E>,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -118,7 +115,7 @@ where
     }
 }
 
-/// Raw messages forwarded from Bitbank's websocket connection.
+/// BitbankのWebSocket接続から転送された生メッセージ。
 #[derive(Debug, Clone)]
 pub enum BitbankInboundMessage {
     Ticker(BitbankTickerResponse),
@@ -128,8 +125,8 @@ pub enum BitbankInboundMessage {
     CircuitBreakInfo(BitbankCircuitBreakInfo),
 }
 
-/// High-level events exposed to bot strategies. `DepthUpdated` only fires when
-/// a complete order book snapshot is available for the corresponding pair.
+/// ボット戦略に公開される高レベルのイベント。`DepthUpdated`は、
+/// 対応するペアの完全なオーダーブックスナップショットが利用可能な場合にのみ発生します。
 #[derive(Debug, Clone)]
 pub enum BitbankEvent {
     Ticker {
@@ -240,7 +237,7 @@ fn duplicate_bitbank_options(options: &[BitbankOption]) -> Vec<BitbankOption> {
         .collect()
 }
 
-/// Builder that wires Bitbank's websocket feeds into a [`BotStrategy`].
+/// BitbankのWebSocketフィードを[`BotStrategy`]に接続するビルダー。
 pub struct BitbankBotBuilder<S, E>
 where
     S: BotStrategy<Event = E>,
@@ -321,8 +318,8 @@ where
     }
 }
 
-/// Runtime that keeps the actor and feed tasks alive. Dropping the runtime will
-/// abort the feed tasks; call [`Self::shutdown`] if you need a graceful stop.
+/// アクターとフィードタスクを生かし続けるランタイム。ランタイムをドロップすると
+/// フィードタスクが中止されます。正常に停止する必要がある場合は[`Self::shutdown`]を呼び出してください。
 pub struct BitbankBotRuntime<E> {
     bot_handle: Option<BotHandle<E>>,
     feed_handles: Vec<JoinHandle<()>>,
@@ -359,9 +356,9 @@ impl<E> Drop for BitbankBotRuntime<E> {
     }
 }
 
-/// Helper for advanced scenarios where the caller supplies their own stream of
-/// [`BitbankInboundMessage`] values (for instance, log replay). The function
-/// consumes messages from `inbound_rx` and forwards ready events to `event_tx`.
+/// 呼び出し元が独自の[`BitbankInboundMessage`]値のストリーム（たとえば、ログ再生）を提供する
+/// 高度なシナリオ向けのヘルパー。この関数は`inbound_rx`からのメッセージを消費し、
+/// 準備完了イベントを`event_tx`に転送します。
 pub async fn forward_bitbank_messages<E>(
     pair: String,
     inbound_rx: &mut mpsc::Receiver<BitbankInboundMessage>,

@@ -72,8 +72,8 @@ impl MyBot {
                 return;
             }
 
-            // update `self.last_updated` here, in order to prevent call api too frequently
-            // mutable reference needed here.
+            // APIの呼び出し頻度が高くなりすぎないように、ここで `self.last_updated` を更新します
+            // ここでは可変参照が必要です。
             self.last_updated = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -90,7 +90,7 @@ impl MyBot {
             let bb_client3 = self.bot_config.bb_api_client.clone();
             let current_asset_task = tokio::spawn(async move { bb_client3.get_assets().await });
 
-            // wait until two task has ended
+            // 2つのタスクが終了するまで待ちます
             let (order_info, current_asset) = tokio::join!(order_info_task, current_asset_task);
 
             let active_orders_info_res = order_info.unwrap();
@@ -127,7 +127,7 @@ impl MyBot {
                 .unwrap();
 
             let mut btc_locked_jpy_amount: Decimal = Decimal::zero();
-            // calculate locked jpy for this pair
+            // このペアのロックされたjpyを計算します
             for current_order in active_orders_info.clone().orders {
                 if current_order.r#type == "limit" && current_order.side == "buy" {
                     btc_locked_jpy_amount +=
@@ -271,7 +271,7 @@ impl BotStrategy for MyBot {
             BitbankEvent::CircuitBreakInfo { info, .. } => {
                 log::debug!("circuit break info updated: {:?}", info);
             }
-            // Ticker events are intentionally ignored in this strategy.
+            // Tickerイベントはこの戦略では意図的に無視されます。
             BitbankEvent::Ticker { .. } => {}
         }
     }
@@ -301,7 +301,7 @@ async fn main() {
     let mut wsc = WebSocketConfig::default();
     wsc.refresh_after = Duration::from_secs(3600);
     wsc.ignore_duplicate_during_reconnection = true;
-    let wsc = wsc; // make it immutable
+    let wsc = wsc; // 不変にします
 
     let pair = args[1].clone();
     let tick_size: Decimal = args[2].parse().unwrap();

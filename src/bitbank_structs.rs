@@ -17,29 +17,29 @@ pub struct BitbankApiResponse {
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankTickerResponse {
-    pub sell: Option<String>, // the lowest price of sell orders
-    pub buy: Option<String>,  // the highest price of buy orders
-    pub high: String,         // the highest price in last 24 hours
-    pub low: String,          // thw lowest price in last 24 hours
-    pub open: String,         // the open price at 24 hours ago
-    pub last: String,         // the latest price executed
-    pub vol: String,          // trading volume in last 24 hours
-    pub timestamp: Number,    // ticked at unix timestamp (milliseconds)
+    pub sell: Option<String>, // 売り注文の最安値
+    pub buy: Option<String>,  // 買い注文の最高値
+    pub high: String,         // 過去24時間の最高値
+    pub low: String,          // 過去24時間の最安値
+    pub open: String,         // 24時間前の始値
+    pub last: String,         // 最終取引価格
+    pub vol: String,          // 過去24時間の取引量
+    pub timestamp: Number,    // Unixタイムスタンプ（ミリ秒）
 }
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#circuit-break-info
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankCircuitBreakInfo {
     pub mode: String, // enum: `NONE`, `CIRCUIT_BREAK`, `FULL_RANGE_CIRCUIT_BREAK`, `RESUMPTION`, `LISTING`.
-    pub estimated_itayose_price: Option<String>, // estimated price. Null if mode is `NONE` or when there is no estimated price.
-    pub estimated_itayose_amount: Option<String>, // estimated amount. Null if model is `NONE`.
-    pub itayose_upper_price: Option<String>, // itayose price range upper limit. Null if mode is in `NONE`, `FULL_RANGE_CIRCUIT_BREAK` or `LISTING`.
-    pub itayose_lower_price: Option<String>, // itayose price range lower limit. Null if mode is in `NONE`, `FULL_RANGE_CIRCUIT_BREAK` or `LISTING`.
-    pub upper_trigger_price: Option<String>, // upper trigger price. Null if mode is not `NONE`.
-    pub lower_trigger_price: Option<String>, // lower trigger price. Null if mode is not `NONE`.
+    pub estimated_itayose_price: Option<String>, // 推定価格。モードが`NONE`の場合、または推定価格がない場合はNull。
+    pub estimated_itayose_amount: Option<String>, // 推定数量。モードが`NONE`の場合はNull。
+    pub itayose_upper_price: Option<String>, // 寄付き価格範囲の上限。モードが`NONE`、`FULL_RANGE_CIRCUIT_BREAK`、`LISTING`の場合はNull。
+    pub itayose_lower_price: Option<String>, // 寄付き価格範囲の下限。モードが`NONE`、`FULL_RANGE_CIRCUIT_BREAK`、`LISTING`の場合はNull。
+    pub upper_trigger_price: Option<String>, // 上限トリガー価格。モードが`NONE`でない場合はNull。
+    pub lower_trigger_price: Option<String>, // 下限トリガー価格。モードが`NONE`でない場合はNull。
     pub fee_type: String,                    // enum: `NORMAL`, `SELL_MAKER`, `BUY_MAKER`, `DYNAMIC`
-    pub reopen_timestamp: Option<Number>, // reopen timestamp (milliseconds). Null if mode is `NONE`, or reopen timestamp is undetermined yet.
-    pub timestamp: Number,                // ticked at unix timestamp (milliseconds)
+    pub reopen_timestamp: Option<Number>, // 再開タイムスタンプ（ミリ秒）。モードが`NONE`の場合、または再開タイムスタンプがまだ未定の場合はNull。
+    pub timestamp: Number,                // Unixタイムスタンプ（ミリ秒）
 }
 
 //https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets
@@ -54,7 +54,7 @@ pub struct BitbankAssetDatum {
     pub withdrawal_fee: serde_json::Value,
     pub stop_deposit: bool,
     pub stop_withdrawal: bool,
-    pub network_list: Option<serde_json::Value>, // undefined for jpy
+    pub network_list: Option<serde_json::Value>, // JPYでは未定義
     pub collateral_ratio: String,
 }
 
@@ -65,21 +65,21 @@ pub struct BitbankAssetsData {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankTradeHistoryDatum {
-    pub trade_id: Number,                  // trade id
-    pub pair: String,                      // pair enum
-    pub order_id: Number,                  // order id
-    pub side: String,                      // "buy" or "sell"
-    pub position_side: Option<String>,     // "long" or "short"
-    pub r#type: String, // one of "limit", "market", "stop", "stop_limit", "take_profit", "stop_loss"
-    pub amount: String, // amount
-    pub price: String,  // order price
-    pub maker_taker: String, // maker or taker
-    pub fee_amount_base: String, // base asset fee amount
-    pub fee_amount_quote: String, // quote asset fee amount
-    pub fee_occurred_amount_quote: String, // quote fee occurred amount which taken later. In case of spot trading, this value is same as fee_amount_quote
-    pub profit_loss: Option<String>,       // realized profit and loss
-    pub interest: Option<String>,          //  interest
-    pub executed_at: Number,               // order executed at unix timestamp (milliseconds)
+    pub trade_id: Number,                  // 取引ID
+    pub pair: String,                      // ペア
+    pub order_id: Number,                  // 注文ID
+    pub side: String,                      // "buy" または "sell"
+    pub position_side: Option<String>,     // "long" または "short"
+    pub r#type: String, // "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss" のいずれか
+    pub amount: String, // 数量
+    pub price: String,  // 注文価格
+    pub maker_taker: String, // maker または taker
+    pub fee_amount_base: String, // 基軸資産の手数料額
+    pub fee_amount_quote: String, // クオート資産の手数料額
+    pub fee_occurred_amount_quote: String, // 後で取得されるクオート手数料発生額。現物取引の場合、この値はfee_amount_quoteと同じです
+    pub profit_loss: Option<String>,       // 実現損益
+    pub interest: Option<String>,          // 金利
+    pub executed_at: Number,               // 注文約定時のUnixタイムスタンプ（ミリ秒）
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -91,20 +91,20 @@ pub struct BitbankTradeHistoryResponse {
 pub struct BitbankCreateOrderResponse {
     pub order_id: Number,
     pub pair: String,
-    pub side: String,                     // "buy" or "sell"
-    pub position_side: Option<String>,    // string or null.
-    pub r#type: String, // "limit", "market", "stop", "stop_limit", "take_profit", "stop_loss"
-    pub start_amount: Option<String>, // order qty when placed
-    pub remaining_amount: Option<String>, // qty not executed
-    pub executed_amount: String, // qty executed
-    pub price: Option<String>, // order price
-    pub post_only: Option<bool>, // post only or not
-    pub user_cancelable: bool, // whether cancelable order or note
-    pub average_price: String, // avg executed price
-    pub ordered_at: Number, // ordered at unix timestamp (milliseconds)
-    pub expire_at: Option<Number>, // expiration time in unix timestamp (milliseconds)
+    pub side: String,                     // "buy" または "sell"
+    pub position_side: Option<String>,    // 文字列またはnull
+    pub r#type: String, // "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"
+    pub start_amount: Option<String>, // 発注時の注文数量
+    pub remaining_amount: Option<String>, // 未約定の数量
+    pub executed_amount: String, // 約定済み数量
+    pub price: Option<String>, // 注文価格
+    pub post_only: Option<bool>, // ポストオンリーかどうか
+    pub user_cancelable: bool, // キャンセル可能な注文かどうか
+    pub average_price: String, // 平均約定価格
+    pub ordered_at: Number, // 発注時のUnixタイムスタンプ（ミリ秒）
+    pub expire_at: Option<Number>, // 有効期限のUnixタイムスタンプ（ミリ秒）
     pub trigger_price: Option<String>,
-    pub status: String, // status enum: `INACTIVE`, `UNFILLED`, `PARTIALLY_FILLED`, `FULLY_FILLED`, `CANCELED_UNFILLED`, `CANCELED_PARTIALLY_FILLED`
+    pub status: String, // ステータス: `INACTIVE`、`UNFILLED`、`PARTIALLY_FILLED`、`FULLY_FILLED`、`CANCELED_UNFILLED`、`CANCELED_PARTIALLY_FILLED`
 }
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-order-information
@@ -112,20 +112,20 @@ pub struct BitbankCreateOrderResponse {
 pub struct BitbankGetOrderResponse {
     pub order_id: Number,
     pub pair: String,
-    pub side: String,                     // "buy" or "sell"
-    pub position_side: Option<String>,    // string or null.
-    pub r#type: String, // "limit", "market", "stop", "stop_limit", "take_profit", "stop_loss"
-    pub start_amount: Option<String>, // order qty when placed
-    pub remaining_amount: Option<String>, // qty not executed
-    pub executed_amount: String, // qty executed
-    pub price: Option<String>, // order price
-    pub post_only: Option<bool>, // post only or not
-    pub user_cancelable: bool, // whether cancelable order or note
-    pub average_price: String, // avg executed price
-    pub ordered_at: Number, // ordered at unix timestamp (milliseconds)
-    pub expire_at: Option<Number>, // expiration time in unix timestamp (milliseconds)
+    pub side: String,                     // "buy" または "sell"
+    pub position_side: Option<String>,    // 文字列またはnull
+    pub r#type: String, // "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"
+    pub start_amount: Option<String>, // 発注時の注文数量
+    pub remaining_amount: Option<String>, // 未約定の数量
+    pub executed_amount: String, // 約定済み数量
+    pub price: Option<String>, // 注文価格
+    pub post_only: Option<bool>, // ポストオンリーかどうか
+    pub user_cancelable: bool, // キャンセル可能な注文かどうか
+    pub average_price: String, // 平均約定価格
+    pub ordered_at: Number, // 発注時のUnixタイムスタンプ（ミリ秒）
+    pub expire_at: Option<Number>, // 有効期限のUnixタイムスタンプ（ミリ秒）
     pub trigger_price: Option<String>,
-    pub status: String, // status enum: `INACTIVE`, `UNFILLED`, `PARTIALLY_FILLED`, `FULLY_FILLED`, `CANCELED_UNFILLED`, `CANCELED_PARTIALLY_FILLED`
+    pub status: String, // ステータス: `INACTIVE`、`UNFILLED`、`PARTIALLY_FILLED`、`FULLY_FILLED`、`CANCELED_UNFILLED`、`CANCELED_PARTIALLY_FILLED`
 }
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
@@ -133,22 +133,22 @@ pub struct BitbankGetOrderResponse {
 pub struct BitbankCancelOrderResponse {
     pub order_id: Number,
     pub pair: String,
-    pub side: String,                     // "buy" or "sell"
-    pub position_side: Option<String>,    // string or null.
-    pub r#type: String, // "limit", "market", "stop", "stop_limit", "take_profit", "stop_loss"
-    pub start_amount: Option<String>, // order qty when placed
-    pub remaining_amount: Option<String>, // qty not executed
-    pub executed_amount: String, // qty executed
-    pub price: Option<String>, // order price (present only if type = "limit" or "stop_limit")
-    pub post_only: Option<bool>, // whether post only or not (present only if type = "limit")
-    pub user_cancelable: bool, // whether cancelable order or note
-    pub average_price: String, // avg executed price
-    pub ordered_at: Number, // ordered at unix timestamp (milliseconds)
-    pub expire_at: Option<Number>, // expiration time in unix timestamp (milliseconds)
-    pub canceled_at: Option<Number>, // canceled at unix timestamp (milliseconds)
-    pub triggered_at: Option<Number>, // triggered at unix timestamp (milliseconds) (present only if type = "stop" or "stop_limit")
-    pub trigger_price: Option<String>, // trigger price (present only if type = "stop" or "stop_limit" )
-    pub status: String, // status enum: `INACTIVE`, `UNFILLED`, `PARTIALLY_FILLED`, `FULLY_FILLED`, `CANCELED_UNFILLED`, `CANCELED_PARTIALLY_FILLED`
+    pub side: String,                     // "buy" または "sell"
+    pub position_side: Option<String>,    // 文字列またはnull
+    pub r#type: String, // "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"
+    pub start_amount: Option<String>, // 発注時の注文数量
+    pub remaining_amount: Option<String>, // 未約定の数量
+    pub executed_amount: String, // 約定済み数量
+    pub price: Option<String>, // 注文価格（typeが "limit" または "stop_limit" の場合のみ存在）
+    pub post_only: Option<bool>, // ポストオンリーかどうか（typeが "limit" の場合のみ存在）
+    pub user_cancelable: bool, // キャンセル可能な注文かどうか
+    pub average_price: String, // 平均約定価格
+    pub ordered_at: Number, // 発注時のUnixタイムスタンプ（ミリ秒）
+    pub expire_at: Option<Number>, // 有効期限のUnixタイムスタンプ（ミリ秒）
+    pub canceled_at: Option<Number>, // キャンセル時のUnixタイムスタンプ（ミリ秒）
+    pub triggered_at: Option<Number>, // トリガー時のUnixタイムスタンプ（ミリ秒）（typeが "stop" または "stop_limit" の場合のみ存在）
+    pub trigger_price: Option<String>, // トリガー価格（typeが "stop" または "stop_limit" の場合のみ存在）
+    pub status: String, // ステータス: `INACTIVE`、`UNFILLED`、`PARTIALLY_FILLED`、`FULLY_FILLED`、`CANCELED_UNFILLED`、`CANCELED_PARTIALLY_FILLED`
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -192,23 +192,23 @@ pub struct BitbankTransactionDatum {
     pub executed_at: i64,
     #[serde(with = "rust_decimal::serde::float")]
     pub price: Decimal,
-    pub side: String, // "buy" or "sell"
+    pub side: String, // "buy" または "sell"
     pub transaction_id: i64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct BitbankDepthDiff {
-    pub a: Vec<Vec<String>>, // ask, amount
-    pub b: Vec<Vec<String>>, // bid, amount
-    pub ao: Option<String>, // optional. The quantity of asks over the highest price of asks orders. If there is no change in quantity, it will not be included in the message.
-    pub bu: Option<String>, // optional. The quantity of bids under the lowest price of bids orders. If there is no change in quantity, it will not be included in the message.
-    pub au: Option<String>, // optional. The quantity of asks under the lowest price of bids orders. If there is no change in quantity, it will not be included in the message.
-    pub bo: Option<String>, // optional. The quantity of bids over the highest price of asks orders. If there is no change in quantity, it will not be included in the message.
-    pub am: Option<String>, // optional. The quantity of market sell orders. If there is no change in quantity, it will not be included in the message.
-    pub bm: Option<String>, // optional. The quantity of market buy orders. If there is no change in quantity, it will not be included in the message.
+    pub a: Vec<Vec<String>>, // 売り注文、数量
+    pub b: Vec<Vec<String>>, // 買い注文、数量
+    pub ao: Option<String>, // オプション。売り注文の最高値を超える売り注文の数量。数量に変更がない場合は、メッセージに含まれません。
+    pub bu: Option<String>, // オプション。買い注文の最安値を下回る買い注文の数量。数量に変更がない場合は、メッセージに含まれません。
+    pub au: Option<String>, // オプション。買い注文の最安値を下回る売り注文の数量。数量に変更がない場合は、メッセージに含まれません。
+    pub bo: Option<String>, // オプション。売り注文の最高値を超える買い注文の数量。数量に変更がない場合は、メッセージに含まれません。
+    pub am: Option<String>, // オプション。成行売り注文の数量。数量に変更がない場合は、メッセージに含まれません。
+    pub bm: Option<String>, // オプション。成行買い注文の数量。数量に変更がない場合は、メッセージに含まれません。
 
-    pub t: i64,    // unixtime in milliseconds
-    pub s: String, // sequence id. increasing-order but not necessarily consecutive
+    pub t: i64,    // Unixタイムスタンプ（ミリ秒）
+    pub s: String, // シーケンスID。昇順ですが、必ずしも連続しているとは限りません
 }
 
 #[allow(non_snake_case)]
@@ -217,21 +217,21 @@ pub struct BitbankDepthWhole {
     asks: Vec<Vec<String>>,
     bids: Vec<Vec<String>>,
     #[allow(dead_code)]
-    asks_over: String, // asks sum s.t. its price is higher than asks_highest value.
-    // Without Circut Breaker, 200 offers from best-bid are sent via websocket.
-    // So, asks_over is the sum of the rest of the offers.
+    asks_over: String, // asks_highest値より価格が高いasksの合計。
+    // サーキットブレーカーなしでは、best-bidから200件のオファーがwebsocket経由で送信されます。
+    // そのため、asks_overは残りのオファーの合計です。
     #[allow(dead_code)]
-    bids_under: String, // bids sum s.t. its price is lower than bids_lowest value.
+    bids_under: String, // bids_lowest値より価格が低いbidsの合計。
 
-    // these four values are 0 in non-CB mode.
+    // これら4つの値は非CBモードでは0です。
     #[allow(dead_code)]
-    asks_under: String, // asks sum s.t. its price is lower than bids_lowest. (so low price)
+    asks_under: String, // bids_lowestより価格が低いasksの合計。（つまり低価格）
     #[allow(dead_code)]
-    bids_over: String, // bids sum s.t. its price is higher than asks_highest. (so high price)
+    bids_over: String, // asks_highestより価格が高いbidsの合計。（つまり高価格）
     #[allow(dead_code)]
-    ask_market: String, // the quantity of market sell orders. Usually "0" in NORMAL mode.
+    ask_market: String, // 成行売り注文の数量。通常、NORMALモードでは "0" です。
     #[allow(dead_code)]
-    bid_market: String, // the quantity of market buy orders. Usually "0" in NORMAL mode.
+    bid_market: String, // 成行買い注文の数量。通常、NORMALモードでは "0" です。
 
     pub timestamp: i64,
     sequenceId: String,
@@ -240,7 +240,7 @@ pub struct BitbankDepthWhole {
 #[derive(Debug, Clone)]
 pub struct BitbankDepth {
     diff_buffer: BTreeMap<String, BitbankDepthDiff>,
-    asks: BTreeMap<Decimal, f64>, // price, amount
+    asks: BTreeMap<Decimal, f64>, // 価格、数量
     bids: BTreeMap<Decimal, f64>,
 
     is_complete: bool,
@@ -316,7 +316,7 @@ impl BitbankDepth {
     pub fn update_whole(&mut self, whole: BitbankDepthWhole) {
         let seq = whole.sequenceId.clone();
 
-        // delete diff items remaining in `diff_buffer` whose sequence id is less than or equal to `whole`'s sequence id.
+        // `diff_buffer`に残っている、シーケンスIDが`whole`のシーケンスID以下のdiff項目を削除します。
         let keys_to_remove: Vec<String> = self
             .diff_buffer
             .iter()

@@ -30,8 +30,8 @@ pub mod depth {
             self.bids().iter().nth_back(k)
         }
 
-        // return minimum price p, s.t. Sum_{bestask <= price <= p} (amount) >= r
-        // To think intuitively, it is the highest price when you execute a market buy order of size r.
+        // 最小価格pを返します。ここで、Sum_{bestask <= price <= p} (amount) >= rです。
+        // 直感的に考えると、サイズrの成行買い注文を実行したときの最高価格です。
         fn r_depth_ask_price(&self, r: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.asks().iter() {
@@ -44,8 +44,8 @@ pub mod depth {
             None
         }
 
-        // return maximum price p, s.t. Sum_{p <= price <= bestbid} (amount) >= r
-        // To think intuitively, it is the lowest price when you execute a market sell order of size r.
+        // 最大価格pを返します。ここで、Sum_{p <= price <= bestbid} (amount) >= rです。
+        // 直感的に考えると、サイズrの成行売り注文を実行したときの最低価格です。
         fn r_depth_bid_price(&self, r: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.bids().iter().rev() {
@@ -58,8 +58,8 @@ pub mod depth {
             None
         }
 
-        // return minimum price p, s.t. Sum_{bestask <= price <= p} (amount * price) >= s
-        // To think intuitively, it is the highest price when you execute a market buy order of size s (in dollar).
+        // 最小価格pを返します。ここで、Sum_{bestask <= price <= p} (amount * price) >= sです。
+        // 直感的に考えると、サイズs（ドル建て）の成行買い注文を実行したときの最高価格です。
         fn s_depth_ask_price(&self, s: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.asks().iter() {
@@ -72,8 +72,8 @@ pub mod depth {
             None
         }
 
-        // return maximum price p, s.t. Sum_{p <= price <= bestbid} (amount * price) >= s
-        // To think intuitively, it is the lowest price when you execute a market sell order of size s (in dollar).
+        // 最大価格pを返します。ここで、Sum_{p <= price <= bestbid} (amount * price) >= sです。
+        // 直感的に考えると、サイズs（ドル建て）の成行売り注文を実行したときの最低価格です。
         fn s_depth_bid_price(&self, s: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.bids().iter().rev() {
@@ -86,7 +86,7 @@ pub mod depth {
             None
         }
 
-        // return log(r-depth ask price) - log(best ask price))
+        // log(r-depth ask price) - log(best ask price)を返します。
         fn r_depth_ask_logdiff(&self, r: f64) -> Option<f64> {
             let ask_price = self.r_depth_ask_price(r)?;
             let best_ask_price = self.best_ask()?.0;
@@ -97,7 +97,7 @@ pub mod depth {
             Some(ask_price_f64.ln() - best_ask_price_f64.ln())
         }
 
-        // return log(r-depth bid price) - log(best bid price)
+        // log(r-depth bid price) - log(best bid price)を返します。
         fn r_depth_bid_logdiff(&self, r: f64) -> Option<f64> {
             let bid_price = self.r_depth_bid_price(r)?;
             let best_bid_price = self.best_bid()?.0;
@@ -108,7 +108,7 @@ pub mod depth {
             Some(bid_price_f64.ln() - best_bid_price_f64.ln())
         }
 
-        // return log(s-depth ask price) - log(best ask price)
+        // log(s-depth ask price) - log(best ask price)を返します。
         fn s_depth_ask_logdiff(&self, s: f64) -> Option<f64> {
             let ask_price = self.s_depth_ask_price(s)?;
             let best_ask_price = self.best_ask()?.0;
@@ -119,7 +119,7 @@ pub mod depth {
             Some(ask_price.ln() - best_ask_price.ln())
         }
 
-        // return log(s-depth bid price) - log(best bid price)
+        // log(s-depth bid price) - log(best bid price)を返します。
         fn s_depth_bid_logdiff(&self, s: f64) -> Option<f64> {
             let bid_price = self.s_depth_bid_price(s)?;
             let best_bid_price = self.best_bid()?.0;
@@ -148,7 +148,7 @@ pub mod depth {
             }
         }
 
-        // format the depth data of top k levels. if k is none, then format 20 levels.
+        // 上位kレベルのデプスデータをフォーマットします。kがnoneの場合、20レベルをフォーマットします。
         fn format_depth(&self, k: Option<usize>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let k2 = k.unwrap_or(20);
 
@@ -200,15 +200,15 @@ pub mod bybit {
     #[allow(dead_code, non_snake_case)]
     #[derive(Deserialize, Debug)]
     pub struct BybitTransactionDatum {
-        pub BT: bool,  // Whether it is a block trade or not
-        pub S: String, // Side
-        pub T: i64,    // timestamp
-        pub i: String, // trade id
+        pub BT: bool,  // ブロック取引かどうか
+        pub S: String, // サイド
+        pub T: i64,    // タイムスタンプ
+        pub i: String, // 取引ID
         #[serde(with = "rust_decimal::serde::float")]
-        pub p: Decimal, //
-        pub s: String, // symbol
+        pub p: Decimal, // 価格
+        pub s: String, // シンボル
         #[serde(with = "rust_decimal::serde::float")]
-        pub v: Decimal, // Trade size
+        pub v: Decimal, // 取引サイズ
     }
 
     #[allow(dead_code, non_snake_case)]
@@ -223,23 +223,23 @@ pub mod bybit {
     #[derive(Deserialize, Debug)]
     #[allow(non_snake_case, dead_code)]
     pub struct BybitOrderbookWebSocketMessage {
-        pub topic: String,  // topic, like "publicTrade.BTCUSDT"
-        pub r#type: String, // Data type. `snapshot`, `delta`
-        pub ts: i64,        // timestamp
+        pub topic: String,  // トピック、例："publicTrade.BTCUSDT"
+        pub r#type: String, // データ型 `snapshot`、`delta`
+        pub ts: i64,        // タイムスタンプ
         pub data: BybitOrderbookData,
-        cts: Number, // The timestamp from the match engine when this orderbook data is produced. It can be correlated with T from public trade channel
+        cts: Number, // このオーダーブックデータが生成されたときのマッチングエンジンからのタイムスタンプ。これは公開取引チャネルのTと相関させることができます。
     }
 
     #[derive(Deserialize, Debug)]
     #[allow(non_snake_case, dead_code)]
     pub struct BybitOrderbookData {
-        pub s: String,           // symbol
-        pub b: Vec<Vec<String>>, // bids
-        pub a: Vec<Vec<String>>, // asks
-        pub u: i64,              // Update ID. Is a sequence. Occasionally, you'll receive "u"=1,
-        // which is a snapshot data due to the restart of the service. So please overwrite your local orderbook
-        pub seq: i64, // Cross sequenc.
-                      //You can use this field to compare different levels orderbook data, and for the smaller seq, then it means the data is generated earlier.
+        pub s: String,           // シンボル
+        pub b: Vec<Vec<String>>, // 買い注文
+        pub a: Vec<Vec<String>>, // 売り注文
+        pub u: i64,              // 更新ID。シーケンスです。時々、"u"=1 を受信しますが、
+        // これはサービスの再起動によるスナップショットデータです。そのため、ローカルのオーダーブックを上書きしてください。
+        pub seq: i64, // クロスシーケンス。
+                      // このフィールドを使用して、異なるレベルのオーダーブックデータを比較できます。seqが小さいほど、データが早く生成されたことを意味します。
     }
 
     pub struct BybitDepth {

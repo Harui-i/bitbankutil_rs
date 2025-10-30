@@ -10,7 +10,7 @@ pub fn handle_response<T: serde::de::DeserializeOwned>(
 ) -> Result<T, Option<crypto_botters::bitbank::BitbankHandleError>> {
     match res {
         Ok(api_response) => {
-            // deserialize
+            // デシリアライズ
             match serde_json::from_value::<T>(api_response.data.clone()) {
                 Ok(ret) => Ok(ret),
                 Err(err) => {
