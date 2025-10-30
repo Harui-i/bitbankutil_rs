@@ -21,7 +21,7 @@ pub async fn run_websocket(
         ws_client.update_default_option(option);
     }
 
-    let ws_client = ws_client; // immutalize
+    let ws_client = ws_client; // 不変にする
 
     let channels = vec![
         format!("ticker_{}", pair).to_owned(),
@@ -39,7 +39,7 @@ pub async fn run_websocket(
                     serde_json::from_value(val[1].clone()).unwrap();
                 let room_name = ws_msg.room_name;
 
-                // dispatch according to room_name
+                // room_nameに応じてディスパッチする
                 if room_name.starts_with("ticker") {
                     let ticker: BitbankTickerResponse =
                         serde_json::from_value(ws_msg.message.data).unwrap();
@@ -74,7 +74,7 @@ pub async fn run_websocket(
 
                     let tx2 = tx.clone();
 
-                    // without `move`, tx2 is borrowed. but adding `move`, tx2 is moved to this closure.
+                    // `move`なしではtx2は借用されるが、`move`を追加すると、tx2はこのクロージャに移動される。
                     tokio::spawn(async move {
                         if tx2
                             .send(BitbankInboundMessage::DepthDiff(depth_diff_message))
@@ -89,7 +89,7 @@ pub async fn run_websocket(
                         serde_json::from_value(ws_msg.message.data).unwrap();
                     let tx2 = tx.clone();
 
-                    // without `move`, tx2 is borrowed. but adding `move`, tx2 is moved to this closure.
+                    // `move`なしではtx2は借用されるが、`move`を追加すると、tx2はこのクロージャに移動される。
                     tokio::spawn(async move {
                         if tx2
                             .send(BitbankInboundMessage::DepthWhole(depth_whole_message))
@@ -124,7 +124,7 @@ pub async fn run_websocket(
         .await
         .unwrap();
 
-    // sleep
+    // スリープ
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }

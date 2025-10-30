@@ -40,7 +40,7 @@ async fn main() {
     let mut wsc = WebSocketConfig::default();
     wsc.refresh_after = Duration::from_secs(3600);
     wsc.ignore_duplicate_during_reconnection = true;
-    let wsc = wsc; // make it immutable
+    let wsc = wsc; // 不変にする
 
     let pairs = args[1..].to_vec();
     let bot = MyBot::new();

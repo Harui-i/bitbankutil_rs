@@ -33,7 +33,7 @@ impl BitbankPrivateApiClient {
             }
         }
 
-        // check whether authentication option is set.
+        // 認証オプションが設定されているか確認する。
         assert_eq!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).http_auth, true);
 
         assert_eq!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).http_url, BitbankHttpUrl::Private);
@@ -44,7 +44,7 @@ impl BitbankPrivateApiClient {
         BitbankPrivateApiClient { client: client }
     }
 
-    // you will use it in order to check your position
+    // ポジションを確認するために使用する。
     pub async fn get_assets(&self) -> Result<BitbankAssetsData, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
@@ -64,7 +64,7 @@ impl BitbankPrivateApiClient {
         crate::response_handler::handle_response("get_assets", res)
     }
 
-    // Fetch order information. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-order-information
+    // 注文情報を取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-order-information
     pub async fn get_order(
         &self,
         pair: &str,
@@ -89,7 +89,7 @@ impl BitbankPrivateApiClient {
         crate::response_handler::handle_response("get_order", res)
     }
 
-    // Create new order. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#create-new-order
+    // 新規注文を作成する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#create-new-order
     pub async fn post_order(
         &self,
         pair: &str,
@@ -105,7 +105,7 @@ impl BitbankPrivateApiClient {
         assert!(
             r#type == "limit" || r#type == "market" || r#type == "stop" || r#type == "stop_limit"
         );
-        // post_only is true => r#type is "limit"
+        // post_onlyがtrue => r#typeは "limit"
         assert!(post_only.is_none() || (post_only.unwrap() == true && r#type == "limit"));
 
         let mut body_map = serde_json::Map::new();
@@ -149,15 +149,15 @@ impl BitbankPrivateApiClient {
         crate::response_handler::handle_response("post_order", res)
     }
 
-    // Fetch trade history: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-trade-history
+    // 取引履歴を取得する: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-trade-history
     pub async fn get_trade_history(
         &self,
-        pair: Option<&str>,    // pair enum
-        count: Option<i64>,    // take limit (up to 1000)
-        order_id: Option<i64>, // order id
-        since: Option<i64>,    // since unix timestamp
-        end: Option<i64>,      // end unix time stamp
-        order: Option<&str>,   // histories in order(order enum: `asc` or `desc`, default to `desc`)
+        pair: Option<&str>,    // ペア
+        count: Option<i64>,    // 取得件数 (最大1000)
+        order_id: Option<i64>, // 注文ID
+        since: Option<i64>,    // 開始Unixタイムスタンプ
+        end: Option<i64>,      // 終了Unixタイムスタンプ
+        order: Option<&str>,   // 履歴の順序 (`asc`または`desc`、デフォルトは`desc`)
     ) -> Result<BitbankTradeHistoryResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let mut request_body = serde_json::Map::new();
@@ -184,7 +184,7 @@ impl BitbankPrivateApiClient {
             request_body.insert("order".to_string(), serde_json::json!(order));
         }
 
-        let request_body = request_body; // immutalize
+        let request_body = request_body; // 不変にする
 
         let res: Result<
             BitbankApiResponse,
@@ -204,7 +204,7 @@ impl BitbankPrivateApiClient {
         crate::response_handler::handle_response("get_trade_history", res)
     }
 
-    // Cancel order. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
+    // 注文をキャンセルする。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
     pub async fn post_cancel_order(
         &self,
         pair: &str,
@@ -229,7 +229,7 @@ impl BitbankPrivateApiClient {
         crate::response_handler::handle_response("post_cancel_order", res)
     }
 
-    // Cancel multiple orders. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-multiple-orders
+    // 複数の注文をキャンセルする。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-multiple-orders
     pub async fn post_cancel_orders(
         &self,
         pair: &str,
@@ -257,12 +257,12 @@ impl BitbankPrivateApiClient {
     }
 
     // TODO
-    // Fetch multiple orders. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-multiple-orders
+    // 複数の注文を取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-multiple-orders
     pub fn post_orders_info(&self) {
         todo!();
     }
 
-    // Fetch active orders. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-active-orders
+    // 有効な注文を取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-active-orders
     pub async fn get_active_orders(
         &self,
         pair: Option<&str>,
@@ -293,7 +293,7 @@ impl BitbankPrivateApiClient {
             request_body.insert("end".to_string(), serde_json::json!(end));
         }
 
-        let request_body = request_body; // immutalize
+        let request_body = request_body; // 不変にする
 
         let res: Result<
             BitbankApiResponse,
@@ -313,7 +313,7 @@ impl BitbankPrivateApiClient {
         crate::response_handler::handle_response("get_active_orders", res)
     }
 
-    // get exchange status. https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
+    // 取引所のステータスを取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
     pub async fn get_status(
         &self,
     ) -> Result<BitbankSpotStatusResponse, Option<BitbankHandleError>> {
@@ -333,7 +333,7 @@ impl BitbankPrivateApiClient {
         crate::response_handler::handle_response("get_status", res)
     }
 
-    // Get channel and token for private stream. cf: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#private-stream
+    // プライベートストリーム用のチャンネルとトークンを取得する。 cf: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#private-stream
     pub async fn get_channel_and_token(
         &self,
     ) -> Result<BitbankChannelAndTokenResponse, Option<BitbankHandleError>> {
@@ -353,9 +353,9 @@ impl BitbankPrivateApiClient {
     }
 }
 
-// if you want to see stdout in succeed test, you should do `RUST_LOG=debug cargo test -- --nocapture`
-// To avoid parallel execution, you have to add `--test-threads=1` after `--`
-// Recommended form: `cargo test XXX -- --test-threads=1`
+// テスト成功時に標準出力を表示したい場合は、`RUST_LOG=debug cargo test -- --nocapture` を実行してください。
+// 並列実行を避けるには、`--` の後に `--test-threads=1` を追加する必要がある。
+// 推奨される形式: `cargo test XXX -- --test-threads=1`
 #[cfg(test)]
 mod tests {
     use std::{env, time::Duration};
@@ -414,7 +414,7 @@ mod tests {
         log::info!("cancelled response: {:?}", cancel_res);
     }
 
-    // it's flakey test!
+    // このテストは不安定だ！
     #[tokio::test]
     async fn test_private_post_cancel_order() {
         logging_init();
@@ -522,7 +522,7 @@ mod tests {
         assert!(channel_and_token.is_ok());
     }
 
-    // intentionaly exceed Rate Limit. if you want to run it, you should add `-- --ignored` option like: `cargo test -- --ignored`.
+    // 意図的にレート制限を超える。実行したい場合は、`cargo test -- --ignored` のように `-- --ignored` オプションを追加してください。
     #[tokio::test]
     #[ignore]
     async fn test_private_exceed_rate_limit() {
