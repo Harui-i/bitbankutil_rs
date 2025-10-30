@@ -1,9 +1,12 @@
+pub mod backtest;
 pub mod bitbank_bot;
 pub mod bitbank_private;
 pub mod bitbank_public;
 pub mod bitbank_structs;
 pub mod order_manager;
 pub mod response_handler;
+pub mod strategies;
+pub mod trading_api;
 pub mod websocket_handler;
 
 pub mod depth {

@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    bitbank_private::BitbankPrivateApiClient,
     bitbank_structs::{
         BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
     },
+    trading_api::BitbankTradingApi,
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
@@ -20,12 +20,15 @@ pub struct SimplifiedOrder {
 // Replace active orders
 // `current_orders` : Vec of BitbankGetOrderResponse, represents current orders in the pair
 // `pair` : &str represents the pair you want to replace orders.
-pub fn place_wanna_orders(
+pub fn place_wanna_orders<C>(
     mut wanna_place_orders: BTreeSet<SimplifiedOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
     pair: String,
-    api_client: BitbankPrivateApiClient,
-) -> impl std::future::Future<Output = ()> + Send {
+    api_client: C,
+) -> impl std::future::Future<Output = ()> + Send
+where
+    C: BitbankTradingApi,
+{
     async move {
         let start = Instant::now();
         let mut should_cancelled_orderids = vec![];
@@ -61,10 +64,7 @@ pub fn place_wanna_orders(
                 .await;
 
             if let Err(err) = cancel_order_response_result {
-                log::error!(
-                    "in place_wanna_orders, post_cancel_orders has returned error: {:?}",
-                    err
-                );
+                log::error!("post_cancel_orders failed in place_wanna_orders: {:?}", err);
                 return;
             }
             let cancel_order_response = cancel_order_response_result.unwrap();
@@ -95,12 +95,19 @@ pub fn place_wanna_orders(
         }
 
         while let Some(js_res) = js.join_next().await {
-            let bcor: Result<
-                BitbankCreateOrderResponse,
-                Option<crypto_botters::bitbank::BitbankHandleError>,
-            > = js_res.unwrap();
-
-            log::debug!("order result: {:?}", bcor);
+            match js_res {
+                Ok(result) => match result {
+                    Ok(response) => {
+                        log::debug!("order result: {:?}", response);
+                    }
+                    Err(err) => {
+                        log::error!("post_order failed in place_wanna_orders: {:?}", err);
+                    }
+                },
+                Err(join_error) => {
+                    log::error!("post_order task panicked: {:?}", join_error);
+                }
+            }
         }
 
         log::debug!("Replaced orders within {} ms.", start.elapsed().as_millis());
@@ -117,14 +124,17 @@ wanna_place_orders
 `jpy_free_amount`: The amount of Japanese yen that is not used for orders.
 `jpy_btc_locked_amount`: The amount of Japanese yen that is used for orders in the trading pair.
 */
-pub fn place_wanna_orders_concurrent(
+pub fn place_wanna_orders_concurrent<C>(
     mut wanna_place_orders: Vec<SimplifiedOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
     btc_free_amount: Decimal,
     jpy_free_amount: Decimal,
     pair: String,
-    api_client: BitbankPrivateApiClient,
-) -> impl std::future::Future<Output = ()> + Send {
+    api_client: C,
+) -> impl std::future::Future<Output = ()> + Send
+where
+    C: BitbankTradingApi,
+{
     async move {
         let start = Instant::now();
         let mut should_cancelled_orderids = vec![];
@@ -200,19 +210,9 @@ pub fn place_wanna_orders_concurrent(
             }
         }
 
-        enum FirstJoinSetResponse {
-            CancelResponse(
-                Result<
-                    BitbankCancelOrdersResponse,
-                    Option<crypto_botters::bitbank::BitbankHandleError>,
-                >,
-            ),
-            PostResponse(
-                Result<
-                    BitbankCreateOrderResponse,
-                    Option<crypto_botters::bitbank::BitbankHandleError>,
-                >,
-            ),
+        enum FirstJoinSetResponse<E> {
+            CancelResponse(Result<BitbankCancelOrdersResponse, E>),
+            PostResponse(Result<BitbankCreateOrderResponse, E>),
         }
 
         // JoinSet that places orders in first_posted_orders and cancels orders in should_cancelled_orderids.
@@ -252,20 +252,28 @@ pub fn place_wanna_orders_concurrent(
         }
 
         while let Some(first_js_res) = first_js.join_next().await {
-            let fjsr = first_js_res.unwrap();
-
-            match fjsr {
-                FirstJoinSetResponse::CancelResponse(bitbank_cancel_orders_response) => {
-                    log::debug!(
-                        "cancel order response in first_joinset: {:?}",
-                        bitbank_cancel_orders_response
-                    );
-                }
-                FirstJoinSetResponse::PostResponse(bitbank_create_order_response) => {
-                    log::debug!(
-                        "create order response in first_joinset: {:?}",
-                        bitbank_create_order_response
-                    );
+            match first_js_res {
+                Ok(FirstJoinSetResponse::CancelResponse(response)) => match response {
+                    Ok(ok) => {
+                        log::debug!("cancel order response in first_joinset: {:?}", ok);
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "post_cancel_orders failed in first_joinset processing: {:?}",
+                            err
+                        );
+                    }
+                },
+                Ok(FirstJoinSetResponse::PostResponse(response)) => match response {
+                    Ok(ok) => {
+                        log::debug!("create order response in first_joinset: {:?}", ok);
+                    }
+                    Err(err) => {
+                        log::error!("post_order failed in first_joinset processing: {:?}", err);
+                    }
+                },
+                Err(join_error) => {
+                    log::error!("first_js task panicked: {:?}", join_error);
                 }
             }
         }
@@ -291,8 +299,17 @@ pub fn place_wanna_orders_concurrent(
             }
 
             while let Some(second_js_res) = second_js.join_next().await {
-                let bcor = second_js_res.unwrap();
-                log::debug!("post order response in second_js: {:?}", bcor);
+                match second_js_res {
+                    Ok(Ok(response)) => {
+                        log::debug!("post order response in second_js: {:?}", response);
+                    }
+                    Ok(Err(err)) => {
+                        log::error!("post_order failed in second_js processing: {:?}", err);
+                    }
+                    Err(join_error) => {
+                        log::error!("second_js task panicked: {:?}", join_error);
+                    }
+                }
             }
         }
 

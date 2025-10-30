@@ -13,3 +13,5 @@ crypto-botters = { git = "https://github.com/Harui-i/crypto-botters.git", branch
 tokio = { version = "1.34.0", features = ["rt-multi-thread", "macros"] }
 env_logger = "0.11.6"
 log = "0.4.20"
+async-trait = "0.1.83"
+thiserror = "1.0.64"

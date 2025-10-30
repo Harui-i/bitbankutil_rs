@@ -3,6 +3,8 @@ use crate::bitbank_structs::{
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
     BitbankGetOrderResponse, BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
 };
+use crate::trading_api::BitbankTradingApi;
+use async_trait::async_trait;
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
     Client, GetOptions,
@@ -350,6 +352,59 @@ impl BitbankPrivateApiClient {
         log::debug!("get_channel_and_token request took {:?}", duration);
 
         crate::response_handler::handle_response("get_channel_and_token", res)
+    }
+}
+
+#[async_trait]
+impl BitbankTradingApi for BitbankPrivateApiClient {
+    type Error = Option<BitbankHandleError>;
+
+    async fn get_active_orders(
+        &self,
+        pair: Option<&str>,
+        count: Option<&str>,
+        from_id: Option<u64>,
+        end_id: Option<u64>,
+        since: Option<u64>,
+        end: Option<u64>,
+    ) -> Result<BitbankActiveOrdersResponse, Self::Error> {
+        BitbankPrivateApiClient::get_active_orders(self, pair, count, from_id, end_id, since, end)
+            .await
+    }
+
+    async fn get_assets(&self) -> Result<BitbankAssetsData, Self::Error> {
+        BitbankPrivateApiClient::get_assets(self).await
+    }
+
+    async fn post_order(
+        &self,
+        pair: &str,
+        amount: &str,
+        price: Option<&str>,
+        side: &str,
+        r#type: &str,
+        post_only: Option<bool>,
+        trigger_price: Option<&str>,
+    ) -> Result<BitbankCreateOrderResponse, Self::Error> {
+        BitbankPrivateApiClient::post_order(
+            self,
+            pair,
+            amount,
+            price,
+            side,
+            r#type,
+            post_only,
+            trigger_price,
+        )
+        .await
+    }
+
+    async fn post_cancel_orders(
+        &self,
+        pair: &str,
+        order_ids: Vec<u64>,
+    ) -> Result<BitbankCancelOrdersResponse, Self::Error> {
+        BitbankPrivateApiClient::post_cancel_orders(self, pair, order_ids).await
     }
 }
 
