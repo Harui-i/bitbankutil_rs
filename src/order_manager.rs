@@ -17,9 +17,9 @@ pub struct SimplifiedOrder {
     pub price: Decimal,
 }
 
-// 有効な注文を置き換えます
-// `current_orders` : BitbankGetOrderResponseのVecで、ペア内の現在の注文を表します
-// `pair` : &str は注文を置き換えたいペアを表します
+// 有効な注文を置き換える
+// `current_orders` : BitbankGetOrderResponseのVecで、ペア内の現在の注文を表す
+// `pair` : &str は注文を置き換えたいペアを表す
 pub fn place_wanna_orders(
     mut wanna_place_orders: BTreeSet<SimplifiedOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
@@ -44,12 +44,12 @@ pub fn place_wanna_orders(
                 price: cur_order.price.clone().unwrap().parse::<Decimal>().unwrap(),
             };
 
-            // この注文はキャンセルされるべきです
+            // この注文はキャンセルされるべき
             if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
                 log::debug!("this order is cancelled. {:?}", current_sord);
                 should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
             }
-            // この現在の注文はwanna_place_ordersにあります（つまり、すでに発注済みです）
+            // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
             else {
                 wanna_place_orders.remove(&current_sord);
             }
@@ -76,7 +76,7 @@ pub fn place_wanna_orders(
         }
 
         // side、lot、price
-        // 注文を発注します
+        // 注文を発注する
         for sord in wanna_place_orders {
             let bbc2 = api_client.clone();
             let pair2 = pair.clone();
@@ -107,8 +107,8 @@ pub fn place_wanna_orders(
     }
 }
 
-/* 現在発注済みの注文（`current_orders`）と希望する注文状態（`wanna_place_orders`）を受け取り、新規注文または注文のキャンセルを実行します。
-可能な場合（新規注文を発注してから注文をキャンセルするのに十分な資金がある場合）、注文のキャンセルと新規注文は並行して処理されます。
+/* 現在発注済みの注文（`current_orders`）と希望する注文状態（`wanna_place_orders`）を受け取り、新規注文または注文のキャンセルを実行する。
+可能な場合（新規注文を発注してから注文をキャンセルするのに十分な資金がある場合）、注文のキャンセルと新規注文は並行して処理される。
 wanna_place_orders
 
 `btc_free_amount`：注文に使用されていない取引ペアの暗号通貨の量。
@@ -142,16 +142,16 @@ pub fn place_wanna_orders_concurrent(
                 price: cur_order.price.clone().unwrap().parse::<Decimal>().unwrap(),
             };
 
-            // この注文はキャンセルされるべきです
+            // この注文はキャンセルされるべき
             if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
                 log::debug!("this order will be cancelled. {:?}", current_sord);
                 should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
             }
-            // この現在の注文はwanna_place_ordersにあります（つまり、すでに発注済みです）
+            // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
             // wanna_place_orders.contains(¤t_sord) || current_sord.pair != pair
             else {
-                // wanna_place_ordersからcurrent_sordを削除します（O(wanna_place_orders.len())かかりますが、wanna_place_orders.len()は十分に小さいはずなので問題ありません）
-                // 1つだけ削除したいので、素直に判断します。
+                // wanna_place_ordersからcurrent_sordを削除し（O(wanna_place_orders.len())かかりが、wanna_place_orders.len()は十分に小さいはずなので問題ありない）
+                // 1つだけ削除したいので、素直に判断し。
                 log::debug!("this order already exists: {:?}", current_sord);
                 for (i, wanna_sord) in wanna_place_orders.iter().enumerate() {
                     if current_sord == *wanna_sord {
@@ -168,7 +168,7 @@ pub fn place_wanna_orders_concurrent(
         let mut first_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
         let mut second_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
 
-        // wanna_place_ordersの順序が発注したい注文の優先順位であると仮定します。
+        // wanna_place_ordersの順序が発注したい注文の優先順位であると仮定する。
         for sord in wanna_place_orders {
             if sord.side == "buy" {
                 let consumed_jpy = sord.amount * sord.price;
@@ -215,10 +215,10 @@ pub fn place_wanna_orders_concurrent(
             ),
         }
 
-        // first_posted_ordersの注文を発注し、should_cancelled_orderidsの注文をキャンセルするJoinSet。
+        // first_posted_ordersの注文を発注し、should_cancelled_orderidsの注文をキャンセルするJoinSet
         let mut first_js = JoinSet::new();
 
-        // いくつかの注文をキャンセルする必要があります
+        // いくつかの注文をキャンセルする必要がある
         if !should_cancelled_orderids.is_empty() {
             let bbc2 = api_client.clone();
             let pair2 = pair.clone();

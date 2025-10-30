@@ -76,7 +76,7 @@ pub struct BitbankTradeHistoryDatum {
     pub maker_taker: String, // maker または taker
     pub fee_amount_base: String, // 基軸資産の手数料額
     pub fee_amount_quote: String, // クオート資産の手数料額
-    pub fee_occurred_amount_quote: String, // 後で取得されるクオート手数料発生額。現物取引の場合、この値はfee_amount_quoteと同じです
+    pub fee_occurred_amount_quote: String, // 後で取得されるクオート手数料発生額。現物取引の場合、この値はfee_amount_quoteと同じである
     pub profit_loss: Option<String>,       // 実現損益
     pub interest: Option<String>,          // 金利
     pub executed_at: Number,               // 注文約定時のUnixタイムスタンプ（ミリ秒）
@@ -208,7 +208,7 @@ pub struct BitbankDepthDiff {
     pub bm: Option<String>, // オプション。成行買い注文の数量。数量に変更がない場合は、メッセージに含まれません。
 
     pub t: i64,    // Unixタイムスタンプ（ミリ秒）
-    pub s: String, // シーケンスID。昇順ですが、必ずしも連続しているとは限りません
+    pub s: String, // シーケンスID。昇順だが、必ずしも連続しているとは限りない
 }
 
 #[allow(non_snake_case)]
@@ -218,20 +218,20 @@ pub struct BitbankDepthWhole {
     bids: Vec<Vec<String>>,
     #[allow(dead_code)]
     asks_over: String, // asks_highest値より価格が高いasksの合計。
-    // サーキットブレーカーなしでは、best-bidから200件のオファーがwebsocket経由で送信されます。
-    // そのため、asks_overは残りのオファーの合計です。
+    // サーキットブレーカーなしでは、best-bidから200件のオファーがwebsocket経由で送信される。
+    // そのため、asks_overは残りのオファーの合計である。
     #[allow(dead_code)]
     bids_under: String, // bids_lowest値より価格が低いbidsの合計。
 
-    // これら4つの値は非CBモードでは0です。
+    // これら4つの値は非CBモードでは0である。
     #[allow(dead_code)]
     asks_under: String, // bids_lowestより価格が低いasksの合計。（つまり低価格）
     #[allow(dead_code)]
     bids_over: String, // asks_highestより価格が高いbidsの合計。（つまり高価格）
     #[allow(dead_code)]
-    ask_market: String, // 成行売り注文の数量。通常、NORMALモードでは "0" です。
+    ask_market: String, // 成行売り注文の数量。通常、NORMALモードでは "0" である。
     #[allow(dead_code)]
-    bid_market: String, // 成行買い注文の数量。通常、NORMALモードでは "0" です。
+    bid_market: String, // 成行買い注文の数量。通常、NORMALモードでは "0" である。
 
     pub timestamp: i64,
     sequenceId: String,
@@ -316,7 +316,7 @@ impl BitbankDepth {
     pub fn update_whole(&mut self, whole: BitbankDepthWhole) {
         let seq = whole.sequenceId.clone();
 
-        // `diff_buffer`に残っている、シーケンスIDが`whole`のシーケンスID以下のdiff項目を削除します。
+        // `diff_buffer`に残っている、シーケンスIDが`whole`のシーケンスID以下のdiff項目を削除する。
         let keys_to_remove: Vec<String> = self
             .diff_buffer
             .iter()

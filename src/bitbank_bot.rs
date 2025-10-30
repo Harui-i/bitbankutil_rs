@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
 /// 戦略がフォローアップイベントをランタイムに送り返すことを可能にする共有コンテキスト。
-/// コンテキストは基になる送信者をクローンするため、戦略は後で作業をスケジュールする必要がある場合に自由に保存できます。
+/// コンテキストは基になる送信者をクローンするため、戦略は後で作業をスケジュールする必要がある場合に自由に保存できる。
 #[derive(Clone)]
 pub struct BotContext<E> {
     event_tx: mpsc::Sender<E>,
@@ -23,22 +23,22 @@ impl<E: Send + 'static> BotContext<E> {
         Self { event_tx }
     }
 
-    /// 内部イベント送信者のクローンを取得します。これは、戦略がBitbankのWebsocketを経由せずに
-    /// カスタムイベントをパイプしたり、データ（ログなどから）を再生したりする場合に便利です。
+    /// 内部イベント送信者のクローンを取得する。これは、戦略がBitbankのWebsocketを経由せずに
+    /// カスタムイベントをパイプしたり、データ（ログなどから）を再生したりする場合に便利である。
     pub fn event_sender(&self) -> mpsc::Sender<E> {
         self.event_tx.clone()
     }
 
-    /// イベントをランタイムにプッシュバックします。このヘルパーはチャネルの送信操作を待機し、
-    /// 結果を呼び出し元に伝播します。
+    /// イベントをランタイムにプッシュバックする。このヘルパーはチャネルの送信操作を待機し、
+    /// 結果を呼び出し元に伝播する。
     pub async fn emit(&self, event: E) -> Result<(), mpsc::error::SendError<E>> {
         self.event_tx.send(event).await
     }
 }
 
-/// 戦略は、受信イベントの処理方法を表現するためにこのトレイトを実装します。
+/// 戦略は、受信イベントの処理方法を表現するためにこのトレイトを実装する。
 /// ランタイムは戦略インスタンスを所有し、イベントごとに排他的な可変アクセスを保証するため、
-/// ユーザーは`Mutex`などの外部同期プリミティブなしで`self`に直接状態を保持できます。
+/// ユーザーは`Mutex`などの外部同期プリミティブなしで`self`に直接状態を保持できる。
 pub trait BotStrategy: Send + 'static {
     type Event: Send + 'static;
 
@@ -126,7 +126,7 @@ pub enum BitbankInboundMessage {
 }
 
 /// ボット戦略に公開される高レベルのイベント。`DepthUpdated`は、
-/// 対応するペアの完全なオーダーブックスナップショットが利用可能な場合にのみ発生します。
+/// 対応するペアの完全なオーダーブックスナップショットが利用可能な場合にのみ発生する。
 #[derive(Debug, Clone)]
 pub enum BitbankEvent {
     Ticker {
@@ -319,7 +319,7 @@ where
 }
 
 /// アクターとフィードタスクを生かし続けるランタイム。ランタイムをドロップすると
-/// フィードタスクが中止されます。正常に停止する必要がある場合は[`Self::shutdown`]を呼び出してください。
+/// フィードタスクが中止される。正常に停止する必要がある場合は[`Self::shutdown`]を呼び出す。
 pub struct BitbankBotRuntime<E> {
     bot_handle: Option<BotHandle<E>>,
     feed_handles: Vec<JoinHandle<()>>,
@@ -358,7 +358,7 @@ impl<E> Drop for BitbankBotRuntime<E> {
 
 /// 呼び出し元が独自の[`BitbankInboundMessage`]値のストリーム（たとえば、ログ再生）を提供する
 /// 高度なシナリオ向けのヘルパー。この関数は`inbound_rx`からのメッセージを消費し、
-/// 準備完了イベントを`event_tx`に転送します。
+/// 準備完了イベントを`event_tx`に転送する。
 pub async fn forward_bitbank_messages<E>(
     pair: String,
     inbound_rx: &mut mpsc::Receiver<BitbankInboundMessage>,
