@@ -30,8 +30,8 @@ pub mod depth {
             self.bids().iter().nth_back(k)
         }
 
-        // 最小価格pを返します。ここで、Sum_{bestask <= price <= p} (amount) >= rです。
-        // 直感的に考えると、サイズrの成行買い注文を実行したときの最高価格です。
+        // 最小価格pを返す。ここで、Sum_{bestask <= price <= p} (amount) >= rである。
+        // 直感的に考えると、サイズrの成行買い注文を実行したときの最高価格である。
         fn r_depth_ask_price(&self, r: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.asks().iter() {
@@ -44,8 +44,8 @@ pub mod depth {
             None
         }
 
-        // 最大価格pを返します。ここで、Sum_{p <= price <= bestbid} (amount) >= rです。
-        // 直感的に考えると、サイズrの成行売り注文を実行したときの最低価格です。
+        // 最大価格pを返す。ここで、Sum_{p <= price <= bestbid} (amount) >= rである。
+        // 直感的に考えると、サイズrの成行売り注文を実行したときの最低価格である。
         fn r_depth_bid_price(&self, r: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.bids().iter().rev() {
@@ -58,8 +58,8 @@ pub mod depth {
             None
         }
 
-        // 最小価格pを返します。ここで、Sum_{bestask <= price <= p} (amount * price) >= sです。
-        // 直感的に考えると、サイズs（ドル建て）の成行買い注文を実行したときの最高価格です。
+        // 最小価格pを返す。ここで、Sum_{bestask <= price <= p} (amount * price) >= sである。
+        // 直感的に考えると、サイズs（ドル建て）の成行買い注文を実行したときの最高価格である。
         fn s_depth_ask_price(&self, s: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.asks().iter() {
@@ -72,8 +72,8 @@ pub mod depth {
             None
         }
 
-        // 最大価格pを返します。ここで、Sum_{p <= price <= bestbid} (amount * price) >= sです。
-        // 直感的に考えると、サイズs（ドル建て）の成行売り注文を実行したときの最低価格です。
+        // 最大価格pを返す。ここで、Sum_{p <= price <= bestbid} (amount * price) >= sである。
+        // 直感的に考えると、サイズs（ドル建て）の成行売り注文を実行したときの最低価格である。
         fn s_depth_bid_price(&self, s: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.bids().iter().rev() {
@@ -86,7 +86,7 @@ pub mod depth {
             None
         }
 
-        // log(r-depth ask price) - log(best ask price)を返します。
+        // log(r-depth ask price) - log(best ask price)を返す。
         fn r_depth_ask_logdiff(&self, r: f64) -> Option<f64> {
             let ask_price = self.r_depth_ask_price(r)?;
             let best_ask_price = self.best_ask()?.0;
@@ -97,7 +97,7 @@ pub mod depth {
             Some(ask_price_f64.ln() - best_ask_price_f64.ln())
         }
 
-        // log(r-depth bid price) - log(best bid price)を返します。
+        // log(r-depth bid price) - log(best bid price)を返す。
         fn r_depth_bid_logdiff(&self, r: f64) -> Option<f64> {
             let bid_price = self.r_depth_bid_price(r)?;
             let best_bid_price = self.best_bid()?.0;
@@ -108,7 +108,7 @@ pub mod depth {
             Some(bid_price_f64.ln() - best_bid_price_f64.ln())
         }
 
-        // log(s-depth ask price) - log(best ask price)を返します。
+        // log(s-depth ask price) - log(best ask price)を返す。
         fn s_depth_ask_logdiff(&self, s: f64) -> Option<f64> {
             let ask_price = self.s_depth_ask_price(s)?;
             let best_ask_price = self.best_ask()?.0;
@@ -119,7 +119,7 @@ pub mod depth {
             Some(ask_price.ln() - best_ask_price.ln())
         }
 
-        // log(s-depth bid price) - log(best bid price)を返します。
+        // log(s-depth bid price) - log(best bid price)を返す。
         fn s_depth_bid_logdiff(&self, s: f64) -> Option<f64> {
             let bid_price = self.s_depth_bid_price(s)?;
             let best_bid_price = self.best_bid()?.0;
@@ -148,7 +148,7 @@ pub mod depth {
             }
         }
 
-        // 上位kレベルのデプスデータをフォーマットします。kがnoneの場合、20レベルをフォーマットします。
+        // 上位kレベルのデプスデータをフォーマットする。kがnoneの場合、20レベルをフォーマットする。
         fn format_depth(&self, k: Option<usize>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let k2 = k.unwrap_or(20);
 
@@ -227,7 +227,7 @@ pub mod bybit {
         pub r#type: String, // データ型 `snapshot`、`delta`
         pub ts: i64,        // タイムスタンプ
         pub data: BybitOrderbookData,
-        cts: Number, // このオーダーブックデータが生成されたときのマッチングエンジンからのタイムスタンプ。これは公開取引チャネルのTと相関させることができます。
+        cts: Number, // このオーダーブックデータが生成されたときのマッチングエンジンからのタイムスタンプ。これは公開取引チャネルのTと相関させることができる。
     }
 
     #[derive(Deserialize, Debug)]
@@ -236,10 +236,10 @@ pub mod bybit {
         pub s: String,           // シンボル
         pub b: Vec<Vec<String>>, // 買い注文
         pub a: Vec<Vec<String>>, // 売り注文
-        pub u: i64,              // 更新ID。シーケンスです。時々、"u"=1 を受信しますが、
-        // これはサービスの再起動によるスナップショットデータです。そのため、ローカルのオーダーブックを上書きしてください。
+        pub u: i64,              // 更新ID。シーケンスである。時々、"u"=1 を受信しが、
+        // これはサービスの再起動によるスナップショットデータである。そのため、ローカルのオーダーブックを上書きしてください。
         pub seq: i64, // クロスシーケンス。
-                      // このフィールドを使用して、異なるレベルのオーダーブックデータを比較できます。seqが小さいほど、データが早く生成されたことを意味します。
+                      // このフィールドを使用して、異なるレベルのオーダーブックデータを比較できる。seqが小さいほど、データが早く生成されたことを意味する。
     }
 
     pub struct BybitDepth {
