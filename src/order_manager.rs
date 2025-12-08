@@ -5,6 +5,7 @@ use crate::{
     bitbank_structs::{
         BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
     },
+    error::BitbankUtilError,
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
@@ -95,10 +96,7 @@ pub fn place_wanna_orders(
         }
 
         while let Some(js_res) = js.join_next().await {
-            let bcor: Result<
-                BitbankCreateOrderResponse,
-                Option<crypto_botters::bitbank::BitbankHandleError>,
-            > = js_res.unwrap();
+            let bcor: Result<BitbankCreateOrderResponse, BitbankUtilError> = js_res.unwrap();
 
             log::debug!("order result: {:?}", bcor);
         }
@@ -201,18 +199,8 @@ pub fn place_wanna_orders_concurrent(
         }
 
         enum FirstJoinSetResponse {
-            CancelResponse(
-                Result<
-                    BitbankCancelOrdersResponse,
-                    Option<crypto_botters::bitbank::BitbankHandleError>,
-                >,
-            ),
-            PostResponse(
-                Result<
-                    BitbankCreateOrderResponse,
-                    Option<crypto_botters::bitbank::BitbankHandleError>,
-                >,
-            ),
+            CancelResponse(Result<BitbankCancelOrdersResponse, BitbankUtilError>),
+            PostResponse(Result<BitbankCreateOrderResponse, BitbankUtilError>),
         }
 
         // first_posted_ordersの注文を発注し、should_cancelled_orderidsの注文をキャンセルするJoinSet

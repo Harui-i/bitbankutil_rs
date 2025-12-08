@@ -3,6 +3,7 @@ use crate::bitbank_structs::{
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
     BitbankGetOrderResponse, BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
 };
+use crate::error::BitbankUtilError;
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
     Client, GetOptions,
@@ -45,7 +46,7 @@ impl BitbankPrivateApiClient {
     }
 
     // ポジションを確認するために使用する。
-    pub async fn get_assets(&self) -> Result<BitbankAssetsData, Option<BitbankHandleError>> {
+    pub async fn get_assets(&self) -> Result<BitbankAssetsData, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -69,7 +70,7 @@ impl BitbankPrivateApiClient {
         &self,
         pair: &str,
         order_id: u64,
-    ) -> Result<BitbankGetOrderResponse, Option<BitbankHandleError>> {
+    ) -> Result<BitbankGetOrderResponse, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -99,7 +100,7 @@ impl BitbankPrivateApiClient {
         r#type: &str,
         post_only: Option<bool>,
         trigger_price: Option<&str>,
-    ) -> Result<BitbankCreateOrderResponse, Option<BitbankHandleError>> {
+    ) -> Result<BitbankCreateOrderResponse, BitbankUtilError> {
         let start_time = Instant::now();
         assert!(side == "buy" || side == "sell");
         assert!(
@@ -158,7 +159,7 @@ impl BitbankPrivateApiClient {
         since: Option<i64>,    // 開始Unixタイムスタンプ
         end: Option<i64>,      // 終了Unixタイムスタンプ
         order: Option<&str>,   // 履歴の順序 (`asc`または`desc`、デフォルトは`desc`)
-    ) -> Result<BitbankTradeHistoryResponse, Option<BitbankHandleError>> {
+    ) -> Result<BitbankTradeHistoryResponse, BitbankUtilError> {
         let start_time = Instant::now();
         let mut request_body = serde_json::Map::new();
 
@@ -209,7 +210,7 @@ impl BitbankPrivateApiClient {
         &self,
         pair: &str,
         order_id: u64,
-    ) -> Result<BitbankCancelOrderResponse, Option<BitbankHandleError>> {
+    ) -> Result<BitbankCancelOrderResponse, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -234,7 +235,7 @@ impl BitbankPrivateApiClient {
         &self,
         pair: &str,
         order_ids: Vec<u64>,
-    ) -> Result<BitbankCancelOrdersResponse, Option<BitbankHandleError>> {
+    ) -> Result<BitbankCancelOrdersResponse, BitbankUtilError> {
         let start_time = Instant::now();
         assert!(0 < order_ids.len() && order_ids.len() <= 30_usize);
 
@@ -271,7 +272,7 @@ impl BitbankPrivateApiClient {
         end_id: Option<u64>,
         since: Option<u64>,
         end: Option<u64>,
-    ) -> Result<BitbankActiveOrdersResponse, Option<BitbankHandleError>> {
+    ) -> Result<BitbankActiveOrdersResponse, BitbankUtilError> {
         let start_time = Instant::now();
         let mut request_body = serde_json::Map::new();
         if let Some(pair) = pair {
@@ -314,9 +315,7 @@ impl BitbankPrivateApiClient {
     }
 
     // 取引所のステータスを取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
-    pub async fn get_status(
-        &self,
-    ) -> Result<BitbankSpotStatusResponse, Option<BitbankHandleError>> {
+    pub async fn get_status(&self) -> Result<BitbankSpotStatusResponse, BitbankUtilError> {
         let start_time = Instant::now();
 
         let res: Result<
@@ -336,7 +335,7 @@ impl BitbankPrivateApiClient {
     // プライベートストリーム用のチャンネルとトークンを取得する。 cf: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#private-stream
     pub async fn get_channel_and_token(
         &self,
-    ) -> Result<BitbankChannelAndTokenResponse, Option<BitbankHandleError>> {
+    ) -> Result<BitbankChannelAndTokenResponse, BitbankUtilError> {
         let start_time = Instant::now();
 
         let res: Result<

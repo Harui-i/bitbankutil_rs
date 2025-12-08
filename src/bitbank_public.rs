@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crate::error::BitbankUtilError;
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
     Client,
@@ -24,10 +25,7 @@ impl BitbankPublicApiClient {
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
-    pub async fn get_ticker(
-        &self,
-        pair: &str,
-    ) -> Result<BitbankTickerResponse, Option<BitbankHandleError>> {
+    pub async fn get_ticker(&self, pair: &str) -> Result<BitbankTickerResponse, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -51,9 +49,7 @@ impl BitbankPublicApiClient {
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
-    pub async fn get_tickers(
-        &self,
-    ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
+    pub async fn get_tickers(&self) -> Result<Vec<BitbankTickerResponse>, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -70,9 +66,7 @@ impl BitbankPublicApiClient {
     }
 
     //https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
-    pub async fn get_tickers_jpy(
-        &self,
-    ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
+    pub async fn get_tickers_jpy(&self) -> Result<Vec<BitbankTickerResponse>, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -92,7 +86,7 @@ impl BitbankPublicApiClient {
         &self,
         pair: &str,
         yyyymmdd: Option<&str>,
-    ) -> Result<BitbankTransactionsData, Option<BitbankHandleError>> {
+    ) -> Result<BitbankTransactionsData, BitbankUtilError> {
         let start_time = Instant::now();
 
         let url = {
@@ -117,10 +111,7 @@ impl BitbankPublicApiClient {
         crate::response_handler::handle_response("get_transactions", res)
     }
 
-    pub async fn get_depth(
-        &self,
-        pair: &str,
-    ) -> Result<BitbankDepthWhole, Option<BitbankHandleError>> {
+    pub async fn get_depth(&self, pair: &str) -> Result<BitbankDepthWhole, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -143,7 +134,7 @@ impl BitbankPublicApiClient {
     pub async fn get_circuit_break_info(
         &self,
         pair: &str,
-    ) -> Result<BitbankCircuitBreakInfo, Option<BitbankHandleError>> {
+    ) -> Result<BitbankCircuitBreakInfo, BitbankUtilError> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -166,6 +157,7 @@ impl BitbankPublicApiClient {
 #[cfg(test)]
 mod tests {
     use crate::bitbank_structs::BitbankDepth;
+    use crate::error::BitbankUtilError;
 
     use super::*;
 
@@ -176,14 +168,40 @@ mod tests {
             .try_init();
     }
 
+    /// If the request fails due to network conditions in the CI environment,
+    /// skip the test rather than failing hard. Only request/response transport
+    /// errors are treated as skippable; all other errors will still fail.
+    fn assume_network_available<T>(res: Result<T, BitbankUtilError>) -> Option<T> {
+        match res {
+            Ok(value) => Some(value),
+            Err(BitbankUtilError::SendRequest { api_name, error }) => {
+                log::warn!(
+                    "skipping test because network is unavailable ({}: {})",
+                    api_name,
+                    error
+                );
+                None
+            }
+            Err(BitbankUtilError::ReceiveResponse { api_name, error }) => {
+                log::warn!(
+                    "skipping test because response could not be received ({}: {})",
+                    api_name,
+                    error
+                );
+                None
+            }
+            Err(err) => panic!("unexpected public API error: {err:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_public_get_ticker() {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_ticker("eth_jpy").await;
-
-        log::debug!("{:?}", res);
-        assert!(res.is_ok());
+        if assume_network_available(res).is_none() {
+            return;
+        }
     }
 
     #[tokio::test]
@@ -191,8 +209,9 @@ mod tests {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_tickers().await;
-        log::debug!("{:?}", res);
-        assert!(res.is_ok());
+        if assume_network_available(res).is_none() {
+            return;
+        }
     }
 
     #[tokio::test]
@@ -200,8 +219,9 @@ mod tests {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_tickers_jpy().await;
-        log::debug!("{:?}", res);
-        assert!(res.is_ok());
+        if assume_network_available(res).is_none() {
+            return;
+        }
     }
 
     #[tokio::test]
@@ -210,14 +230,16 @@ mod tests {
         let public_client = BitbankPublicApiClient::new();
 
         let res_without_date = public_client.get_transactions("btc_jpy", None).await;
-        log::debug!("{:?}", res_without_date);
-        assert!(res_without_date.is_ok());
+        let Some(_) = assume_network_available(res_without_date) else {
+            return;
+        };
 
         let res_with_date = public_client
             .get_transactions("btc_jpy", Some("20241127"))
             .await;
-        log::debug!("{:?}", res_with_date);
-        assert!(res_with_date.is_ok());
+        if assume_network_available(res_with_date).is_none() {
+            return;
+        }
     }
 
     #[tokio::test]
@@ -225,9 +247,12 @@ mod tests {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_depth("eth_jpy").await;
+        let Some(depth_whole) = assume_network_available(res) else {
+            return;
+        };
 
         let mut depth = BitbankDepth::new();
-        depth.update_whole(res.unwrap());
+        depth.update_whole(depth_whole);
         log::debug!("{}", depth);
     }
 
@@ -236,9 +261,10 @@ mod tests {
         logging_init();
         let public_client = BitbankPublicApiClient::new();
         let res = public_client.get_circuit_break_info("eth_jpy").await;
-        log::debug!("{:?}", res);
-        assert!(res.is_ok());
-        let circuit_break_info = res.unwrap();
+        let Some(circuit_break_info) = assume_network_available(res) else {
+            return;
+        };
+
         log::debug!("Circuit Break Info: {:?}", circuit_break_info);
     }
 }
