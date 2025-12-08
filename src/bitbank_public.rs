@@ -156,8 +156,8 @@ impl BitbankPublicApiClient {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::BitbankUtilError;
     use crate::bitbank_structs::BitbankDepth;
+    use crate::error::BitbankUtilError;
 
     use super::*;
 
@@ -177,14 +177,16 @@ mod tests {
             Err(BitbankUtilError::SendRequest { api_name, error }) => {
                 log::warn!(
                     "skipping test because network is unavailable ({}: {})",
-                    api_name, error
+                    api_name,
+                    error
                 );
                 None
             }
             Err(BitbankUtilError::ReceiveResponse { api_name, error }) => {
                 log::warn!(
                     "skipping test because response could not be received ({}: {})",
-                    api_name, error
+                    api_name,
+                    error
                 );
                 None
             }
