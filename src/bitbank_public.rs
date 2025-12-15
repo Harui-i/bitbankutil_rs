@@ -6,8 +6,8 @@ use crypto_botters::{
 };
 
 use crate::bitbank_structs::{
-    BitbankApiResponse, BitbankCircuitBreakInfo, BitbankDepthWhole, BitbankTickerResponse,
-    BitbankTransactionsData,
+    BitbankApiResponse, BitbankCandlestickResponse, BitbankCircuitBreakInfo, BitbankDepthWhole,
+    BitbankTickerResponse, BitbankTransactionsData,
 };
 
 #[derive(Clone)]
@@ -69,7 +69,7 @@ impl BitbankPublicApiClient {
         crate::response_handler::handle_response("get_tickers", res)
     }
 
-    //https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
+    // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
     pub async fn get_tickers_jpy(
         &self,
     ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
@@ -138,6 +138,29 @@ impl BitbankPublicApiClient {
         log::debug!("get_depth request took {:?}", duration);
 
         crate::response_handler::handle_response("get_depth", res)
+    }
+
+    // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#candlestick
+    pub async fn get_candlestick(
+        &self,
+        pair: &str,
+        candle_type: &str,
+        yyyy: &str,
+    ) -> Result<BitbankCandlestickResponse, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+        let url = format!("/{}/candlestick/{}/{}", pair, candle_type, yyyy);
+        let res: Result<
+            BitbankApiResponse,
+            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+        > = self
+            .client
+            .get_no_query(&url, [BitbankOption::Default])
+            .await;
+
+        let duration = start_time.elapsed();
+        log::debug!("get_candlestick request took {:?}", duration);
+
+        crate::response_handler::handle_response("get_candlestick", res)
     }
 
     pub async fn get_circuit_break_info(
@@ -218,6 +241,21 @@ mod tests {
             .await;
         log::debug!("{:?}", res_with_date);
         assert!(res_with_date.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_public_get_candlestick() {
+        logging_init();
+        let public_client = BitbankPublicApiClient::new();
+        let res = public_client
+            .get_candlestick("btc_jpy", "1day", "2024")
+            .await;
+        log::debug!("{:?}", res);
+        assert!(res.is_ok());
+
+        let candlestick = res.unwrap();
+        assert!(!candlestick.candlestick.is_empty());
+        assert_eq!(candlestick.candlestick[0].r#type, "1day");
     }
 
     #[tokio::test]
