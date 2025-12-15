@@ -42,6 +42,28 @@ pub struct BitbankCircuitBreakInfo {
     pub timestamp: Number,                // Unixタイムスタンプ（ミリ秒）
 }
 
+// https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#candlestick
+#[derive(Deserialize, Debug, Clone)]
+pub struct BitbankOhlcv {
+    pub open: String,
+    pub high: String,
+    pub low: String,
+    pub close: String,
+    pub volume: String,
+    pub timestamp: i64, // Unixタイムスタンプ（ミリ秒）
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct BitbankCandlestickEntry {
+    pub r#type: String,
+    pub ohlcv: Vec<BitbankOhlcv>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct BitbankCandlestickResponse {
+    pub candlestick: Vec<BitbankCandlestickEntry>,
+}
+
 //https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct BitbankAssetDatum {
