@@ -282,8 +282,14 @@ impl Depth for BitbankDepth {
 impl fmt::Display for BitbankDepth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         assert!(self.is_complete);
-        write!(f, "\n")?;
+        writeln!(f)?;
         self.format_depth(Some(20), f)
+    }
+}
+
+impl Default for BitbankDepth {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -314,7 +320,7 @@ impl BitbankDepth {
             if amount == f64::zero() {
                 self.asks.remove(price);
             } else {
-                self.asks.insert(price.clone(), amount);
+                self.asks.insert(*price, amount);
             }
         }
 
@@ -325,7 +331,7 @@ impl BitbankDepth {
             if amount == f64::zero() {
                 self.bids.remove(price);
             } else {
-                self.bids.insert(price.clone(), amount);
+                self.bids.insert(*price, amount);
             }
         }
 
@@ -358,7 +364,7 @@ impl BitbankDepth {
             let amount = ask[1].parse::<f64>().unwrap();
 
             assert_ne!(amount, f64::zero());
-            self.asks.insert(price.clone(), amount);
+            self.asks.insert(*price, amount);
         }
 
         for bid in whole.bids {
@@ -366,7 +372,7 @@ impl BitbankDepth {
             let amount = bid[1].parse::<f64>().unwrap();
 
             assert_ne!(amount, f64::zero());
-            self.bids.insert(price.clone(), amount);
+            self.bids.insert(*price, amount);
         }
 
         if self.last_timestamp < whole.timestamp {
@@ -386,7 +392,7 @@ impl BitbankDepth {
                 if amount == f64::zero() {
                     self.asks.remove(price);
                 } else {
-                    self.asks.insert(price.clone(), amount);
+                    self.asks.insert(*price, amount);
                 }
             }
 
@@ -397,7 +403,7 @@ impl BitbankDepth {
                 if amount == f64::zero() {
                     self.bids.remove(price);
                 } else {
-                    self.bids.insert(price.clone(), amount);
+                    self.bids.insert(*price, amount);
                 }
             }
         }

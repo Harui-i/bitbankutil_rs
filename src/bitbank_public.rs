@@ -15,6 +15,12 @@ pub struct BitbankPublicApiClient {
     client: Client,
 }
 
+impl Default for BitbankPublicApiClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BitbankPublicApiClient {
     pub fn new() -> BitbankPublicApiClient {
         let mut client = Client::new();

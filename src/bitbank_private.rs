@@ -34,14 +34,14 @@ impl BitbankPrivateApiClient {
         }
 
         // 認証オプションが設定されているか確認する。
-        assert_eq!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).http_auth, true);
+        assert!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).http_auth);
 
         assert_eq!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).http_url, BitbankHttpUrl::Private);
 
         assert_ne!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).key, Some("".to_owned()));
         assert_ne!(<crypto_botters::Client as GetOptions<crypto_botters::bitbank::BitbankOptions>>::default_options(&client).secret, Some("".to_owned()));
 
-        BitbankPrivateApiClient { client: client }
+        BitbankPrivateApiClient { client }
     }
 
     // ポジションを確認するために使用する。
@@ -106,7 +106,7 @@ impl BitbankPrivateApiClient {
             r#type == "limit" || r#type == "market" || r#type == "stop" || r#type == "stop_limit"
         );
         // post_onlyがtrue => r#typeは "limit"
-        assert!(post_only.is_none() || (post_only.unwrap() == true && r#type == "limit"));
+        assert!(post_only.is_none() || (post_only.unwrap() && r#type == "limit"));
 
         let mut body_map = serde_json::Map::new();
 
@@ -236,7 +236,7 @@ impl BitbankPrivateApiClient {
         order_ids: Vec<u64>,
     ) -> Result<BitbankCancelOrdersResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
-        assert!(0 < order_ids.len() && order_ids.len() <= 30_usize);
+        assert!(!order_ids.is_empty() && order_ids.len() <= 30_usize);
 
         let res: Result<
             BitbankApiResponse,

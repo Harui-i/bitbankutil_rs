@@ -63,7 +63,7 @@ pub mod depth {
         fn s_depth_ask_price(&self, s: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.asks().iter() {
-                sum += price.to_f64().unwrap() * amount.clone();
+                sum += price.to_f64().unwrap() * *amount;
                 if sum >= s {
                     return Some(price);
                 }
@@ -77,7 +77,7 @@ pub mod depth {
         fn s_depth_bid_price(&self, s: f64) -> Option<&Decimal> {
             let mut sum = f64::zero();
             for (price, amount) in self.bids().iter().rev() {
-                sum += price.to_f64().unwrap() * amount.clone();
+                sum += price.to_f64().unwrap() * *amount;
                 if sum >= s {
                     return Some(price);
                 }
@@ -153,10 +153,10 @@ pub mod depth {
             let k2 = k.unwrap_or(20);
 
             for (price, amount) in self.asks().iter().take(k2).rev() {
-                write!(f, "{}\t{:.4}\n", price, amount)?;
+                writeln!(f, "{}\t{:.4}", price, amount)?;
             }
 
-            write!(f, "asks\n")?;
+            writeln!(f, "asks")?;
             write!(f, "mid ")?;
 
             if self.best_ask().is_some() && self.best_bid().is_some() {
@@ -175,11 +175,11 @@ pub mod depth {
                 )?;
             }
 
-            write!(f, "\n")?;
+            writeln!(f)?;
 
-            write!(f, "bids\n")?;
+            writeln!(f, "bids")?;
             for (price, amount) in self.bids().iter().rev().take(k2) {
-                write!(f, "{}\t{:.4}\n", price, amount)?;
+                writeln!(f, "{}\t{:.4}", price, amount)?;
             }
 
             Ok(())
@@ -259,8 +259,14 @@ pub mod bybit {
 
     impl fmt::Display for BybitDepth {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "\n")?;
+            writeln!(f)?;
             self.format_depth(Some(20), f)
+        }
+    }
+
+    impl Default for BybitDepth {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
@@ -280,7 +286,7 @@ pub mod bybit {
                 if size.is_zero() {
                     self.asks.remove(price);
                 } else {
-                    self.asks.insert(price.clone(), size);
+                    self.asks.insert(*price, size);
                 }
             }
 
@@ -291,7 +297,7 @@ pub mod bybit {
                 if size.is_zero() {
                     self.bids.remove(price);
                 } else {
-                    self.bids.insert(price.clone(), size);
+                    self.bids.insert(*price, size);
                 }
             }
         }
