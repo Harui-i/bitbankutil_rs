@@ -1,3 +1,6 @@
+use serde::de::IntoDeserializer;
+use serde_json::Value;
+
 pub fn handle_response<T: serde::de::DeserializeOwned>(
     api_name: &str,
     res: Result<
@@ -11,8 +14,25 @@ pub fn handle_response<T: serde::de::DeserializeOwned>(
     match res {
         Ok(api_response) => {
             // デシリアライズ
-            match serde_json::from_value::<T>(api_response.data.clone()) {
-                Ok(ret) => Ok(ret),
+            let de: Value = api_response.data.clone().into_deserializer();
+            let mut ignored = Vec::new();
+            let ret = serde_ignored::deserialize(de, |path| {
+                ignored.push(path.to_string());
+            });
+
+            match ret {
+                Ok(ret) => {
+                    // api_responseにあったフィールドが、retには含まれていなかった場合警告する
+                    if !ignored.is_empty() {
+                        log::warn!(
+                            "unknown fields in {} ({}): {:?}",
+                            api_name,
+                            ignored.len(),
+                            ignored
+                        );
+                    }
+                    Ok(ret)
+                }
                 Err(err) => {
                     log::error!(
                         "failed to convert api_response into certain type.\

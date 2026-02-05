@@ -7,12 +7,18 @@ use crypto_botters::{
 
 use crate::bitbank_structs::{
     BitbankApiResponse, BitbankCandlestickResponse, BitbankCircuitBreakInfo, BitbankDepthWhole,
-    BitbankTickerResponse, BitbankTransactionsData,
+    BitbankTickerResponse, BitbankTickersDatum, BitbankTransactionsData,
 };
 
 #[derive(Clone)]
 pub struct BitbankPublicApiClient {
     client: Client,
+}
+
+impl Default for BitbankPublicApiClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BitbankPublicApiClient {
@@ -53,7 +59,7 @@ impl BitbankPublicApiClient {
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
     pub async fn get_tickers(
         &self,
-    ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
+    ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
@@ -72,7 +78,7 @@ impl BitbankPublicApiClient {
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
     pub async fn get_tickers_jpy(
         &self,
-    ) -> Result<Vec<BitbankTickerResponse>, Option<BitbankHandleError>> {
+    ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,

@@ -223,10 +223,10 @@ fn duplicate_bitbank_options(options: &[BitbankOption]) -> Vec<BitbankOption> {
             BitbankOption::Default => BitbankOption::Default,
             BitbankOption::Key(key) => BitbankOption::Key(key.clone()),
             BitbankOption::Secret(secret) => BitbankOption::Secret(secret.clone()),
-            BitbankOption::HttpUrl(url) => BitbankOption::HttpUrl(url.clone()),
-            BitbankOption::HttpAuth(auth) => BitbankOption::HttpAuth(auth.clone()),
+            BitbankOption::HttpUrl(url) => BitbankOption::HttpUrl(*url),
+            BitbankOption::HttpAuth(auth) => BitbankOption::HttpAuth(*auth),
             BitbankOption::RequestConfig(cfg) => BitbankOption::RequestConfig(cfg.clone()),
-            BitbankOption::WebSocketUrl(url) => BitbankOption::WebSocketUrl(url.clone()),
+            BitbankOption::WebSocketUrl(url) => BitbankOption::WebSocketUrl(*url),
             BitbankOption::WebSocketChannels(channels) => {
                 BitbankOption::WebSocketChannels(channels.clone())
             }
