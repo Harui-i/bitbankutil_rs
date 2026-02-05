@@ -9,6 +9,7 @@ use crate::depth::Depth;
 pub mod websocket_struct;
 
 #[derive(serde::Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankApiResponse {
     pub success: Number,
     pub data: serde_json::Value,
@@ -16,7 +17,23 @@ pub struct BitbankApiResponse {
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
 #[derive(serde::Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankTickerResponse {
+    pub sell: Option<String>, // 売り注文の最安値
+    pub buy: Option<String>,  // 買い注文の最高値
+    pub high: String,         // 過去24時間の最高値
+    pub low: String,          // 過去24時間の最安値
+    pub open: String,         // 24時間前の始値
+    pub last: String,         // 最終取引価格
+    pub vol: String,          // 過去24時間の取引量
+    pub timestamp: Number,    // Unixタイムスタンプ（ミリ秒）
+}
+
+// https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
+#[derive(serde::Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankTickersDatum {
+    pub pair: String,         // 通貨ペア
     pub sell: Option<String>, // 売り注文の最安値
     pub buy: Option<String>,  // 買い注文の最高値
     pub high: String,         // 過去24時間の最高値
@@ -29,6 +46,7 @@ pub struct BitbankTickerResponse {
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#circuit-break-info
 #[derive(serde::Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankCircuitBreakInfo {
     pub mode: String, // enum: `NONE`, `CIRCUIT_BREAK`, `FULL_RANGE_CIRCUIT_BREAK`, `RESUMPTION`, `LISTING`.
     pub estimated_itayose_price: Option<String>, // 推定価格。モードが`NONE`の場合、または推定価格がない場合はNull。
@@ -44,6 +62,7 @@ pub struct BitbankCircuitBreakInfo {
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#candlestick
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankOhlcv {
     pub open: String,
     pub high: String,
@@ -54,18 +73,23 @@ pub struct BitbankOhlcv {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankCandlestickEntry {
     pub r#type: String,
     pub ohlcv: Vec<BitbankOhlcv>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankCandlestickResponse {
     pub candlestick: Vec<BitbankCandlestickEntry>,
+    pub timestamp: i64, // これはドキュメントされてないが実際には含まれているフィールド.
+                        // Issueを建てた: https://github.com/bitbankinc/bitbank-api-docs/issues/142
 }
 
 //https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets
 #[derive(serde::Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankAssetDatum {
     pub asset: String,
     pub free_amount: String,
@@ -81,11 +105,13 @@ pub struct BitbankAssetDatum {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankAssetsData {
     pub assets: Vec<BitbankAssetDatum>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankTradeHistoryDatum {
     pub trade_id: Number,                  // 取引ID
     pub pair: String,                      // ペア
@@ -105,11 +131,13 @@ pub struct BitbankTradeHistoryDatum {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankTradeHistoryResponse {
     pub trades: Vec<BitbankTradeHistoryDatum>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankCreateOrderResponse {
     pub order_id: Number,
     pub pair: String,
@@ -131,6 +159,7 @@ pub struct BitbankCreateOrderResponse {
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-order-information
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankGetOrderResponse {
     pub order_id: Number,
     pub pair: String,
@@ -152,6 +181,7 @@ pub struct BitbankGetOrderResponse {
 
 // https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankCancelOrderResponse {
     pub order_id: Number,
     pub pair: String,
@@ -174,22 +204,26 @@ pub struct BitbankCancelOrderResponse {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankCancelOrdersResponse {
     pub orders: Vec<BitbankCancelOrderResponse>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankActiveOrdersResponse {
     pub orders: Vec<BitbankGetOrderResponse>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankChannelAndTokenResponse {
     pub pubnub_channel: String,
     pub pubnub_token: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankSpotStatus {
     pub pair: String,
     pub status: String,
@@ -197,17 +231,20 @@ pub struct BitbankSpotStatus {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankSpotStatusResponse {
     pub statuses: Vec<BitbankSpotStatus>,
 }
 
 #[allow(non_snake_case)]
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankTransactionsData {
     pub transactions: Vec<BitbankTransactionDatum>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankTransactionDatum {
     #[serde(with = "rust_decimal::serde::float")]
     pub amount: Decimal,
@@ -219,6 +256,7 @@ pub struct BitbankTransactionDatum {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankDepthDiff {
     pub a: Vec<Vec<String>>, // 売り注文、数量
     pub b: Vec<Vec<String>>, // 買い注文、数量
@@ -235,6 +273,7 @@ pub struct BitbankDepthDiff {
 
 #[allow(non_snake_case)]
 #[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankDepthWhole {
     asks: Vec<Vec<String>>,
     bids: Vec<Vec<String>>,
