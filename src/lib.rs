@@ -6,6 +6,7 @@ pub mod market_event;
 pub mod order_domain;
 pub mod order_executor;
 pub mod order_manager;
+pub mod paper_execution;
 pub mod response_handler;
 pub mod websocket_handler;
 
