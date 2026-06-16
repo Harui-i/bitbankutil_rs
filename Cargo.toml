@@ -6,6 +6,12 @@ edition = "2021"
 [features]
 # bitbankのAPIレスポンスをstructにする際に、使われていないフィールドを許容しないようにするfeature。
 strict-validation = []
+# 実際のbitbank Public APIを叩くテストを有効にするfeature。
+live-public-api = []
+# 実際のbitbank Private APIを叩く読み取り系テストを有効にするfeature。
+live-private-api = []
+# 実注文・キャンセルを伴うPrivate APIテストを有効にするfeature。
+live-private-order-api = ["live-private-api"]
 
 [dependencies]
 serde = { version = "1.0.210", features = ["derive"] }
