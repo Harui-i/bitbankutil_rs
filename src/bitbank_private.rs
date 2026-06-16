@@ -9,6 +9,15 @@ use crypto_botters::{
 };
 use std::time::Instant;
 
+fn validate_post_order_args(side: &str, r#type: &str, post_only: Option<bool>) {
+    assert!(side == "buy" || side == "sell");
+    assert!(
+        r#type == "limit" || r#type == "market" || r#type == "stop" || r#type == "stop_limit"
+    );
+    // post_onlyはlimit注文でのみ指定できる。
+    assert!(post_only.is_none() || r#type == "limit");
+}
+
 #[derive(Clone)]
 pub struct BitbankPrivateApiClient {
     client: Client,
@@ -101,12 +110,7 @@ impl BitbankPrivateApiClient {
         trigger_price: Option<&str>,
     ) -> Result<BitbankCreateOrderResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
-        assert!(side == "buy" || side == "sell");
-        assert!(
-            r#type == "limit" || r#type == "market" || r#type == "stop" || r#type == "stop_limit"
-        );
-        // post_onlyがtrue => r#typeは "limit"
-        assert!(post_only.is_none() || (post_only.unwrap() && r#type == "limit"));
+        validate_post_order_args(side, r#type, post_only);
 
         let mut body_map = serde_json::Map::new();
 
@@ -375,6 +379,17 @@ mod tests {
         let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
 
         BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None)
+    }
+
+    #[test]
+    fn validate_post_order_args_accepts_false_post_only_for_limit_order() {
+        validate_post_order_args("buy", "limit", Some(false));
+    }
+
+    #[test]
+    #[should_panic]
+    fn validate_post_order_args_rejects_post_only_for_non_limit_order() {
+        validate_post_order_args("buy", "market", Some(false));
     }
 
     #[tokio::test]
