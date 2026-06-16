@@ -5,17 +5,12 @@ use crate::{
     bitbank_structs::{
         BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
     },
+    order_domain::{DesiredOrder, OpenOrder, OrderSide},
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
-pub struct SimplifiedOrder {
-    pub pair: String,
-    pub side: String,
-    pub amount: Decimal,
-    pub price: Decimal,
-}
+pub type SimplifiedOrder = DesiredOrder;
 
 // 有効な注文を置き換える
 // `current_orders` : BitbankGetOrderResponseのVecで、ペア内の現在の注文を表す
@@ -31,22 +26,14 @@ pub async fn place_wanna_orders(
     let mut js = JoinSet::new();
 
     for cur_order in current_orders {
-        let current_sord = SimplifiedOrder {
-            pair: cur_order.pair.clone(),
-            side: cur_order.side.to_string(),
-            amount: cur_order
-                .remaining_amount
-                .clone()
-                .unwrap()
-                .parse::<Decimal>()
-                .unwrap(),
-            price: cur_order.price.clone().unwrap().parse::<Decimal>().unwrap(),
-        };
+        let current_order = OpenOrder::try_from(&cur_order)
+            .expect("failed to convert bitbank order response into OpenOrder");
+        let current_sord = current_order.to_desired_order();
 
         // この注文はキャンセルされるべき
         if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
             log::debug!("this order is cancelled. {:?}", current_sord);
-            should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
+            should_cancelled_orderids.push(current_order.order_id.0);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
         else {
@@ -83,10 +70,13 @@ pub async fn place_wanna_orders(
             bbc2.post_order(
                 &pair2,
                 &sord.amount.to_string(),
-                Some(&sord.price.to_string()),
-                &sord.side,
-                "limit",
-                Some(true),
+                sord.price
+                    .as_ref()
+                    .map(|price| price.to_string())
+                    .as_deref(),
+                sord.side.as_str(),
+                sord.order_type.as_str(),
+                sord.post_only,
                 None,
             )
             .await
@@ -127,22 +117,14 @@ pub async fn place_wanna_orders_concurrent(
     let mut should_cancelled_orderids = vec![];
 
     for cur_order in current_orders {
-        let current_sord = SimplifiedOrder {
-            pair: cur_order.pair.clone(),
-            side: cur_order.side.to_string(),
-            amount: cur_order
-                .remaining_amount
-                .clone()
-                .unwrap()
-                .parse::<Decimal>()
-                .unwrap(),
-            price: cur_order.price.clone().unwrap().parse::<Decimal>().unwrap(),
-        };
+        let current_order = OpenOrder::try_from(&cur_order)
+            .expect("failed to convert bitbank order response into OpenOrder");
+        let current_sord = current_order.to_desired_order();
 
         // この注文はキャンセルされるべき
         if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
             log::debug!("this order will be cancelled. {:?}", current_sord);
-            should_cancelled_orderids.push(cur_order.order_id.as_u64().unwrap());
+            should_cancelled_orderids.push(current_order.order_id.0);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
         // wanna_place_orders.contains(¤t_sord) || current_sord.pair != pair
@@ -167,8 +149,8 @@ pub async fn place_wanna_orders_concurrent(
 
     // wanna_place_ordersの順序が発注したい注文の優先順位であると仮定する。
     for sord in wanna_place_orders {
-        if sord.side == "buy" {
-            let consumed_jpy = sord.amount * sord.price;
+        if sord.side == OrderSide::Buy {
+            let consumed_jpy = sord.amount * sord.limit_price();
 
             if next_jpy_free_amount >= consumed_jpy {
                 log::debug!("{:?} posted firstly.", sord);
@@ -178,7 +160,7 @@ pub async fn place_wanna_orders_concurrent(
                 log::debug!("{:?} posted secondly.", sord);
                 second_posted_orders.insert(sord);
             }
-        } else if sord.side == "sell" {
+        } else if sord.side == OrderSide::Sell {
             let consumed_btc = sord.amount;
 
             if next_btc_free_amount >= consumed_btc {
@@ -234,10 +216,13 @@ pub async fn place_wanna_orders_concurrent(
                 bbc2.post_order(
                     &pair2,
                     &sord.amount.to_string(),
-                    Some(&sord.price.to_string()),
-                    &sord.side,
-                    "limit",
-                    Some(true),
+                    sord.price
+                        .as_ref()
+                        .map(|price| price.to_string())
+                        .as_deref(),
+                    sord.side.as_str(),
+                    sord.order_type.as_str(),
+                    sord.post_only,
                     None,
                 )
                 .await,
@@ -274,10 +259,13 @@ pub async fn place_wanna_orders_concurrent(
                 bbc2.post_order(
                     &pair2,
                     &sord.amount.to_string(),
-                    Some(&sord.price.to_string()),
-                    &sord.side,
-                    "limit",
-                    Some(true),
+                    sord.price
+                        .as_ref()
+                        .map(|price| price.to_string())
+                        .as_deref(),
+                    sord.side.as_str(),
+                    sord.order_type.as_str(),
+                    sord.post_only,
                     None,
                 )
                 .await

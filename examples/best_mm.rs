@@ -5,6 +5,7 @@ use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, B
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_structs::BitbankDepth;
 use bitbankutil_rs::depth::Depth;
+use bitbankutil_rs::order_domain::{DesiredOrder, OpenOrder, OrderSide, OrderType};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
@@ -129,14 +130,15 @@ impl MyBot {
             let mut btc_locked_jpy_amount: Decimal = Decimal::zero();
             // このペアのロックされたjpyを計算する
             for current_order in active_orders_info.clone().orders {
-                if current_order.r#type == "limit" && current_order.side == "buy" {
+                let current_order = OpenOrder::try_from(&current_order)
+                    .expect("failed to convert bitbank order response into OpenOrder");
+
+                if current_order.order_type == OrderType::Limit
+                    && current_order.side == OrderSide::Buy
+                {
                     btc_locked_jpy_amount +=
-                        current_order.price.unwrap().parse::<Decimal>().unwrap()
-                            * current_order
-                                .remaining_amount
-                                .unwrap()
-                                .parse::<Decimal>()
-                                .unwrap();
+                        current_order.price.expect("limit order must have a price")
+                            * current_order.remaining_amount;
                 }
             }
 
@@ -160,15 +162,21 @@ impl MyBot {
             let best_bid_price = self.depth.best_bid().unwrap().0.clone();
 
             let has_bestask_order = active_orders_info.clone().orders.iter().any(|ord| {
-                ord.side == "sell"
-                    && ord.r#type == "limit"
-                    && ord.price.clone().unwrap() == best_ask_price.to_string()
+                let ord = OpenOrder::try_from(ord)
+                    .expect("failed to convert bitbank order response into OpenOrder");
+
+                ord.side == OrderSide::Sell
+                    && ord.order_type == OrderType::Limit
+                    && ord.price == Some(best_ask_price)
             });
 
             let has_bestbid_order = active_orders_info.clone().orders.iter().any(|ord| {
-                ord.side == "buy"
-                    && ord.r#type == "limit"
-                    && ord.price.clone().unwrap() == best_bid_price.to_string()
+                let ord = OpenOrder::try_from(ord)
+                    .expect("failed to convert bitbank order response into OpenOrder");
+
+                ord.side == OrderSide::Buy
+                    && ord.order_type == OrderType::Limit
+                    && ord.price == Some(best_bid_price)
             });
 
             let sell_price = {
@@ -198,21 +206,21 @@ impl MyBot {
             let mut wanna_place_orders = Vec::new();
 
             if can_buy {
-                wanna_place_orders.push(bitbankutil_rs::order_manager::SimplifiedOrder {
-                    pair: self.bot_config.pair.clone(),
-                    side: "buy".to_owned(),
-                    amount: self.bot_config.lot,
-                    price: buy_price,
-                });
+                wanna_place_orders.push(DesiredOrder::limit(
+                    self.bot_config.pair.clone(),
+                    OrderSide::Buy,
+                    self.bot_config.lot,
+                    buy_price,
+                ));
             }
 
             if can_sell {
-                wanna_place_orders.push(bitbankutil_rs::order_manager::SimplifiedOrder {
-                    pair: self.bot_config.pair.clone(),
-                    side: "sell".to_owned(),
-                    amount: self.bot_config.lot + btc_amount_remainder,
-                    price: sell_price,
-                });
+                wanna_place_orders.push(DesiredOrder::limit(
+                    self.bot_config.pair.clone(),
+                    OrderSide::Sell,
+                    self.bot_config.lot + btc_amount_remainder,
+                    sell_price,
+                ));
             }
 
             log::debug!("wanna_place_orders: {:?}", wanna_place_orders);
