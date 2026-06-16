@@ -88,6 +88,10 @@ pub enum PaperRejectReason {
         expected: String,
         actual: String,
     },
+    NonPositiveOrder {
+        amount: Decimal,
+        price: Decimal,
+    },
     InsufficientFunds {
         asset: String,
         required: Decimal,
@@ -101,6 +105,10 @@ pub enum PaperExecutionError {
     PairMismatch {
         expected: String,
         actual: String,
+    },
+    NonPositiveOrder {
+        amount: Decimal,
+        price: Decimal,
     },
     InsufficientFunds {
         asset: String,
@@ -157,6 +165,18 @@ impl PaperExecutionEngine {
             let reason = PaperRejectReason::PairMismatch {
                 expected: self.config.pair.clone(),
                 actual: order.pair.clone(),
+            };
+            self.record_event(PaperEvent::OrderRejected {
+                order,
+                reason: reason.clone(),
+            });
+            return Err(PaperExecutionError::from(reason));
+        }
+
+        if order.amount <= Decimal::ZERO || order.price <= Decimal::ZERO {
+            let reason = PaperRejectReason::NonPositiveOrder {
+                amount: order.amount,
+                price: order.price,
             };
             self.record_event(PaperEvent::OrderRejected {
                 order,
@@ -490,6 +510,9 @@ impl From<PaperRejectReason> for PaperExecutionError {
             PaperRejectReason::PairMismatch { expected, actual } => {
                 Self::PairMismatch { expected, actual }
             }
+            PaperRejectReason::NonPositiveOrder { amount, price } => {
+                Self::NonPositiveOrder { amount, price }
+            }
             PaperRejectReason::InsufficientFunds {
                 asset,
                 required,
@@ -636,6 +659,39 @@ mod tests {
                 reason: PaperRejectReason::InsufficientFunds { .. }
             }] if rejected_order == &order
         ));
+    }
+
+    #[test]
+    fn non_positive_amount_or_price_rejects_order_without_changing_balances() {
+        for invalid_order in [
+            order(OrderSide::Buy, Decimal::ZERO, Decimal::new(5_000_000, 0)),
+            order(OrderSide::Buy, Decimal::new(-1, 1), Decimal::new(5_000_000, 0)),
+            order(OrderSide::Buy, Decimal::new(1, 1), Decimal::ZERO),
+            order(OrderSide::Buy, Decimal::new(1, 1), Decimal::new(-5_000_000, 0)),
+            order(OrderSide::Sell, Decimal::ZERO, Decimal::new(5_000_000, 0)),
+            order(OrderSide::Sell, Decimal::new(-1, 1), Decimal::new(5_000_000, 0)),
+            order(OrderSide::Sell, Decimal::new(1, 1), Decimal::ZERO),
+            order(OrderSide::Sell, Decimal::new(1, 1), Decimal::new(-5_000_000, 0)),
+        ] {
+            let mut engine = engine_with_balances(Decimal::new(1, 0), Decimal::new(1_000_000, 0));
+
+            let result = engine.place_order(invalid_order);
+
+            assert!(result.is_err());
+            assert!(engine.open_orders().is_empty());
+            assert_eq!(balance_of(&engine, "btc"), balance("btc", Decimal::new(1, 0)));
+            assert_eq!(
+                balance_of(&engine, "jpy"),
+                balance("jpy", Decimal::new(1_000_000, 0))
+            );
+            assert!(matches!(
+                engine.drain_events().as_slice(),
+                [PaperEvent::OrderRejected {
+                    reason: PaperRejectReason::NonPositiveOrder { .. },
+                    ..
+                }]
+            ));
+        }
     }
 
     #[test]
