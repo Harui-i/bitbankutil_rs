@@ -188,10 +188,11 @@ impl BitbankMarketEventConverter {
                 ticker: ticker.into(),
             }),
             BitbankInboundMessage::Transactions(transactions) => {
-                let transactions = transactions
+                let mut transactions = transactions
                     .into_iter()
                     .map(MarketTrade::try_from)
                     .collect::<Result<Vec<_>, _>>()?;
+                transactions.sort_by_key(|trade| (trade.executed_at, trade.transaction_id));
                 Some(MarketEvent::Transactions {
                     pair: self.pair.clone(),
                     transactions,
@@ -527,6 +528,47 @@ mod tests {
         assert_eq!(pair, "btc_jpy");
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0].side, OrderSide::Buy);
+    }
+
+    #[test]
+    fn bitbank_converter_orders_transactions_chronologically() {
+        let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
+        let newest = BitbankTransactionDatum {
+            amount: Decimal::new(1, 0),
+            executed_at: 3000,
+            price: Decimal::new(90, 0),
+            side: "sell".to_owned(),
+            transaction_id: 3,
+        };
+        let middle = BitbankTransactionDatum {
+            amount: Decimal::new(1, 0),
+            executed_at: 2000,
+            price: Decimal::new(100, 0),
+            side: "sell".to_owned(),
+            transaction_id: 2,
+        };
+        let oldest = BitbankTransactionDatum {
+            amount: Decimal::new(1, 0),
+            executed_at: 1000,
+            price: Decimal::new(110, 0),
+            side: "sell".to_owned(),
+            transaction_id: 1,
+        };
+
+        let event = converter
+            .convert(BitbankInboundMessage::Transactions(vec![
+                newest, middle, oldest,
+            ]))
+            .unwrap();
+
+        let Some(MarketEvent::Transactions { transactions, .. }) = event else {
+            panic!("expected transactions");
+        };
+        let ids = transactions
+            .iter()
+            .map(|trade| trade.transaction_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 
     #[test]
