@@ -248,13 +248,20 @@ impl PaperExecutionEngine {
 
         let mut events = Vec::new();
         for trade in transactions {
+            let mut remaining_trade_amount = trade.amount;
             let fill_order_ids = self.fill_order_ids_for_trade(trade);
             for order_id in fill_order_ids {
+                if remaining_trade_amount <= Decimal::ZERO {
+                    break;
+                }
+
                 let Some(open_order) = self.open_orders.remove(&order_id) else {
                     continue;
                 };
 
-                let event = self.fill_open_order(open_order, trade.clone());
+                let fill_amount = open_order.remaining_amount.min(remaining_trade_amount);
+                let event = self.fill_open_order(open_order, trade.clone(), fill_amount);
+                remaining_trade_amount -= fill_amount;
                 self.record_event(event.clone());
                 events.push(event);
             }
@@ -343,11 +350,17 @@ impl PaperExecutionEngine {
             .collect()
     }
 
-    fn fill_open_order(&mut self, open_order: OpenOrder, trade: MarketTrade) -> PaperEvent {
-        let order = open_order
+    fn fill_open_order(
+        &mut self,
+        mut open_order: OpenOrder,
+        trade: MarketTrade,
+        fill_amount: Decimal,
+    ) -> PaperEvent {
+        let mut order = open_order
             .to_desired_limit_order()
             .expect("paper engine only stores limit orders with prices");
-        let notional = order.amount * order.price;
+        order.amount = fill_amount;
+        let notional = fill_amount * order.price;
         let fee_amount_quote = notional * self.config.fee_schedule.maker_fee_rate_quote;
 
         match order.side {
@@ -355,13 +368,13 @@ impl PaperExecutionEngine {
                 let locked_amount = notional
                     + positive_quote_fee(notional, self.config.fee_schedule.maker_fee_rate_quote);
                 decrease_locked(&mut self.balances, &self.quote_asset, locked_amount);
-                add_free(&mut self.balances, &self.base_asset, order.amount);
+                add_free(&mut self.balances, &self.base_asset, fill_amount);
                 if fee_amount_quote < Decimal::ZERO {
                     add_free(&mut self.balances, &self.quote_asset, -fee_amount_quote);
                 }
             }
             OrderSide::Sell => {
-                decrease_locked(&mut self.balances, &self.base_asset, order.amount);
+                decrease_locked(&mut self.balances, &self.base_asset, fill_amount);
                 add_free(
                     &mut self.balances,
                     &self.quote_asset,
@@ -370,13 +383,20 @@ impl PaperExecutionEngine {
             }
         }
 
+        open_order.remaining_amount -= fill_amount;
+        let order_id = open_order.order_id;
+        let price = open_order
+            .price
+            .expect("paper engine limit order must have price");
+        if open_order.remaining_amount > Decimal::ZERO {
+            self.open_orders.insert(order_id, open_order);
+        }
+
         PaperEvent::OrderFilled {
-            order_id: open_order.order_id,
+            order_id,
             order,
-            price: open_order
-                .price
-                .expect("paper engine limit order must have price"),
-            amount: open_order.remaining_amount,
+            price,
+            amount: fill_amount,
             fee_amount_quote,
             trade,
         }
@@ -665,13 +685,29 @@ mod tests {
     fn non_positive_amount_or_price_rejects_order_without_changing_balances() {
         for invalid_order in [
             order(OrderSide::Buy, Decimal::ZERO, Decimal::new(5_000_000, 0)),
-            order(OrderSide::Buy, Decimal::new(-1, 1), Decimal::new(5_000_000, 0)),
+            order(
+                OrderSide::Buy,
+                Decimal::new(-1, 1),
+                Decimal::new(5_000_000, 0),
+            ),
             order(OrderSide::Buy, Decimal::new(1, 1), Decimal::ZERO),
-            order(OrderSide::Buy, Decimal::new(1, 1), Decimal::new(-5_000_000, 0)),
+            order(
+                OrderSide::Buy,
+                Decimal::new(1, 1),
+                Decimal::new(-5_000_000, 0),
+            ),
             order(OrderSide::Sell, Decimal::ZERO, Decimal::new(5_000_000, 0)),
-            order(OrderSide::Sell, Decimal::new(-1, 1), Decimal::new(5_000_000, 0)),
+            order(
+                OrderSide::Sell,
+                Decimal::new(-1, 1),
+                Decimal::new(5_000_000, 0),
+            ),
             order(OrderSide::Sell, Decimal::new(1, 1), Decimal::ZERO),
-            order(OrderSide::Sell, Decimal::new(1, 1), Decimal::new(-5_000_000, 0)),
+            order(
+                OrderSide::Sell,
+                Decimal::new(1, 1),
+                Decimal::new(-5_000_000, 0),
+            ),
         ] {
             let mut engine = engine_with_balances(Decimal::new(1, 0), Decimal::new(1_000_000, 0));
 
@@ -679,7 +715,10 @@ mod tests {
 
             assert!(result.is_err());
             assert!(engine.open_orders().is_empty());
-            assert_eq!(balance_of(&engine, "btc"), balance("btc", Decimal::new(1, 0)));
+            assert_eq!(
+                balance_of(&engine, "btc"),
+                balance("btc", Decimal::new(1, 0))
+            );
             assert_eq!(
                 balance_of(&engine, "jpy"),
                 balance("jpy", Decimal::new(1_000_000, 0))
@@ -737,7 +776,7 @@ mod tests {
 
         let events = engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Buy,
-            Decimal::new(1, 2),
+            Decimal::new(1, 1),
             Decimal::new(5_100_000, 0),
             10,
         )]));
@@ -776,7 +815,7 @@ mod tests {
 
         let events = engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
-            Decimal::new(1, 2),
+            Decimal::new(1, 1),
             Decimal::new(4_900_000, 0),
             11,
         )]));
@@ -947,7 +986,7 @@ mod tests {
 
         let events = engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
-            Decimal::new(1, 2),
+            Decimal::new(3, 1),
             Decimal::new(4_800_000, 0),
             30,
         )]));
@@ -1020,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn order_candidate_set_does_not_depend_on_trade_amount() {
+    fn trade_amount_caps_fill_and_leaves_remaining_open_order_amount() {
         let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(1_500_000, 0));
         for _ in 0..3 {
             engine
@@ -1035,12 +1074,58 @@ mod tests {
 
         let events = engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
-            Decimal::new(1, 8),
+            Decimal::new(8, 2),
             Decimal::new(5_000_000, 0),
             40,
         )]));
 
-        assert_eq!(events.len(), 3);
-        assert!(engine.open_orders().is_empty());
+        assert!(matches!(
+            events.as_slice(),
+            [PaperEvent::OrderFilled {
+                order_id,
+                amount,
+                fee_amount_quote,
+                ..
+            }] if *order_id == OrderId(1)
+                && *amount == Decimal::new(8, 2)
+                && *fee_amount_quote == Decimal::ZERO
+        ));
+        assert_eq!(
+            engine.open_orders(),
+            vec![
+                OpenOrder {
+                    order_id: OrderId(1),
+                    pair: "btc_jpy".to_owned(),
+                    side: OrderSide::Buy,
+                    order_type: OrderType::Limit,
+                    remaining_amount: Decimal::new(2, 2),
+                    price: Some(Decimal::new(5_000_000, 0)),
+                    post_only: Some(true),
+                },
+                OpenOrder {
+                    order_id: OrderId(2),
+                    pair: "btc_jpy".to_owned(),
+                    side: OrderSide::Buy,
+                    order_type: OrderType::Limit,
+                    remaining_amount: Decimal::new(1, 1),
+                    price: Some(Decimal::new(5_000_000, 0)),
+                    post_only: Some(true),
+                },
+                OpenOrder {
+                    order_id: OrderId(3),
+                    pair: "btc_jpy".to_owned(),
+                    side: OrderSide::Buy,
+                    order_type: OrderType::Limit,
+                    remaining_amount: Decimal::new(1, 1),
+                    price: Some(Decimal::new(5_000_000, 0)),
+                    post_only: Some(true),
+                },
+            ]
+        );
+        assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(8, 2));
+        assert_eq!(
+            balance_of(&engine, "jpy").locked_amount,
+            Decimal::new(1_100_000, 0)
+        );
     }
 }
