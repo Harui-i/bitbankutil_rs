@@ -1,11 +1,9 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    bitbank_private::BitbankPrivateApiClient,
-    bitbank_structs::{
-        BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
-    },
-    order_domain::{DesiredLimitOrder, OpenOrder, OrderId, OrderSide, OrderType},
+    bitbank_structs::BitbankGetOrderResponse,
+    order_domain::{DesiredLimitOrder, OpenOrder, OrderId, OrderSide},
+    order_executor::{OrderExecutor, PlacementRequest},
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
@@ -130,7 +128,7 @@ pub async fn place_wanna_orders(
     wanna_place_orders: BTreeSet<DesiredLimitOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
     pair: String,
-    api_client: BitbankPrivateApiClient,
+    executor: impl OrderExecutor,
 ) {
     let start = Instant::now();
     let mut js = JoinSet::new();
@@ -144,53 +142,28 @@ pub async fn place_wanna_orders(
     );
 
     if !cancels.is_empty() {
-        let cancel_order_response_result = api_client
-            .post_cancel_orders(
-                &pair.clone(),
-                cancels.into_iter().map(|order_id| order_id.0).collect(),
-            )
-            .await;
+        let cancel_order_response_result = executor.cancel_orders(&pair, cancels).await;
 
         if let Err(err) = cancel_order_response_result {
             log::error!(
-                "in place_wanna_orders, post_cancel_orders has returned error: {:?}",
+                "in place_wanna_orders, cancel_orders has returned error: {:?}",
                 err
             );
             return;
         }
-        let cancel_order_response = cancel_order_response_result.unwrap();
 
-        log::debug!(
-            "cancel current orders. response: {:?}",
-            cancel_order_response
-        );
+        log::debug!("cancel current orders.");
     }
 
     // side、lot、price
     // 注文を発注する
     for sord in placements {
-        let bbc2 = api_client.clone();
-        let pair2 = pair.clone();
-        js.spawn(async move {
-            bbc2.post_order(
-                &pair2,
-                &sord.amount.to_string(),
-                Some(&sord.price.to_string()),
-                sord.side.as_str(),
-                OrderType::Limit.as_str(),
-                sord.post_only,
-                None,
-            )
-            .await
-        });
+        let executor2 = executor.clone();
+        js.spawn(async move { executor2.place_order(PlacementRequest::from(sord)).await });
     }
 
     while let Some(js_res) = js.join_next().await {
-        let bcor: Result<
-            BitbankCreateOrderResponse,
-            Option<crypto_botters::bitbank::BitbankHandleError>,
-        > = js_res.unwrap();
-
+        let bcor = js_res.unwrap();
         log::debug!("order result: {:?}", bcor);
     }
 
@@ -213,7 +186,7 @@ pub async fn place_wanna_orders_concurrent(
     btc_free_amount: Decimal,
     jpy_free_amount: Decimal,
     pair: String,
-    api_client: BitbankPrivateApiClient,
+    executor: impl OrderExecutor,
 ) {
     let start = Instant::now();
     let ConcurrentOrderPlan {
@@ -229,14 +202,9 @@ pub async fn place_wanna_orders_concurrent(
     );
 
     enum FirstJoinSetResponse {
-        CancelResponse(
-            Result<
-                BitbankCancelOrdersResponse,
-                Option<crypto_botters::bitbank::BitbankHandleError>,
-            >,
-        ),
+        CancelResponse(Result<(), crate::order_executor::OrderExecutionError>),
         PostResponse(
-            Result<BitbankCreateOrderResponse, Option<crypto_botters::bitbank::BitbankHandleError>>,
+            Result<crate::order_executor::PlacedOrder, crate::order_executor::OrderExecutionError>,
         ),
     }
 
@@ -245,36 +213,20 @@ pub async fn place_wanna_orders_concurrent(
 
     // いくつかの注文をキャンセルする必要がある
     if !cancels.is_empty() {
-        let bbc2 = api_client.clone();
+        let executor2 = executor.clone();
         let pair2 = pair.clone();
 
         first_js.spawn(async move {
-            FirstJoinSetResponse::CancelResponse(
-                bbc2.post_cancel_orders(
-                    &pair2.clone(),
-                    cancels.into_iter().map(|order_id| order_id.0).collect(),
-                )
-                .await,
-            )
+            FirstJoinSetResponse::CancelResponse(executor2.cancel_orders(&pair2, cancels).await)
         });
     }
 
     for sord in first_placements {
-        let bbc2 = api_client.clone();
-        let pair2 = pair.clone();
+        let executor2 = executor.clone();
 
         first_js.spawn(async move {
             FirstJoinSetResponse::PostResponse(
-                bbc2.post_order(
-                    &pair2,
-                    &sord.amount.to_string(),
-                    Some(&sord.price.to_string()),
-                    sord.side.as_str(),
-                    OrderType::Limit.as_str(),
-                    sord.post_only,
-                    None,
-                )
-                .await,
+                executor2.place_order(PlacementRequest::from(sord)).await,
             )
         });
     }
@@ -302,20 +254,9 @@ pub async fn place_wanna_orders_concurrent(
         let mut second_js = JoinSet::new();
 
         for sord in second_placements {
-            let bbc2 = api_client.clone();
-            let pair2 = pair.clone();
-            second_js.spawn(async move {
-                bbc2.post_order(
-                    &pair2,
-                    &sord.amount.to_string(),
-                    Some(&sord.price.to_string()),
-                    sord.side.as_str(),
-                    OrderType::Limit.as_str(),
-                    sord.post_only,
-                    None,
-                )
-                .await
-            });
+            let executor2 = executor.clone();
+            second_js
+                .spawn(async move { executor2.place_order(PlacementRequest::from(sord)).await });
         }
 
         while let Some(second_js_res) = second_js.join_next().await {
@@ -333,6 +274,58 @@ pub async fn place_wanna_orders_concurrent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::order_domain::OrderType;
+    use crate::order_executor::{OrderExecutorFuture, PlacedOrder, PlacementRequest};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum ExecutorCall {
+        Place(DesiredLimitOrder),
+        Cancel {
+            pair: String,
+            order_ids: Vec<OrderId>,
+        },
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeOrderExecutor {
+        calls: Arc<Mutex<Vec<ExecutorCall>>>,
+    }
+
+    impl FakeOrderExecutor {
+        fn calls(&self) -> Vec<ExecutorCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl OrderExecutor for FakeOrderExecutor {
+        fn place_order(&self, request: PlacementRequest) -> OrderExecutorFuture<'_, PlacedOrder> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(ExecutorCall::Place(request.order));
+
+                Ok(PlacedOrder { order_id: None })
+            })
+        }
+
+        fn cancel_orders<'a>(
+            &'a self,
+            pair: &'a str,
+            order_ids: Vec<OrderId>,
+        ) -> OrderExecutorFuture<'a, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(ExecutorCall::Cancel {
+                    pair: pair.to_owned(),
+                    order_ids,
+                });
+
+                Ok(())
+            })
+        }
+    }
 
     fn desired_order(
         pair: &str,
@@ -360,6 +353,35 @@ mod tests {
             price: Some(price),
             post_only,
         }
+    }
+
+    fn bitbank_open_order_response(
+        order_id: u64,
+        pair: &str,
+        side: OrderSide,
+        amount: Decimal,
+        price: Decimal,
+        post_only: Option<bool>,
+    ) -> BitbankGetOrderResponse {
+        serde_json::from_value(json!({
+            "order_id": order_id,
+            "pair": pair,
+            "side": side.as_str(),
+            "position_side": null,
+            "type": "limit",
+            "start_amount": amount.to_string(),
+            "remaining_amount": amount.to_string(),
+            "executed_amount": "0",
+            "price": price.to_string(),
+            "post_only": post_only,
+            "user_cancelable": true,
+            "average_price": "0",
+            "ordered_at": 1710000000000_u64,
+            "expire_at": null,
+            "trigger_price": null,
+            "status": "UNFILLED"
+        }))
+        .unwrap()
     }
 
     fn set_of(orders: Vec<DesiredLimitOrder>) -> BTreeSet<DesiredLimitOrder> {
@@ -568,5 +590,87 @@ mod tests {
         assert!(plan.cancels.is_empty());
         assert!(plan.first_placements.is_empty());
         assert!(plan.second_placements.is_empty());
+    }
+
+    #[tokio::test]
+    async fn place_wanna_orders_executes_order_plan_through_executor() {
+        let desired = desired_order(
+            "btc_jpy",
+            OrderSide::Buy,
+            Decimal::new(1, 1),
+            Decimal::new(5_000_000, 0),
+        );
+        let current_order = bitbank_open_order_response(
+            10,
+            "btc_jpy",
+            OrderSide::Sell,
+            Decimal::new(2, 1),
+            Decimal::new(5_100_000, 0),
+            Some(true),
+        );
+        let executor = FakeOrderExecutor::default();
+
+        place_wanna_orders(
+            set_of(vec![desired.clone()]),
+            vec![current_order],
+            "btc_jpy".to_owned(),
+            executor.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            executor.calls(),
+            vec![
+                ExecutorCall::Cancel {
+                    pair: "btc_jpy".to_owned(),
+                    order_ids: vec![OrderId(10)],
+                },
+                ExecutorCall::Place(desired),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn place_wanna_orders_concurrent_executes_split_plan_through_executor() {
+        let first_buy = desired_order(
+            "btc_jpy",
+            OrderSide::Buy,
+            Decimal::new(1, 1),
+            Decimal::new(1_000_000, 0),
+        );
+        let second_buy = desired_order(
+            "btc_jpy",
+            OrderSide::Buy,
+            Decimal::new(2, 1),
+            Decimal::new(1_000_000, 0),
+        );
+        let current_order = bitbank_open_order_response(
+            20,
+            "btc_jpy",
+            OrderSide::Sell,
+            Decimal::new(3, 1),
+            Decimal::new(1_200_000, 0),
+            Some(true),
+        );
+        let executor = FakeOrderExecutor::default();
+
+        place_wanna_orders_concurrent(
+            vec![first_buy.clone(), second_buy.clone()],
+            vec![current_order],
+            Decimal::ZERO,
+            Decimal::new(100_000, 0),
+            "btc_jpy".to_owned(),
+            executor.clone(),
+        )
+        .await;
+
+        let calls = executor.calls();
+        assert!(calls.contains(&ExecutorCall::Cancel {
+            pair: "btc_jpy".to_owned(),
+            order_ids: vec![OrderId(20)],
+        }));
+        assert!(calls.contains(&ExecutorCall::Place(first_buy)));
+        assert!(calls.contains(&ExecutorCall::Place(second_buy)));
+        assert_eq!(calls.len(), 3);
     }
 }
