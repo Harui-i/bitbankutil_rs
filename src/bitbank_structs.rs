@@ -231,7 +231,7 @@ pub struct BitbankCreateOrderResponse {
     pub side: String,
     /// 文字列またはnull。
     pub position_side: Option<String>,
-    /// "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"。
+    /// "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"、"losscut"。
     pub r#type: String,
     /// 発注時の注文数量。
     pub start_amount: Option<String>,
@@ -271,7 +271,7 @@ pub struct BitbankGetOrderResponse {
     pub side: String,
     /// 文字列またはnull。
     pub position_side: Option<String>,
-    /// "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"。
+    /// "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"、"losscut"。
     pub r#type: String,
     /// 発注時の注文数量。
     pub start_amount: Option<String>,
@@ -311,7 +311,7 @@ pub struct BitbankCancelOrderResponse {
     pub side: String,
     /// 文字列またはnull。
     pub position_side: Option<String>,
-    /// "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"。
+    /// "limit"、"market"、"stop"、"stop_limit"、"take_profit"、"stop_loss"、"losscut"。
     pub r#type: String,
     /// 発注時の注文数量。
     pub start_amount: Option<String>,

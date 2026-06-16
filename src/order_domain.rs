@@ -45,6 +45,7 @@ pub enum OrderType {
     StopLimit,
     TakeProfit,
     StopLoss,
+    Losscut,
 }
 
 impl OrderType {
@@ -56,6 +57,7 @@ impl OrderType {
             OrderType::StopLimit => "stop_limit",
             OrderType::TakeProfit => "take_profit",
             OrderType::StopLoss => "stop_loss",
+            OrderType::Losscut => "losscut",
         }
     }
 }
@@ -77,6 +79,7 @@ impl FromStr for OrderType {
             "stop_limit" => Ok(OrderType::StopLimit),
             "take_profit" => Ok(OrderType::TakeProfit),
             "stop_loss" => Ok(OrderType::StopLoss),
+            "losscut" => Ok(OrderType::Losscut),
             _ => Err(ParseOrderError::UnknownType(value.to_owned())),
         }
     }
@@ -273,6 +276,34 @@ mod tests {
             OpenOrder::try_from(&response).unwrap_err(),
             ParseOrderError::UnknownSide("hold".to_owned())
         );
+    }
+
+    #[test]
+    fn accepts_bitbank_losscut_order_type() {
+        let response: BitbankGetOrderResponse = serde_json::from_value(json!({
+            "order_id": 12345,
+            "pair": "btc_jpy",
+            "side": "sell",
+            "position_side": null,
+            "type": "losscut",
+            "start_amount": "0.2",
+            "remaining_amount": "0.1",
+            "executed_amount": "0.1",
+            "price": null,
+            "post_only": null,
+            "user_cancelable": true,
+            "average_price": "0",
+            "ordered_at": 1710000000000_u64,
+            "expire_at": null,
+            "trigger_price": null,
+            "status": "UNFILLED"
+        }))
+        .unwrap();
+
+        let order = OpenOrder::try_from(&response).unwrap();
+
+        assert_eq!(order.order_type, OrderType::Losscut);
+        assert_eq!(order.order_type.as_str(), "losscut");
     }
 
     #[test]
