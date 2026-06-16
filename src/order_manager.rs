@@ -446,7 +446,10 @@ mod tests {
         );
 
         assert!(plan.should_cancelled_orderids.is_empty());
-        assert_eq!(plan.first_posted_orders, set_of(vec![first_buy, first_sell]));
+        assert_eq!(
+            plan.first_posted_orders,
+            set_of(vec![first_buy, first_sell])
+        );
         assert_eq!(
             plan.second_posted_orders,
             set_of(vec![second_buy, second_sell])
