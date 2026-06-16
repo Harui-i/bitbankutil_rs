@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy};
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
-use bitbankutil_rs::bitbank_structs::BitbankDepth;
 use bitbankutil_rs::depth::Depth;
+use bitbankutil_rs::market_event::MarketDepthSnapshot;
 use bitbankutil_rs::order_domain::{DesiredLimitOrder, OpenOrder, OrderSide, OrderType};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
@@ -12,7 +12,7 @@ use rust_decimal::prelude::*;
 
 struct MyBot {
     bot_config: MyBotConfig,
-    depth: BitbankDepth,
+    depth: MarketDepthSnapshot,
     last_updated: u128,
     last_bestbid: Decimal,
     last_bestask: Decimal,
@@ -46,7 +46,7 @@ impl MyBot {
                 max_lot,
                 bb_api_client: BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None),
             },
-            depth: BitbankDepth::new(),
+            depth: MarketDepthSnapshot::empty(),
             last_updated: 0,
             last_bestbid: Decimal::zero(),
             last_bestask: Decimal::zero(),
