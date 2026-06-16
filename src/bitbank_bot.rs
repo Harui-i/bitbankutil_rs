@@ -2,6 +2,10 @@ use crate::bitbank_structs::{
     BitbankCircuitBreakInfo, BitbankDepth, BitbankDepthDiff, BitbankDepthWhole,
     BitbankTickerResponse, BitbankTransactionDatum,
 };
+use crate::market_event::{
+    MarketCircuitBreakInfo, MarketDepthSnapshot, MarketEvent, MarketEventConversionError,
+    MarketTicker, MarketTrade,
+};
 use crate::websocket_handler::run_websocket;
 use crypto_botters::bitbank::BitbankOption;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
@@ -131,20 +135,98 @@ pub enum BitbankInboundMessage {
 pub enum BitbankEvent {
     Ticker {
         pair: String,
-        ticker: BitbankTickerResponse,
+        ticker: MarketTicker,
     },
     Transactions {
         pair: String,
-        transactions: Vec<BitbankTransactionDatum>,
+        transactions: Vec<MarketTrade>,
     },
     DepthUpdated {
         pair: String,
-        depth: BitbankDepth,
+        depth: MarketDepthSnapshot,
     },
     CircuitBreakInfo {
         pair: String,
-        info: BitbankCircuitBreakInfo,
+        info: MarketCircuitBreakInfo,
     },
+}
+
+impl From<MarketEvent> for BitbankEvent {
+    fn from(event: MarketEvent) -> Self {
+        match event {
+            MarketEvent::Ticker { pair, ticker } => Self::Ticker { pair, ticker },
+            MarketEvent::Transactions { pair, transactions } => {
+                Self::Transactions { pair, transactions }
+            }
+            MarketEvent::DepthUpdated { pair, depth } => Self::DepthUpdated { pair, depth },
+            MarketEvent::CircuitBreakInfo { pair, info } => Self::CircuitBreakInfo { pair, info },
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BitbankMarketEventConverter {
+    pair: String,
+    depth: BitbankDepth,
+}
+
+impl BitbankMarketEventConverter {
+    fn new(pair: String) -> Self {
+        Self {
+            pair,
+            depth: BitbankDepth::new(),
+        }
+    }
+
+    fn convert(
+        &mut self,
+        message: BitbankInboundMessage,
+    ) -> Result<Option<MarketEvent>, MarketEventConversionError> {
+        let event = match message {
+            BitbankInboundMessage::Ticker(ticker) => Some(MarketEvent::Ticker {
+                pair: self.pair.clone(),
+                ticker: ticker.into(),
+            }),
+            BitbankInboundMessage::Transactions(transactions) => {
+                let transactions = transactions
+                    .into_iter()
+                    .map(MarketTrade::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some(MarketEvent::Transactions {
+                    pair: self.pair.clone(),
+                    transactions,
+                })
+            }
+            BitbankInboundMessage::DepthDiff(depth_diff) => {
+                self.depth.insert_diff(depth_diff);
+                if self.depth.is_complete() {
+                    Some(MarketEvent::DepthUpdated {
+                        pair: self.pair.clone(),
+                        depth: MarketDepthSnapshot::from(&self.depth),
+                    })
+                } else {
+                    None
+                }
+            }
+            BitbankInboundMessage::DepthWhole(depth_whole) => {
+                self.depth.update_whole(depth_whole);
+                if self.depth.is_complete() {
+                    Some(MarketEvent::DepthUpdated {
+                        pair: self.pair.clone(),
+                        depth: MarketDepthSnapshot::from(&self.depth),
+                    })
+                } else {
+                    None
+                }
+            }
+            BitbankInboundMessage::CircuitBreakInfo(info) => Some(MarketEvent::CircuitBreakInfo {
+                pair: self.pair.clone(),
+                info: info.into(),
+            }),
+        };
+
+        Ok(event)
+    }
 }
 
 async fn run_bitbank_pair_feed<E>(
@@ -153,7 +235,7 @@ async fn run_bitbank_pair_feed<E>(
     websocket_config: WebSocketConfig,
     event_tx: mpsc::Sender<E>,
 ) where
-    E: From<BitbankEvent> + Send + 'static,
+    E: From<MarketEvent> + Send + 'static,
 {
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<BitbankInboundMessage>(128);
     let ws_task = tokio::spawn(run_websocket(
@@ -163,43 +245,17 @@ async fn run_bitbank_pair_feed<E>(
         inbound_tx,
     ));
 
-    let mut depth = BitbankDepth::new();
+    let mut converter = BitbankMarketEventConverter::new(pair.clone());
     while let Some(message) = inbound_rx.recv().await {
-        let event = match message {
-            BitbankInboundMessage::Ticker(ticker) => Some(BitbankEvent::Ticker {
-                pair: pair.clone(),
-                ticker,
-            }),
-            BitbankInboundMessage::Transactions(transactions) => Some(BitbankEvent::Transactions {
-                pair: pair.clone(),
-                transactions,
-            }),
-            BitbankInboundMessage::DepthDiff(depth_diff) => {
-                depth.insert_diff(depth_diff);
-                if depth.is_complete() {
-                    Some(BitbankEvent::DepthUpdated {
-                        pair: pair.clone(),
-                        depth: depth.clone(),
-                    })
-                } else {
-                    None
-                }
+        let event = match converter.convert(message) {
+            Ok(event) => event,
+            Err(err) => {
+                warn!(
+                    "bitbank feed for pair {} dropped an invalid market event: {:?}",
+                    pair, err
+                );
+                continue;
             }
-            BitbankInboundMessage::DepthWhole(depth_whole) => {
-                depth.update_whole(depth_whole);
-                if depth.is_complete() {
-                    Some(BitbankEvent::DepthUpdated {
-                        pair: pair.clone(),
-                        depth: depth.clone(),
-                    })
-                } else {
-                    None
-                }
-            }
-            BitbankInboundMessage::CircuitBreakInfo(info) => Some(BitbankEvent::CircuitBreakInfo {
-                pair: pair.clone(),
-                info,
-            }),
         };
 
         if let Some(event) = event {
@@ -241,7 +297,7 @@ fn duplicate_bitbank_options(options: &[BitbankOption]) -> Vec<BitbankOption> {
 pub struct BitbankBotBuilder<S, E>
 where
     S: BotStrategy<Event = E>,
-    E: From<BitbankEvent> + Send + 'static,
+    E: From<MarketEvent> + Send + 'static,
 {
     strategy: S,
     pairs: Vec<String>,
@@ -254,7 +310,7 @@ where
 impl<S, E> BitbankBotBuilder<S, E>
 where
     S: BotStrategy<Event = E>,
-    E: From<BitbankEvent> + Send + 'static,
+    E: From<MarketEvent> + Send + 'static,
 {
     pub fn new(strategy: S) -> Self {
         Self {
@@ -364,37 +420,19 @@ pub async fn forward_bitbank_messages<E>(
     inbound_rx: &mut mpsc::Receiver<BitbankInboundMessage>,
     event_tx: &mpsc::Sender<E>,
 ) where
-    E: From<BitbankEvent> + Send + 'static,
+    E: From<MarketEvent> + Send + 'static,
 {
-    let mut depth = BitbankDepth::new();
+    let mut converter = BitbankMarketEventConverter::new(pair.clone());
     while let Some(message) = inbound_rx.recv().await {
-        let event = match message {
-            BitbankInboundMessage::Ticker(ticker) => Some(BitbankEvent::Ticker {
-                pair: pair.clone(),
-                ticker,
-            }),
-            BitbankInboundMessage::Transactions(transactions) => Some(BitbankEvent::Transactions {
-                pair: pair.clone(),
-                transactions,
-            }),
-            BitbankInboundMessage::DepthDiff(diff) => {
-                depth.insert_diff(diff);
-                depth.is_complete().then(|| BitbankEvent::DepthUpdated {
-                    pair: pair.clone(),
-                    depth: depth.clone(),
-                })
+        let event = match converter.convert(message) {
+            Ok(event) => event,
+            Err(err) => {
+                error!(
+                    "forwarder dropping invalid market event while replaying {}: {:?}",
+                    pair, err
+                );
+                continue;
             }
-            BitbankInboundMessage::DepthWhole(whole) => {
-                depth.update_whole(whole);
-                depth.is_complete().then(|| BitbankEvent::DepthUpdated {
-                    pair: pair.clone(),
-                    depth: depth.clone(),
-                })
-            }
-            BitbankInboundMessage::CircuitBreakInfo(info) => Some(BitbankEvent::CircuitBreakInfo {
-                pair: pair.clone(),
-                info,
-            }),
         };
 
         if let Some(event) = event {
@@ -406,5 +444,139 @@ pub async fn forward_bitbank_messages<E>(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::depth::Depth;
+    use crate::order_domain::OrderSide;
+    use rust_decimal::Decimal;
+    use serde_json::Number;
+
+    fn depth_whole() -> BitbankDepthWhole {
+        serde_json::from_value(serde_json::json!({
+            "asks": [["101", "1.5"]],
+            "bids": [["100", "2.0"]],
+            "asks_over": "0",
+            "bids_under": "0",
+            "asks_under": "0",
+            "bids_over": "0",
+            "ask_market": "0",
+            "bid_market": "0",
+            "timestamp": 1234,
+            "sequenceId": "10"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn bitbank_converter_waits_for_complete_depth() {
+        let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
+        let diff = BitbankDepthDiff {
+            a: vec![vec!["101".to_owned(), "0.5".to_owned()]],
+            b: vec![vec!["100".to_owned(), "1.0".to_owned()]],
+            ao: None,
+            bu: None,
+            au: None,
+            bo: None,
+            am: None,
+            bm: None,
+            t: 1200,
+            s: "9".to_owned(),
+        };
+
+        let event = converter
+            .convert(BitbankInboundMessage::DepthDiff(diff))
+            .unwrap();
+        assert!(event.is_none());
+
+        let event = converter
+            .convert(BitbankInboundMessage::DepthWhole(depth_whole()))
+            .unwrap();
+
+        let Some(MarketEvent::DepthUpdated { pair, depth }) = event else {
+            panic!("expected depth update");
+        };
+        assert_eq!(pair, "btc_jpy");
+        assert!(depth.is_complete());
+        assert_eq!(depth.best_ask().unwrap().0, &Decimal::new(101, 0));
+        assert_eq!(depth.best_bid().unwrap().0, &Decimal::new(100, 0));
+        assert_eq!(depth.last_timestamp(), 1234);
+    }
+
+    #[test]
+    fn bitbank_converter_maps_transactions_to_domain_side() {
+        let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
+        let trade = BitbankTransactionDatum {
+            amount: Decimal::new(25, 1),
+            executed_at: 1000,
+            price: Decimal::new(100, 0),
+            side: "buy".to_owned(),
+            transaction_id: 42,
+        };
+
+        let event = converter
+            .convert(BitbankInboundMessage::Transactions(vec![trade]))
+            .unwrap();
+
+        let Some(MarketEvent::Transactions { pair, transactions }) = event else {
+            panic!("expected transactions");
+        };
+        assert_eq!(pair, "btc_jpy");
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].side, OrderSide::Buy);
+    }
+
+    #[test]
+    fn bitbank_converter_rejects_unknown_transaction_side() {
+        let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
+        let trade = BitbankTransactionDatum {
+            amount: Decimal::new(25, 1),
+            executed_at: 1000,
+            price: Decimal::new(100, 0),
+            side: "unknown".to_owned(),
+            transaction_id: 42,
+        };
+
+        let err = converter
+            .convert(BitbankInboundMessage::Transactions(vec![trade]))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            MarketEventConversionError::InvalidTradeSide(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn forward_bitbank_messages_emits_market_events() {
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel::<MarketEvent>(4);
+
+        inbound_tx
+            .send(BitbankInboundMessage::Ticker(BitbankTickerResponse {
+                sell: Some("101".to_owned()),
+                buy: Some("100".to_owned()),
+                high: "110".to_owned(),
+                low: "90".to_owned(),
+                open: "95".to_owned(),
+                last: "100".to_owned(),
+                vol: "12.5".to_owned(),
+                timestamp: Number::from(1234),
+            }))
+            .await
+            .unwrap();
+        drop(inbound_tx);
+
+        forward_bitbank_messages("btc_jpy".to_owned(), &mut inbound_rx, &event_tx).await;
+
+        let event = event_rx.recv().await.unwrap();
+        let MarketEvent::Ticker { pair, ticker } = event else {
+            panic!("expected ticker");
+        };
+        assert_eq!(pair, "btc_jpy");
+        assert_eq!(ticker.last, "100");
     }
 }

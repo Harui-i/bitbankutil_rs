@@ -2,6 +2,7 @@ pub mod bitbank_bot;
 pub mod bitbank_private;
 pub mod bitbank_public;
 pub mod bitbank_structs;
+pub mod market_event;
 pub mod order_domain;
 pub mod order_executor;
 pub mod order_manager;

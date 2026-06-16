@@ -120,6 +120,13 @@ trait OrderExecutor {
 - WebSocket 由来イベントとログ再生イベントを同じ中立イベント列として扱える。
 - 既存の bot runtime の挙動は変わらない。
 
+実施済み:
+
+- `market_event` に `MarketEvent` / `MarketTicker` / `MarketTrade` / `MarketDepthSnapshot` / `MarketCircuitBreakInfo` を追加。
+- `BitbankInboundMessage` から中立 `MarketEvent` へ変換する境界を追加し、WebSocket feed とログ再生 helper が同じ変換処理を使うように変更。
+- `BitbankEvent` は互換用イベントとして残し、`MarketEvent` から変換できるようにした。
+- 中立イベント変換、板スナップショット完成待ち、ログ再生 helper のユニットテストを追加。
+
 ### 5. `feature/paper-execution-engine`
 
 ここで初めて paper trading 固有の実装を入れる。
