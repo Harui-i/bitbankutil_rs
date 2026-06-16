@@ -5,18 +5,16 @@ use crate::{
     bitbank_structs::{
         BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
     },
-    order_domain::{DesiredOrder, OpenOrder, OrderSide},
+    order_domain::{DesiredLimitOrder, OpenOrder, OrderSide, OrderType},
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
-
-pub type SimplifiedOrder = DesiredOrder;
 
 // 有効な注文を置き換える
 // `current_orders` : BitbankGetOrderResponseのVecで、ペア内の現在の注文を表す
 // `pair` : &str は注文を置き換えたいペアを表す
 pub async fn place_wanna_orders(
-    mut wanna_place_orders: BTreeSet<SimplifiedOrder>,
+    mut wanna_place_orders: BTreeSet<DesiredLimitOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
     pair: String,
     api_client: BitbankPrivateApiClient,
@@ -28,15 +26,14 @@ pub async fn place_wanna_orders(
     for cur_order in current_orders {
         let current_order = OpenOrder::try_from(&cur_order)
             .expect("failed to convert bitbank order response into OpenOrder");
-        let current_sord = current_order.to_desired_order();
         let matched_wanna_order = wanna_place_orders
             .iter()
             .find(|wanna_order| wanna_order.matches_open_order(&current_order))
             .cloned();
 
         // この注文はキャンセルされるべき
-        if matched_wanna_order.is_none() && current_sord.pair == pair {
-            log::debug!("this order is cancelled. {:?}", current_sord);
+        if matched_wanna_order.is_none() && current_order.pair == pair {
+            log::debug!("this order is cancelled. {:?}", current_order);
             should_cancelled_orderids.push(current_order.order_id.0);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
@@ -74,12 +71,9 @@ pub async fn place_wanna_orders(
             bbc2.post_order(
                 &pair2,
                 &sord.amount.to_string(),
-                sord.price
-                    .as_ref()
-                    .map(|price| price.to_string())
-                    .as_deref(),
+                Some(&sord.price.to_string()),
                 sord.side.as_str(),
-                sord.order_type.as_str(),
+                OrderType::Limit.as_str(),
                 sord.post_only,
                 None,
             )
@@ -110,7 +104,7 @@ wanna_place_orders
 `jpy_btc_locked_amount`：取引ペアの注文に使用されている日本円の量。
 */
 pub async fn place_wanna_orders_concurrent(
-    mut wanna_place_orders: Vec<SimplifiedOrder>,
+    mut wanna_place_orders: Vec<DesiredLimitOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
     btc_free_amount: Decimal,
     jpy_free_amount: Decimal,
@@ -123,20 +117,19 @@ pub async fn place_wanna_orders_concurrent(
     for cur_order in current_orders {
         let current_order = OpenOrder::try_from(&cur_order)
             .expect("failed to convert bitbank order response into OpenOrder");
-        let current_sord = current_order.to_desired_order();
         let matched_wanna_order_index = wanna_place_orders
             .iter()
             .position(|wanna_order| wanna_order.matches_open_order(&current_order));
 
         // この注文はキャンセルされるべき
-        if matched_wanna_order_index.is_none() && current_sord.pair == pair {
-            log::debug!("this order will be cancelled. {:?}", current_sord);
+        if matched_wanna_order_index.is_none() && current_order.pair == pair {
+            log::debug!("this order will be cancelled. {:?}", current_order);
             should_cancelled_orderids.push(current_order.order_id.0);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
         else if let Some(matched_wanna_order_index) = matched_wanna_order_index {
             // 1つだけ削除したいので、最初に一致した希望注文を削除する。
-            log::debug!("this order already exists: {:?}", current_sord);
+            log::debug!("this order already exists: {:?}", current_order);
             wanna_place_orders.remove(matched_wanna_order_index);
         }
     }
@@ -144,8 +137,8 @@ pub async fn place_wanna_orders_concurrent(
     let mut next_btc_free_amount = btc_free_amount;
     let mut next_jpy_free_amount = jpy_free_amount;
 
-    let mut first_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
-    let mut second_posted_orders: BTreeSet<SimplifiedOrder> = BTreeSet::new();
+    let mut first_posted_orders: BTreeSet<DesiredLimitOrder> = BTreeSet::new();
+    let mut second_posted_orders: BTreeSet<DesiredLimitOrder> = BTreeSet::new();
 
     // wanna_place_ordersの順序が発注したい注文の優先順位であると仮定する。
     for sord in wanna_place_orders {
@@ -216,12 +209,9 @@ pub async fn place_wanna_orders_concurrent(
                 bbc2.post_order(
                     &pair2,
                     &sord.amount.to_string(),
-                    sord.price
-                        .as_ref()
-                        .map(|price| price.to_string())
-                        .as_deref(),
+                    Some(&sord.price.to_string()),
                     sord.side.as_str(),
-                    sord.order_type.as_str(),
+                    OrderType::Limit.as_str(),
                     sord.post_only,
                     None,
                 )
@@ -259,12 +249,9 @@ pub async fn place_wanna_orders_concurrent(
                 bbc2.post_order(
                     &pair2,
                     &sord.amount.to_string(),
-                    sord.price
-                        .as_ref()
-                        .map(|price| price.to_string())
-                        .as_deref(),
+                    Some(&sord.price.to_string()),
                     sord.side.as_str(),
-                    sord.order_type.as_str(),
+                    OrderType::Limit.as_str(),
                     sord.post_only,
                     None,
                 )

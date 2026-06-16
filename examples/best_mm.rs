@@ -5,7 +5,7 @@ use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, B
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_structs::BitbankDepth;
 use bitbankutil_rs::depth::Depth;
-use bitbankutil_rs::order_domain::{DesiredOrder, OpenOrder, OrderSide, OrderType};
+use bitbankutil_rs::order_domain::{DesiredLimitOrder, OpenOrder, OrderSide, OrderType};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
@@ -206,7 +206,7 @@ impl MyBot {
             let mut wanna_place_orders = Vec::new();
 
             if can_buy {
-                wanna_place_orders.push(DesiredOrder::limit(
+                wanna_place_orders.push(DesiredLimitOrder::limit(
                     self.bot_config.pair.clone(),
                     OrderSide::Buy,
                     self.bot_config.lot,
@@ -215,7 +215,7 @@ impl MyBot {
             }
 
             if can_sell {
-                wanna_place_orders.push(DesiredOrder::limit(
+                wanna_place_orders.push(DesiredLimitOrder::limit(
                     self.bot_config.pair.clone(),
                     OrderSide::Sell,
                     self.bot_config.lot + btc_amount_remainder,

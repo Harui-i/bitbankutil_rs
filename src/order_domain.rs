@@ -89,38 +89,35 @@ impl FromStr for OrderType {
 pub struct OrderId(pub u64);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
-pub struct DesiredOrder {
+pub struct DesiredLimitOrder {
     pub pair: String,
     pub side: OrderSide,
-    pub order_type: OrderType,
     pub amount: Decimal,
-    pub price: Option<Decimal>,
+    pub price: Decimal,
     pub post_only: Option<bool>,
 }
 
-impl DesiredOrder {
+impl DesiredLimitOrder {
     pub fn limit(pair: String, side: OrderSide, amount: Decimal, price: Decimal) -> Self {
         Self {
             pair,
             side,
-            order_type: OrderType::Limit,
             amount,
-            price: Some(price),
+            price,
             post_only: Some(true),
         }
     }
 
     pub fn limit_price(&self) -> Decimal {
         self.price
-            .expect("limit desired order must have a price in order_manager")
     }
 
     pub fn matches_open_order(&self, open_order: &OpenOrder) -> bool {
         self.pair == open_order.pair
             && self.side == open_order.side
-            && self.order_type == open_order.order_type
+            && open_order.order_type == OrderType::Limit
             && self.amount == open_order.remaining_amount
-            && self.price == open_order.price
+            && Some(self.price) == open_order.price
             && post_only_matches(self.post_only, open_order.post_only)
     }
 }
@@ -141,15 +138,18 @@ pub struct OpenOrder {
 }
 
 impl OpenOrder {
-    pub fn to_desired_order(&self) -> DesiredOrder {
-        DesiredOrder {
+    pub fn to_desired_limit_order(&self) -> Option<DesiredLimitOrder> {
+        if self.order_type != OrderType::Limit {
+            return None;
+        }
+
+        Some(DesiredLimitOrder {
             pair: self.pair.clone(),
             side: self.side,
-            order_type: self.order_type,
             amount: self.remaining_amount,
-            price: self.price,
+            price: self.price?,
             post_only: self.post_only,
-        }
+        })
     }
 }
 
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_open_order_to_desired_order_without_order_id() {
+    fn converts_open_order_to_desired_limit_order_without_order_id() {
         let open_order = OpenOrder {
             order_id: OrderId(12345),
             pair: "btc_jpy".to_owned(),
@@ -332,8 +332,8 @@ mod tests {
         };
 
         assert_eq!(
-            open_order.to_desired_order(),
-            DesiredOrder::limit(
+            open_order.to_desired_limit_order().unwrap(),
+            DesiredLimitOrder::limit(
                 "btc_jpy".to_owned(),
                 OrderSide::Sell,
                 Decimal::new(25, 2),
@@ -343,8 +343,8 @@ mod tests {
     }
 
     #[test]
-    fn desired_order_matches_open_order_with_missing_post_only() {
-        let desired_order = DesiredOrder::limit(
+    fn desired_limit_order_matches_open_order_with_missing_post_only() {
+        let desired_order = DesiredLimitOrder::limit(
             "btc_jpy".to_owned(),
             OrderSide::Sell,
             Decimal::new(25, 2),
@@ -364,8 +364,8 @@ mod tests {
     }
 
     #[test]
-    fn desired_order_does_not_match_open_order_with_different_post_only() {
-        let desired_order = DesiredOrder::limit(
+    fn desired_limit_order_does_not_match_open_order_with_different_post_only() {
+        let desired_order = DesiredLimitOrder::limit(
             "btc_jpy".to_owned(),
             OrderSide::Sell,
             Decimal::new(25, 2),
