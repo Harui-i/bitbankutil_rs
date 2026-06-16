@@ -336,7 +336,9 @@ impl PaperExecutionEngine {
                     + positive_quote_fee(notional, self.config.fee_schedule.maker_fee_rate_quote);
                 decrease_locked(&mut self.balances, &self.quote_asset, locked_amount);
                 add_free(&mut self.balances, &self.base_asset, order.amount);
-                add_free(&mut self.balances, &self.quote_asset, -fee_amount_quote);
+                if fee_amount_quote < Decimal::ZERO {
+                    add_free(&mut self.balances, &self.quote_asset, -fee_amount_quote);
+                }
             }
             OrderSide::Sell => {
                 decrease_locked(&mut self.balances, &self.base_asset, order.amount);
@@ -731,6 +733,50 @@ mod tests {
             Decimal::new(500_000, 0)
         );
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn positive_maker_fee_for_buy_order_is_not_charged_twice() {
+        let mut engine = PaperExecutionEngine::new(
+            PaperExecutionConfig {
+                pair: "btc_jpy".to_owned(),
+                fee_schedule: PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO),
+                next_order_id: OrderId(1),
+            },
+            vec![
+                balance("btc", Decimal::ZERO),
+                balance("jpy", Decimal::new(1_000_000, 0)),
+            ],
+        )
+        .unwrap();
+        engine
+            .place_order(order(
+                OrderSide::Buy,
+                Decimal::new(1, 1),
+                Decimal::new(5_000_000, 0),
+            ))
+            .unwrap();
+        engine.drain_events();
+
+        let events = engine.apply_market_event(&transactions(vec![trade(
+            OrderSide::Sell,
+            Decimal::new(1, 1),
+            Decimal::new(5_000_000, 0),
+            12,
+        )]));
+
+        assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(1, 1));
+        assert_eq!(balance_of(&engine, "jpy").locked_amount, Decimal::ZERO);
+        assert_eq!(
+            balance_of(&engine, "jpy").free_amount,
+            Decimal::new(499_500, 0)
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [PaperEvent::OrderFilled {
+                fee_amount_quote, ..
+            }] if *fee_amount_quote == Decimal::new(500, 0)
+        ));
     }
 
     #[test]
