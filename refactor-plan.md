@@ -71,6 +71,13 @@ current_orders + desired_orders + balances
 - 残高が足りない注文はキャンセル後の発注対象になる。
 - pair が違う注文は対象外になる。
 
+実施済み:
+
+- `order_manager` に `OrderPlan` と純粋関数 `plan_orders` を追加。
+- bitbank レスポンスから `OpenOrder` への変換を async 実行関数の境界へ寄せた。
+- `place_wanna_orders` / `place_wanna_orders_concurrent` が注文計画を経由するように変更。
+- 既存注文一致、キャンセル、新規発注、残高による先行/後続発注、別 pair 除外のユニットテストを追加。
+
 ### 3. `refactor/order-executor-trait`
 
 注文実行を trait 経由にする。

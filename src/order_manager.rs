@@ -5,76 +5,96 @@ use crate::{
     bitbank_structs::{
         BitbankCancelOrdersResponse, BitbankCreateOrderResponse, BitbankGetOrderResponse,
     },
-    order_domain::{DesiredLimitOrder, OpenOrder, OrderSide, OrderType},
+    order_domain::{DesiredLimitOrder, OpenOrder, OrderId, OrderSide, OrderType},
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
 
 #[derive(Debug, PartialEq, Eq)]
-struct ConcurrentOrderPlan {
-    should_cancelled_orderids: Vec<u64>,
-    first_posted_orders: BTreeSet<DesiredLimitOrder>,
-    second_posted_orders: BTreeSet<DesiredLimitOrder>,
+pub struct OrderPlan {
+    pub cancels: Vec<OrderId>,
+    pub placements: Vec<DesiredLimitOrder>,
 }
 
-fn plan_concurrent_orders(
+#[derive(Debug, PartialEq, Eq)]
+struct ConcurrentOrderPlan {
+    cancels: Vec<OrderId>,
+    first_placements: BTreeSet<DesiredLimitOrder>,
+    second_placements: BTreeSet<DesiredLimitOrder>,
+}
+
+pub fn plan_orders(
     mut wanna_place_orders: Vec<DesiredLimitOrder>,
-    current_orders: Vec<BitbankGetOrderResponse>,
-    btc_free_amount: Decimal,
-    jpy_free_amount: Decimal,
+    current_orders: Vec<OpenOrder>,
     pair: &str,
-) -> ConcurrentOrderPlan {
-    let mut should_cancelled_orderids = vec![];
+) -> OrderPlan {
+    let mut cancels = vec![];
 
     for cur_order in current_orders {
-        let current_order = OpenOrder::try_from(&cur_order)
-            .expect("failed to convert bitbank order response into OpenOrder");
         let matched_wanna_order_index = wanna_place_orders
             .iter()
-            .position(|wanna_order| wanna_order.matches_open_order(&current_order));
+            .position(|wanna_order| wanna_order.matches_open_order(&cur_order));
 
         // この注文はキャンセルされるべき
-        if matched_wanna_order_index.is_none() && current_order.pair == pair {
-            log::debug!("this order will be cancelled. {:?}", current_order);
-            should_cancelled_orderids.push(current_order.order_id.0);
+        if matched_wanna_order_index.is_none() && cur_order.pair == pair {
+            log::debug!("this order will be cancelled. {:?}", cur_order);
+            cancels.push(cur_order.order_id);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
         else if let Some(matched_wanna_order_index) = matched_wanna_order_index {
             // 1つだけ削除したいので、最初に一致した希望注文を削除する。
-            log::debug!("this order already exists: {:?}", current_order);
+            log::debug!("this order already exists: {:?}", cur_order);
             wanna_place_orders.remove(matched_wanna_order_index);
         }
     }
 
+    OrderPlan {
+        cancels,
+        placements: wanna_place_orders,
+    }
+}
+
+fn plan_concurrent_orders_from_open_orders(
+    wanna_place_orders: Vec<DesiredLimitOrder>,
+    current_orders: Vec<OpenOrder>,
+    btc_free_amount: Decimal,
+    jpy_free_amount: Decimal,
+    pair: &str,
+) -> ConcurrentOrderPlan {
+    let OrderPlan {
+        cancels,
+        placements,
+    } = plan_orders(wanna_place_orders, current_orders, pair);
+
     let mut next_btc_free_amount = btc_free_amount;
     let mut next_jpy_free_amount = jpy_free_amount;
 
-    let mut first_posted_orders: BTreeSet<DesiredLimitOrder> = BTreeSet::new();
-    let mut second_posted_orders: BTreeSet<DesiredLimitOrder> = BTreeSet::new();
+    let mut first_placements: BTreeSet<DesiredLimitOrder> = BTreeSet::new();
+    let mut second_placements: BTreeSet<DesiredLimitOrder> = BTreeSet::new();
 
-    // wanna_place_ordersの順序が発注したい注文の優先順位であると仮定する。
-    for sord in wanna_place_orders {
+    // placementsの順序が発注したい注文の優先順位であると仮定する。
+    for sord in placements {
         if sord.side == OrderSide::Buy {
             let consumed_jpy = sord.amount * sord.limit_price();
 
             if next_jpy_free_amount >= consumed_jpy {
                 log::debug!("{:?} posted firstly.", sord);
-                first_posted_orders.insert(sord);
+                first_placements.insert(sord);
                 next_jpy_free_amount -= consumed_jpy;
             } else {
                 log::debug!("{:?} posted secondly.", sord);
-                second_posted_orders.insert(sord);
+                second_placements.insert(sord);
             }
         } else if sord.side == OrderSide::Sell {
             let consumed_btc = sord.amount;
 
             if next_btc_free_amount >= consumed_btc {
                 log::debug!("{:?} posted firstly.", sord);
-                first_posted_orders.insert(sord);
+                first_placements.insert(sord);
                 next_btc_free_amount -= consumed_btc;
             } else {
                 log::debug!("{:?} posted secondly.", sord);
-                second_posted_orders.insert(sord);
+                second_placements.insert(sord);
             }
         } else {
             panic!(
@@ -85,47 +105,50 @@ fn plan_concurrent_orders(
     }
 
     ConcurrentOrderPlan {
-        should_cancelled_orderids,
-        first_posted_orders,
-        second_posted_orders,
+        cancels,
+        first_placements,
+        second_placements,
     }
+}
+
+fn open_orders_from_bitbank_responses(
+    current_orders: Vec<BitbankGetOrderResponse>,
+) -> Vec<OpenOrder> {
+    current_orders
+        .iter()
+        .map(|cur_order| {
+            OpenOrder::try_from(cur_order)
+                .expect("failed to convert bitbank order response into OpenOrder")
+        })
+        .collect()
 }
 
 // 有効な注文を置き換える
 // `current_orders` : BitbankGetOrderResponseのVecで、ペア内の現在の注文を表す
 // `pair` : &str は注文を置き換えたいペアを表す
 pub async fn place_wanna_orders(
-    mut wanna_place_orders: BTreeSet<DesiredLimitOrder>,
+    wanna_place_orders: BTreeSet<DesiredLimitOrder>,
     current_orders: Vec<BitbankGetOrderResponse>,
     pair: String,
     api_client: BitbankPrivateApiClient,
 ) {
     let start = Instant::now();
-    let mut should_cancelled_orderids = vec![];
     let mut js = JoinSet::new();
+    let OrderPlan {
+        cancels,
+        placements,
+    } = plan_orders(
+        wanna_place_orders.into_iter().collect(),
+        open_orders_from_bitbank_responses(current_orders),
+        &pair,
+    );
 
-    for cur_order in current_orders {
-        let current_order = OpenOrder::try_from(&cur_order)
-            .expect("failed to convert bitbank order response into OpenOrder");
-        let matched_wanna_order = wanna_place_orders
-            .iter()
-            .find(|wanna_order| wanna_order.matches_open_order(&current_order))
-            .cloned();
-
-        // この注文はキャンセルされるべき
-        if matched_wanna_order.is_none() && current_order.pair == pair {
-            log::debug!("this order is cancelled. {:?}", current_order);
-            should_cancelled_orderids.push(current_order.order_id.0);
-        }
-        // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
-        else if let Some(matched_wanna_order) = matched_wanna_order {
-            wanna_place_orders.remove(&matched_wanna_order);
-        }
-    }
-
-    if !should_cancelled_orderids.is_empty() {
+    if !cancels.is_empty() {
         let cancel_order_response_result = api_client
-            .post_cancel_orders(&pair.clone(), should_cancelled_orderids)
+            .post_cancel_orders(
+                &pair.clone(),
+                cancels.into_iter().map(|order_id| order_id.0).collect(),
+            )
             .await;
 
         if let Err(err) = cancel_order_response_result {
@@ -145,7 +168,7 @@ pub async fn place_wanna_orders(
 
     // side、lot、price
     // 注文を発注する
-    for sord in wanna_place_orders {
+    for sord in placements {
         let bbc2 = api_client.clone();
         let pair2 = pair.clone();
         js.spawn(async move {
@@ -194,12 +217,12 @@ pub async fn place_wanna_orders_concurrent(
 ) {
     let start = Instant::now();
     let ConcurrentOrderPlan {
-        should_cancelled_orderids,
-        first_posted_orders,
-        second_posted_orders,
-    } = plan_concurrent_orders(
+        cancels,
+        first_placements,
+        second_placements,
+    } = plan_concurrent_orders_from_open_orders(
         wanna_place_orders,
-        current_orders,
+        open_orders_from_bitbank_responses(current_orders),
         btc_free_amount,
         jpy_free_amount,
         &pair,
@@ -217,23 +240,26 @@ pub async fn place_wanna_orders_concurrent(
         ),
     }
 
-    // first_posted_ordersの注文を発注し、should_cancelled_orderidsの注文をキャンセルするJoinSet
+    // first_placementsの注文を発注し、cancelsの注文をキャンセルするJoinSet
     let mut first_js = JoinSet::new();
 
     // いくつかの注文をキャンセルする必要がある
-    if !should_cancelled_orderids.is_empty() {
+    if !cancels.is_empty() {
         let bbc2 = api_client.clone();
         let pair2 = pair.clone();
 
         first_js.spawn(async move {
             FirstJoinSetResponse::CancelResponse(
-                bbc2.post_cancel_orders(&pair2.clone(), should_cancelled_orderids)
-                    .await,
+                bbc2.post_cancel_orders(
+                    &pair2.clone(),
+                    cancels.into_iter().map(|order_id| order_id.0).collect(),
+                )
+                .await,
             )
         });
     }
 
-    for sord in first_posted_orders {
+    for sord in first_placements {
         let bbc2 = api_client.clone();
         let pair2 = pair.clone();
 
@@ -272,10 +298,10 @@ pub async fn place_wanna_orders_concurrent(
         }
     }
 
-    if !second_posted_orders.is_empty() {
+    if !second_placements.is_empty() {
         let mut second_js = JoinSet::new();
 
-        for sord in second_posted_orders {
+        for sord in second_placements {
             let bbc2 = api_client.clone();
             let pair2 = pair.clone();
             second_js.spawn(async move {
@@ -307,7 +333,6 @@ pub async fn place_wanna_orders_concurrent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn desired_order(
         pair: &str,
@@ -325,30 +350,92 @@ mod tests {
         amount: Decimal,
         price: Decimal,
         post_only: Option<bool>,
-    ) -> BitbankGetOrderResponse {
-        serde_json::from_value(json!({
-            "order_id": order_id,
-            "pair": pair,
-            "side": side.as_str(),
-            "position_side": null,
-            "type": "limit",
-            "start_amount": amount.to_string(),
-            "remaining_amount": amount.to_string(),
-            "executed_amount": "0",
-            "price": price.to_string(),
-            "post_only": post_only,
-            "user_cancelable": true,
-            "average_price": "0",
-            "ordered_at": 1710000000000_u64,
-            "expire_at": null,
-            "trigger_price": null,
-            "status": "UNFILLED"
-        }))
-        .unwrap()
+    ) -> OpenOrder {
+        OpenOrder {
+            order_id: OrderId(order_id),
+            pair: pair.to_owned(),
+            side,
+            order_type: OrderType::Limit,
+            remaining_amount: amount,
+            price: Some(price),
+            post_only,
+        }
     }
 
     fn set_of(orders: Vec<DesiredLimitOrder>) -> BTreeSet<DesiredLimitOrder> {
         orders.into_iter().collect()
+    }
+
+    #[test]
+    fn plan_orders_does_nothing_when_current_orders_match_desired_orders() {
+        let desired = desired_order(
+            "btc_jpy",
+            OrderSide::Buy,
+            Decimal::new(1, 1),
+            Decimal::new(5_000_000, 0),
+        );
+        let current_orders = vec![open_order(
+            10,
+            "btc_jpy",
+            OrderSide::Buy,
+            Decimal::new(1, 1),
+            Decimal::new(5_000_000, 0),
+            Some(true),
+        )];
+
+        let plan = plan_orders(vec![desired], current_orders, "btc_jpy");
+
+        assert!(plan.cancels.is_empty());
+        assert!(plan.placements.is_empty());
+    }
+
+    #[test]
+    fn plan_orders_cancels_existing_order_missing_from_desired_orders() {
+        let current_orders = vec![open_order(
+            10,
+            "btc_jpy",
+            OrderSide::Sell,
+            Decimal::new(2, 1),
+            Decimal::new(5_100_000, 0),
+            Some(true),
+        )];
+
+        let plan = plan_orders(vec![], current_orders, "btc_jpy");
+
+        assert_eq!(plan.cancels, vec![OrderId(10)]);
+        assert!(plan.placements.is_empty());
+    }
+
+    #[test]
+    fn plan_orders_places_desired_order_missing_from_current_orders() {
+        let desired = desired_order(
+            "btc_jpy",
+            OrderSide::Buy,
+            Decimal::new(1, 1),
+            Decimal::new(5_000_000, 0),
+        );
+
+        let plan = plan_orders(vec![desired.clone()], vec![], "btc_jpy");
+
+        assert!(plan.cancels.is_empty());
+        assert_eq!(plan.placements, vec![desired]);
+    }
+
+    #[test]
+    fn plan_orders_ignores_unwanted_current_orders_for_other_pairs() {
+        let current_orders = vec![open_order(
+            12,
+            "eth_jpy",
+            OrderSide::Sell,
+            Decimal::new(1, 0),
+            Decimal::new(400_000, 0),
+            Some(true),
+        )];
+
+        let plan = plan_orders(vec![], current_orders, "btc_jpy");
+
+        assert!(plan.cancels.is_empty());
+        assert!(plan.placements.is_empty());
     }
 
     #[test]
@@ -392,7 +479,7 @@ mod tests {
             ),
         ];
 
-        let plan = plan_concurrent_orders(
+        let plan = plan_concurrent_orders_from_open_orders(
             vec![existing_wanted, new_wanted.clone()],
             current_orders,
             Decimal::new(1, 0),
@@ -400,9 +487,9 @@ mod tests {
             "btc_jpy",
         );
 
-        assert_eq!(plan.should_cancelled_orderids, vec![11]);
-        assert_eq!(plan.first_posted_orders, set_of(vec![new_wanted]));
-        assert!(plan.second_posted_orders.is_empty());
+        assert_eq!(plan.cancels, vec![OrderId(11)]);
+        assert_eq!(plan.first_placements, set_of(vec![new_wanted]));
+        assert!(plan.second_placements.is_empty());
     }
 
     #[test]
@@ -432,7 +519,7 @@ mod tests {
             Decimal::new(1_300_000, 0),
         );
 
-        let plan = plan_concurrent_orders(
+        let plan = plan_concurrent_orders_from_open_orders(
             vec![
                 first_buy.clone(),
                 second_buy.clone(),
@@ -445,13 +532,10 @@ mod tests {
             "btc_jpy",
         );
 
-        assert!(plan.should_cancelled_orderids.is_empty());
+        assert!(plan.cancels.is_empty());
+        assert_eq!(plan.first_placements, set_of(vec![first_buy, first_sell]));
         assert_eq!(
-            plan.first_posted_orders,
-            set_of(vec![first_buy, first_sell])
-        );
-        assert_eq!(
-            plan.second_posted_orders,
+            plan.second_placements,
             set_of(vec![second_buy, second_sell])
         );
     }
@@ -473,7 +557,7 @@ mod tests {
             None,
         )];
 
-        let plan = plan_concurrent_orders(
+        let plan = plan_concurrent_orders_from_open_orders(
             vec![desired],
             current_orders,
             Decimal::ZERO,
@@ -481,8 +565,8 @@ mod tests {
             "btc_jpy",
         );
 
-        assert!(plan.should_cancelled_orderids.is_empty());
-        assert!(plan.first_posted_orders.is_empty());
-        assert!(plan.second_posted_orders.is_empty());
+        assert!(plan.cancels.is_empty());
+        assert!(plan.first_placements.is_empty());
+        assert!(plan.second_placements.is_empty());
     }
 }
