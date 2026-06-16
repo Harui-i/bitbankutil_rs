@@ -100,6 +100,14 @@ trait OrderExecutor {
 - fake executor を使ったテストがある。
 - live の挙動は変わらない。
 
+実施済み:
+
+- `order_executor` に `OrderExecutor` / `PlacementRequest` / `PlacedOrder` / `OrderExecutionError` を追加。
+- live 用の `BitbankOrderExecutor` を追加し、既存の bitbank private API 呼び出しへ委譲。
+- 既存呼び出し互換のため `BitbankPrivateApiClient` 自体にも `OrderExecutor` を実装。
+- `order_manager` の発注・キャンセル実行を `OrderExecutor` 経由に変更。
+- fake executor を使い、通常実行と concurrent 実行が計画通りに呼び出されるユニットテストを追加。
+
 ### 4. `refactor/market-event-boundary`
 
 市場データも bitbank 固有型から中立イベントへ変換できる境界を作る。
