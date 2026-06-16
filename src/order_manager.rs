@@ -29,15 +29,19 @@ pub async fn place_wanna_orders(
         let current_order = OpenOrder::try_from(&cur_order)
             .expect("failed to convert bitbank order response into OpenOrder");
         let current_sord = current_order.to_desired_order();
+        let matched_wanna_order = wanna_place_orders
+            .iter()
+            .find(|wanna_order| wanna_order.matches_open_order(&current_order))
+            .cloned();
 
         // この注文はキャンセルされるべき
-        if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
+        if matched_wanna_order.is_none() && current_sord.pair == pair {
             log::debug!("this order is cancelled. {:?}", current_sord);
             should_cancelled_orderids.push(current_order.order_id.0);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
-        else {
-            wanna_place_orders.remove(&current_sord);
+        else if let Some(matched_wanna_order) = matched_wanna_order {
+            wanna_place_orders.remove(&matched_wanna_order);
         }
     }
 
@@ -120,24 +124,20 @@ pub async fn place_wanna_orders_concurrent(
         let current_order = OpenOrder::try_from(&cur_order)
             .expect("failed to convert bitbank order response into OpenOrder");
         let current_sord = current_order.to_desired_order();
+        let matched_wanna_order_index = wanna_place_orders
+            .iter()
+            .position(|wanna_order| wanna_order.matches_open_order(&current_order));
 
         // この注文はキャンセルされるべき
-        if !wanna_place_orders.contains(&current_sord) && current_sord.pair == pair {
+        if matched_wanna_order_index.is_none() && current_sord.pair == pair {
             log::debug!("this order will be cancelled. {:?}", current_sord);
             should_cancelled_orderids.push(current_order.order_id.0);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
-        // wanna_place_orders.contains(¤t_sord) || current_sord.pair != pair
-        else {
-            // wanna_place_ordersからcurrent_sordを削除し（O(wanna_place_orders.len())かかりが、wanna_place_orders.len()は十分に小さいはずなので問題ありない）
-            // 1つだけ削除したいので、素直に判断し。
+        else if let Some(matched_wanna_order_index) = matched_wanna_order_index {
+            // 1つだけ削除したいので、最初に一致した希望注文を削除する。
             log::debug!("this order already exists: {:?}", current_sord);
-            for (i, wanna_sord) in wanna_place_orders.iter().enumerate() {
-                if current_sord == *wanna_sord {
-                    wanna_place_orders.remove(i);
-                    break;
-                }
-            }
+            wanna_place_orders.remove(matched_wanna_order_index);
         }
     }
 

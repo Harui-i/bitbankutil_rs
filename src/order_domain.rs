@@ -114,6 +114,19 @@ impl DesiredOrder {
         self.price
             .expect("limit desired order must have a price in order_manager")
     }
+
+    pub fn matches_open_order(&self, open_order: &OpenOrder) -> bool {
+        self.pair == open_order.pair
+            && self.side == open_order.side
+            && self.order_type == open_order.order_type
+            && self.amount == open_order.remaining_amount
+            && self.price == open_order.price
+            && post_only_matches(self.post_only, open_order.post_only)
+    }
+}
+
+fn post_only_matches(desired: Option<bool>, existing: Option<bool>) -> bool {
+    existing.is_none() || desired == existing
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
@@ -327,5 +340,47 @@ mod tests {
                 Decimal::new(4_900_000, 0),
             )
         );
+    }
+
+    #[test]
+    fn desired_order_matches_open_order_with_missing_post_only() {
+        let desired_order = DesiredOrder::limit(
+            "btc_jpy".to_owned(),
+            OrderSide::Sell,
+            Decimal::new(25, 2),
+            Decimal::new(4_900_000, 0),
+        );
+        let open_order = OpenOrder {
+            order_id: OrderId(12345),
+            pair: "btc_jpy".to_owned(),
+            side: OrderSide::Sell,
+            order_type: OrderType::Limit,
+            remaining_amount: Decimal::new(25, 2),
+            price: Some(Decimal::new(4_900_000, 0)),
+            post_only: None,
+        };
+
+        assert!(desired_order.matches_open_order(&open_order));
+    }
+
+    #[test]
+    fn desired_order_does_not_match_open_order_with_different_post_only() {
+        let desired_order = DesiredOrder::limit(
+            "btc_jpy".to_owned(),
+            OrderSide::Sell,
+            Decimal::new(25, 2),
+            Decimal::new(4_900_000, 0),
+        );
+        let open_order = OpenOrder {
+            order_id: OrderId(12345),
+            pair: "btc_jpy".to_owned(),
+            side: OrderSide::Sell,
+            order_type: OrderType::Limit,
+            remaining_amount: Decimal::new(25, 2),
+            price: Some(Decimal::new(4_900_000, 0)),
+            post_only: Some(false),
+        };
+
+        assert!(!desired_order.matches_open_order(&open_order));
     }
 }
