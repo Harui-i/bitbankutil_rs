@@ -1,13 +1,11 @@
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy};
+use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BotContext, BotStrategy};
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::depth::Depth;
-use bitbankutil_rs::market_event::MarketDepthSnapshot;
-use bitbankutil_rs::order_domain::{
-    BalanceSnapshot, DesiredLimitOrder, OpenOrder, OrderSide, OrderType,
-};
+use bitbankutil_rs::market_event::{MarketDepthSnapshot, MarketEvent};
+use bitbankutil_rs::order_domain::{BalanceSnapshot, DesiredLimitOrder, OpenOrder, OrderSide, OrderType};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
@@ -259,14 +257,14 @@ impl MyBot {
 }
 
 impl BotStrategy for MyBot {
-    type Event = BitbankEvent;
+    type Event = MarketEvent;
     async fn handle_event(&mut self, event: Self::Event, _ctx: &BotContext<Self::Event>) {
         match event {
-            BitbankEvent::Transactions { transactions, .. } => {
+            MarketEvent::Transactions { transactions, .. } => {
                 log::debug!("transaction updated: {:?}", transactions);
                 self.update_orders().await;
             }
-            BitbankEvent::DepthUpdated { depth, .. } => {
+            MarketEvent::DepthUpdated { depth, .. } => {
                 log::debug!("depth updated");
 
                 if depth.is_complete() {
@@ -289,11 +287,11 @@ impl BotStrategy for MyBot {
                     self.update_orders().await;
                 }
             }
-            BitbankEvent::CircuitBreakInfo { info, .. } => {
+            MarketEvent::CircuitBreakInfo { info, .. } => {
                 log::debug!("circuit break info updated: {:?}", info);
             }
             // Tickerイベントはこの戦略では意図的に無視される。
-            BitbankEvent::Ticker { .. } => {}
+            MarketEvent::Ticker { .. } => {}
         }
     }
 }
