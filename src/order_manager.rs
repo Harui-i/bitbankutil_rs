@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    bitbank_structs::BitbankGetOrderResponse,
     order_domain::{DesiredLimitOrder, OpenOrder, OrderId, OrderSide},
-    order_executor::{OrderExecutor, PlacementRequest},
+    trading_venue::{PlacedOrder, PlacementRequest, TradingVenue, TradingVenueError},
 };
 use rust_decimal::Decimal;
 use tokio::{task::JoinSet, time::Instant};
@@ -109,26 +108,11 @@ fn plan_concurrent_orders_from_open_orders(
     }
 }
 
-fn open_orders_from_bitbank_responses(
-    current_orders: Vec<BitbankGetOrderResponse>,
-) -> Vec<OpenOrder> {
-    current_orders
-        .iter()
-        .map(|cur_order| {
-            OpenOrder::try_from(cur_order)
-                .expect("failed to convert bitbank order response into OpenOrder")
-        })
-        .collect()
-}
-
-// 有効な注文を置き換える
-// `current_orders` : BitbankGetOrderResponseのVecで、ペア内の現在の注文を表す
-// `pair` : &str は注文を置き換えたいペアを表す
 pub async fn place_wanna_orders(
     wanna_place_orders: BTreeSet<DesiredLimitOrder>,
-    current_orders: Vec<BitbankGetOrderResponse>,
+    current_orders: Vec<OpenOrder>,
     pair: String,
-    executor: impl OrderExecutor,
+    venue: impl TradingVenue,
 ) {
     let start = Instant::now();
     let mut js = JoinSet::new();
@@ -137,12 +121,12 @@ pub async fn place_wanna_orders(
         placements,
     } = plan_orders(
         wanna_place_orders.into_iter().collect(),
-        open_orders_from_bitbank_responses(current_orders),
+        current_orders,
         &pair,
     );
 
     if !cancels.is_empty() {
-        let cancel_order_response_result = executor.cancel_orders(&pair, cancels).await;
+        let cancel_order_response_result = venue.cancel_orders(&pair, cancels).await;
 
         if let Err(err) = cancel_order_response_result {
             log::error!(
@@ -158,8 +142,8 @@ pub async fn place_wanna_orders(
     // side、lot、price
     // 注文を発注する
     for sord in placements {
-        let executor2 = executor.clone();
-        js.spawn(async move { executor2.place_order(PlacementRequest::from(sord)).await });
+        let venue2 = venue.clone();
+        js.spawn(async move { venue2.place_order(PlacementRequest::from(sord)).await });
     }
 
     while let Some(js_res) = js.join_next().await {
@@ -182,11 +166,11 @@ wanna_place_orders
 */
 pub async fn place_wanna_orders_concurrent(
     wanna_place_orders: Vec<DesiredLimitOrder>,
-    current_orders: Vec<BitbankGetOrderResponse>,
+    current_orders: Vec<OpenOrder>,
     btc_free_amount: Decimal,
     jpy_free_amount: Decimal,
     pair: String,
-    executor: impl OrderExecutor,
+    venue: impl TradingVenue,
 ) {
     let start = Instant::now();
     let ConcurrentOrderPlan {
@@ -195,17 +179,15 @@ pub async fn place_wanna_orders_concurrent(
         second_placements,
     } = plan_concurrent_orders_from_open_orders(
         wanna_place_orders,
-        open_orders_from_bitbank_responses(current_orders),
+        current_orders,
         btc_free_amount,
         jpy_free_amount,
         &pair,
     );
 
     enum FirstJoinSetResponse {
-        CancelResponse(Result<(), crate::order_executor::OrderExecutionError>),
-        PostResponse(
-            Result<crate::order_executor::PlacedOrder, crate::order_executor::OrderExecutionError>,
-        ),
+        CancelResponse(Result<(), TradingVenueError>),
+        PostResponse(Result<PlacedOrder, TradingVenueError>),
     }
 
     // first_placementsの注文を発注し、cancelsの注文をキャンセルするJoinSet
@@ -213,20 +195,20 @@ pub async fn place_wanna_orders_concurrent(
 
     // いくつかの注文をキャンセルする必要がある
     if !cancels.is_empty() {
-        let executor2 = executor.clone();
+        let venue2 = venue.clone();
         let pair2 = pair.clone();
 
         first_js.spawn(async move {
-            FirstJoinSetResponse::CancelResponse(executor2.cancel_orders(&pair2, cancels).await)
+            FirstJoinSetResponse::CancelResponse(venue2.cancel_orders(&pair2, cancels).await)
         });
     }
 
     for sord in first_placements {
-        let executor2 = executor.clone();
+        let venue2 = venue.clone();
 
         first_js.spawn(async move {
             FirstJoinSetResponse::PostResponse(
-                executor2.place_order(PlacementRequest::from(sord)).await,
+                venue2.place_order(PlacementRequest::from(sord)).await,
             )
         });
     }
@@ -235,16 +217,16 @@ pub async fn place_wanna_orders_concurrent(
         let fjsr = first_js_res.unwrap();
 
         match fjsr {
-            FirstJoinSetResponse::CancelResponse(bitbank_cancel_orders_response) => {
+            FirstJoinSetResponse::CancelResponse(cancel_response) => {
                 log::debug!(
                     "cancel order response in first_joinset: {:?}",
-                    bitbank_cancel_orders_response
+                    cancel_response
                 );
             }
-            FirstJoinSetResponse::PostResponse(bitbank_create_order_response) => {
+            FirstJoinSetResponse::PostResponse(create_order_response) => {
                 log::debug!(
                     "create order response in first_joinset: {:?}",
-                    bitbank_create_order_response
+                    create_order_response
                 );
             }
         }
@@ -254,9 +236,8 @@ pub async fn place_wanna_orders_concurrent(
         let mut second_js = JoinSet::new();
 
         for sord in second_placements {
-            let executor2 = executor.clone();
-            second_js
-                .spawn(async move { executor2.place_order(PlacementRequest::from(sord)).await });
+            let venue2 = venue.clone();
+            second_js.spawn(async move { venue2.place_order(PlacementRequest::from(sord)).await });
         }
 
         while let Some(second_js_res) = second_js.join_next().await {
@@ -275,12 +256,11 @@ pub async fn place_wanna_orders_concurrent(
 mod tests {
     use super::*;
     use crate::order_domain::OrderType;
-    use crate::order_executor::{OrderExecutorFuture, PlacedOrder, PlacementRequest};
-    use serde_json::json;
+    use crate::trading_venue::{AccountSnapshot, TradingVenueFuture};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
-    enum ExecutorCall {
+    enum VenueCall {
         Place(DesiredLimitOrder),
         Cancel {
             pair: String,
@@ -289,23 +269,42 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct FakeOrderExecutor {
-        calls: Arc<Mutex<Vec<ExecutorCall>>>,
+    struct FakeTradingVenue {
+        calls: Arc<Mutex<Vec<VenueCall>>>,
     }
 
-    impl FakeOrderExecutor {
-        fn calls(&self) -> Vec<ExecutorCall> {
+    impl FakeTradingVenue {
+        fn calls(&self) -> Vec<VenueCall> {
             self.calls.lock().unwrap().clone()
         }
     }
 
-    impl OrderExecutor for FakeOrderExecutor {
-        fn place_order(&self, request: PlacementRequest) -> OrderExecutorFuture<'_, PlacedOrder> {
+    impl TradingVenue for FakeTradingVenue {
+        fn account_snapshot<'a>(
+            &'a self,
+            _pair: &'a str,
+        ) -> TradingVenueFuture<'a, AccountSnapshot> {
+            Box::pin(async {
+                Ok(AccountSnapshot {
+                    open_orders: vec![],
+                    balances: vec![],
+                })
+            })
+        }
+
+        fn observe_market_event(
+            &self,
+            _event: &crate::market_event::MarketEvent,
+        ) -> Result<(), TradingVenueError> {
+            Ok(())
+        }
+
+        fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
             Box::pin(async move {
                 self.calls
                     .lock()
                     .unwrap()
-                    .push(ExecutorCall::Place(request.order));
+                    .push(VenueCall::Place(request.order));
 
                 Ok(PlacedOrder { order_id: None })
             })
@@ -315,9 +314,9 @@ mod tests {
             &'a self,
             pair: &'a str,
             order_ids: Vec<OrderId>,
-        ) -> OrderExecutorFuture<'a, ()> {
+        ) -> TradingVenueFuture<'a, ()> {
             Box::pin(async move {
-                self.calls.lock().unwrap().push(ExecutorCall::Cancel {
+                self.calls.lock().unwrap().push(VenueCall::Cancel {
                     pair: pair.to_owned(),
                     order_ids,
                 });
@@ -353,35 +352,6 @@ mod tests {
             price: Some(price),
             post_only,
         }
-    }
-
-    fn bitbank_open_order_response(
-        order_id: u64,
-        pair: &str,
-        side: OrderSide,
-        amount: Decimal,
-        price: Decimal,
-        post_only: Option<bool>,
-    ) -> BitbankGetOrderResponse {
-        serde_json::from_value(json!({
-            "order_id": order_id,
-            "pair": pair,
-            "side": side.as_str(),
-            "position_side": null,
-            "type": "limit",
-            "start_amount": amount.to_string(),
-            "remaining_amount": amount.to_string(),
-            "executed_amount": "0",
-            "price": price.to_string(),
-            "post_only": post_only,
-            "user_cancelable": true,
-            "average_price": "0",
-            "ordered_at": 1710000000000_u64,
-            "expire_at": null,
-            "trigger_price": null,
-            "status": "UNFILLED"
-        }))
-        .unwrap()
     }
 
     fn set_of(orders: Vec<DesiredLimitOrder>) -> BTreeSet<DesiredLimitOrder> {
@@ -593,14 +563,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn place_wanna_orders_executes_order_plan_through_executor() {
+    async fn place_wanna_orders_executes_order_plan_through_venue() {
         let desired = desired_order(
             "btc_jpy",
             OrderSide::Buy,
             Decimal::new(1, 1),
             Decimal::new(5_000_000, 0),
         );
-        let current_order = bitbank_open_order_response(
+        let current_order = open_order(
             10,
             "btc_jpy",
             OrderSide::Sell,
@@ -608,30 +578,30 @@ mod tests {
             Decimal::new(5_100_000, 0),
             Some(true),
         );
-        let executor = FakeOrderExecutor::default();
+        let venue = FakeTradingVenue::default();
 
         place_wanna_orders(
             set_of(vec![desired.clone()]),
             vec![current_order],
             "btc_jpy".to_owned(),
-            executor.clone(),
+            venue.clone(),
         )
         .await;
 
         assert_eq!(
-            executor.calls(),
+            venue.calls(),
             vec![
-                ExecutorCall::Cancel {
+                VenueCall::Cancel {
                     pair: "btc_jpy".to_owned(),
                     order_ids: vec![OrderId(10)],
                 },
-                ExecutorCall::Place(desired),
+                VenueCall::Place(desired),
             ]
         );
     }
 
     #[tokio::test]
-    async fn place_wanna_orders_concurrent_executes_split_plan_through_executor() {
+    async fn place_wanna_orders_concurrent_executes_split_plan_through_venue() {
         let first_buy = desired_order(
             "btc_jpy",
             OrderSide::Buy,
@@ -644,7 +614,7 @@ mod tests {
             Decimal::new(2, 1),
             Decimal::new(1_000_000, 0),
         );
-        let current_order = bitbank_open_order_response(
+        let current_order = open_order(
             20,
             "btc_jpy",
             OrderSide::Sell,
@@ -652,7 +622,7 @@ mod tests {
             Decimal::new(1_200_000, 0),
             Some(true),
         );
-        let executor = FakeOrderExecutor::default();
+        let venue = FakeTradingVenue::default();
 
         place_wanna_orders_concurrent(
             vec![first_buy.clone(), second_buy.clone()],
@@ -660,17 +630,17 @@ mod tests {
             Decimal::ZERO,
             Decimal::new(100_000, 0),
             "btc_jpy".to_owned(),
-            executor.clone(),
+            venue.clone(),
         )
         .await;
 
-        let calls = executor.calls();
-        assert!(calls.contains(&ExecutorCall::Cancel {
+        let calls = venue.calls();
+        assert!(calls.contains(&VenueCall::Cancel {
             pair: "btc_jpy".to_owned(),
             order_ids: vec![OrderId(20)],
         }));
-        assert!(calls.contains(&ExecutorCall::Place(first_buy)));
-        assert!(calls.contains(&ExecutorCall::Place(second_buy)));
+        assert!(calls.contains(&VenueCall::Place(first_buy)));
+        assert!(calls.contains(&VenueCall::Place(second_buy)));
         assert_eq!(calls.len(), 3);
     }
 }

@@ -1,42 +1,45 @@
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BotContext, BotStrategy};
+use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankBotRuntime, BotContext, BotStrategy};
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::depth::Depth;
 use bitbankutil_rs::market_event::{MarketDepthSnapshot, MarketEvent};
-use bitbankutil_rs::order_domain::{BalanceSnapshot, DesiredLimitOrder, OpenOrder, OrderSide, OrderType};
+use bitbankutil_rs::order_domain::{BalanceSnapshot, DesiredLimitOrder, OrderSide, OrderType};
+use bitbankutil_rs::paper_execution::{
+    PaperExecutionConfig, PaperExecutionEngine, PaperTradingVenue,
+};
+use bitbankutil_rs::trading_venue::{BitbankTradingVenue, TradingVenue};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
 
-struct MyBot {
-    bot_config: MyBotConfig,
+struct MyBot<V: TradingVenue> {
+    bot_config: MyBotConfig<V>,
     depth: MarketDepthSnapshot,
     last_updated: u128,
     last_bestbid: Decimal,
     last_bestask: Decimal,
 }
 
-struct MyBotConfig {
+struct MyBotConfig<V: TradingVenue> {
     pair: String,
     tick_size: Decimal,
     refresh_cycle: u128,
     lot: Decimal,
     max_lot: Decimal,
-    bb_api_client: BitbankPrivateApiClient,
+    venue: V,
 }
 
-impl MyBot {
+impl<V: TradingVenue> MyBot<V> {
     fn new(
-        bitbank_key: String,
-        bitbank_secret: String,
+        venue: V,
         pair: String,
         tick_size: Decimal,
         refresh_cycle: u128,
         lot: Decimal,
         max_lot: Decimal,
-    ) -> MyBot {
+    ) -> MyBot<V> {
         MyBot {
             bot_config: MyBotConfig {
                 pair,
@@ -44,7 +47,7 @@ impl MyBot {
                 refresh_cycle,
                 lot,
                 max_lot,
-                bb_api_client: BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None),
+                venue,
             },
             depth: MarketDepthSnapshot::empty(),
             last_updated: 0,
@@ -63,7 +66,7 @@ impl MyBot {
         assert!(self.last_updated <= now);
 
         if now - self.last_updated >= self.bot_config.refresh_cycle {
-            log::info!(
+            log::debug!(
                 "{} milliseconds have passed since the last order update",
                 now - self.last_updated
             );
@@ -80,70 +83,39 @@ impl MyBot {
                 .unwrap()
                 .as_millis();
 
-            let bb_client2 = self.bot_config.bb_api_client.clone();
-            let pair2 = self.bot_config.pair.clone();
-
-
-            // get_active_ordersをここで呼んで判定のたびにOpenOrderに置換してる……らしいが、ほんとか？
-            // →  OpenOrder::try_from(&hoge)がいっぱい
-            // これ結局bb_clientがBitbankPrivateApiClientだから、get_active_ordersとかしたやつの抽象化ができてないのが原因な気がする。
-            // TODO: Private GET APIの抽象化や隠蔽ができたら治す。
-
-            let order_info_task = tokio::spawn(async move {
-                bb_client2
-                    .get_active_orders(Some(&pair2), None, None, None, None, None)
-                    .await
-            });
-
-            let bb_client3 = self.bot_config.bb_api_client.clone();
-            let current_asset_task = tokio::spawn(async move { bb_client3.get_assets().await });
-
-            // 2つのタスクが終了するまで待つ
-            let (order_info, current_asset) = tokio::join!(order_info_task, current_asset_task);
-
-            let active_orders_info_res = order_info.unwrap();
-            let current_asset_res = current_asset.unwrap();
-
-            if let Err(err) = active_orders_info_res {
-                log::error!("order info cannot get properly due to an error : {:?}", err);
-                return;
-            }
-            let active_orders_info = active_orders_info_res.unwrap();
-
-            if let Err(err) = current_asset_res {
-                log::error!(
-                    "current asset cannot get properly due to an error: {:?}",
-                    err
-                );
-                return;
-            }
-            let current_asset = current_asset_res.unwrap();
-
-            log::debug!("active orders: {:?}", active_orders_info);
-
-            let asset_name = self.bot_config.pair.split("_").next().unwrap();
-
-            let btc_asset = current_asset
-                .assets
-                .iter()
-                .find(|asset| asset.asset == asset_name)
-                .unwrap();
-            let jpy_asset = current_asset
-                .assets
-                .iter()
-                .find(|asset| asset.asset == "jpy".to_owned())
-                .unwrap();
-            let btc_balance = BalanceSnapshot::try_from(btc_asset)
-                .expect("failed to convert bitbank base asset into BalanceSnapshot");
-            let jpy_balance = BalanceSnapshot::try_from(jpy_asset)
-                .expect("failed to convert bitbank jpy asset into BalanceSnapshot");
+            let account = match self
+                .bot_config
+                .venue
+                .account_snapshot(&self.bot_config.pair)
+                .await
+            {
+                Ok(account) => account,
+                Err(err) => {
+                    log::error!("account snapshot failed: {:?}", err);
+                    return;
+                }
+            };
+            let current_orders = account.open_orders;
+            let asset_name = self.bot_config.pair.split('_').next().unwrap();
+             let Some(btc_balance_snapshot) = account
+                 .balances
+                 .iter()
+                 .find(|asset| asset.asset == asset_name)
+             else {
+                 log::error!("account snapshot is missing {}", asset_name);
+                 return;
+            };
+            let Some(jpy_balance_snapshot) =
+                account.balances.iter().find(|asset| asset.asset == "jpy")
+            else {
+                 log::error!("account snapshot is missing jpy");
+                 return;
+             };
+             log::debug!("active orders: {:?}", current_orders);
 
             let mut btc_locked_jpy_amount: Decimal = Decimal::zero();
             // このペアのロックされたjpyを計算する
-            for current_order in active_orders_info.clone().orders {
-                let current_order = OpenOrder::try_from(&current_order)
-                    .expect("failed to convert bitbank order response into OpenOrder");
-
+            for current_order in &current_orders {
                 if current_order.order_type == OrderType::Limit
                     && current_order.side == OrderSide::Buy
                 {
@@ -153,12 +125,12 @@ impl MyBot {
                 }
             }
 
-            let btc_free_amount = btc_balance.free_amount;
-            let btc_locked_amount = btc_balance.locked_amount;
+            let btc_free_amount = btc_balance_snapshot.free_amount;
+            let btc_locked_amount = btc_balance_snapshot.locked_amount;
             let btc_amount = btc_free_amount + btc_locked_amount;
             let btc_amount_remainder =
                 btc_amount - (btc_amount / self.bot_config.lot).floor() * self.bot_config.lot;
-            let jpy_free_amount = jpy_balance.free_amount;
+            let jpy_free_amount = jpy_balance_snapshot.free_amount;
             let jpy_amount = jpy_free_amount + btc_locked_jpy_amount;
 
             log::debug!("btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}", btc_free_amount, btc_locked_amount, jpy_free_amount, btc_locked_jpy_amount);
@@ -172,19 +144,13 @@ impl MyBot {
             let best_ask_price = self.depth.best_ask().unwrap().0.clone();
             let best_bid_price = self.depth.best_bid().unwrap().0.clone();
 
-            let has_bestask_order = active_orders_info.clone().orders.iter().any(|ord| {
-                let ord = OpenOrder::try_from(ord)
-                    .expect("failed to convert bitbank order response into OpenOrder");
-
+            let has_bestask_order = current_orders.iter().any(|ord| {
                 ord.side == OrderSide::Sell
                     && ord.order_type == OrderType::Limit
                     && ord.price == Some(best_ask_price)
             });
 
-            let has_bestbid_order = active_orders_info.clone().orders.iter().any(|ord| {
-                let ord = OpenOrder::try_from(ord)
-                    .expect("failed to convert bitbank order response into OpenOrder");
-
+            let has_bestbid_order = current_orders.iter().any(|ord| {
                 ord.side == OrderSide::Buy
                     && ord.order_type == OrderType::Limit
                     && ord.price == Some(best_bid_price)
@@ -208,7 +174,7 @@ impl MyBot {
                 }
             };
 
-            log::info!("target spread: {}", sell_price - buy_price);
+            log::debug!("target spread: {}", sell_price - buy_price);
 
             let can_buy = jpy_amount >= buy_price * self.bot_config.lot
                 && btc_amount + self.bot_config.lot <= self.bot_config.max_lot;
@@ -236,29 +202,30 @@ impl MyBot {
 
             log::debug!("wanna_place_orders: {:?}", wanna_place_orders);
             log::info!("evaluated asset: {}", btc_amount * sell_price + jpy_amount);
-            {
-                let bb_client = self.bot_config.bb_api_client.clone();
-                bitbankutil_rs::order_manager::place_wanna_orders_concurrent(
-                    wanna_place_orders,
-                    active_orders_info.orders,
-                    btc_free_amount,
-                    jpy_free_amount,
-                    self.bot_config.pair.clone(),
-                    bb_client,
-                )
-                .await;
-            }
+            bitbankutil_rs::order_manager::place_wanna_orders_concurrent(
+                wanna_place_orders,
+                current_orders,
+                btc_free_amount,
+                jpy_free_amount,
+                self.bot_config.pair.clone(),
+                self.bot_config.venue.clone(),
+            )
+            .await;
         }
-        log::info!(
+        log::debug!(
             "update_orders has finished within {} ms",
             now_inst.elapsed().as_millis()
         );
     }
 }
 
-impl BotStrategy for MyBot {
+impl<V: TradingVenue> BotStrategy for MyBot<V> {
     type Event = MarketEvent;
     async fn handle_event(&mut self, event: Self::Event, _ctx: &BotContext<Self::Event>) {
+        if let Err(err) = self.bot_config.venue.observe_market_event(&event) {
+            log::error!("market event processing failed: {:?}", err);
+            return;
+        }
         match event {
             MarketEvent::Transactions { transactions, .. } => {
                 log::debug!("transaction updated: {:?}", transactions);
@@ -296,56 +263,286 @@ impl BotStrategy for MyBot {
     }
 }
 
+fn spawn_bot<V: TradingVenue>(
+    venue: V,
+    pair: String,
+    tick_size: Decimal,
+    refresh_cycle: u128,
+    lot: Decimal,
+    max_lot: Decimal,
+    websocket_config: WebSocketConfig,
+) -> BitbankBotRuntime<MarketEvent> {
+    let bot = MyBot::new(venue, pair.clone(), tick_size, refresh_cycle, lot, max_lot);
+    BitbankBotBuilder::new(bot)
+        .add_pair(pair)
+        .websocket_config(websocket_config)
+        .spawn()
+}
+
+fn paper_venue(
+    pair: &str,
+    base_initial: Decimal,
+    jpy_initial: Decimal,
+) -> Result<PaperTradingVenue, String> {
+    if base_initial < Decimal::ZERO || jpy_initial < Decimal::ZERO {
+        return Err("paper initial balances must be non-negative".to_owned());
+    }
+    let config =
+        PaperExecutionConfig::bitbank_spot_default(pair).map_err(|err| format!("{err:?}"))?;
+    let base_asset = pair
+        .strip_suffix("_jpy")
+        .ok_or("paper requires a JPY pair")?;
+    let balances = vec![
+        BalanceSnapshot {
+            asset: base_asset.to_owned(),
+            free_amount: base_initial,
+            locked_amount: Decimal::ZERO,
+            onhand_amount: base_initial,
+        },
+        BalanceSnapshot {
+            asset: "jpy".to_owned(),
+            free_amount: jpy_initial,
+            locked_amount: Decimal::ZERO,
+            onhand_amount: jpy_initial,
+        },
+    ];
+    let engine = PaperExecutionEngine::new(config, balances).map_err(|err| format!("{err:?}"))?;
+    Ok(PaperTradingVenue::new(engine))
+}
+
 #[tokio::main]
 async fn main() {
-    //     Pipe(Box<dyn io::Write + Send + 'static>),
     env_logger::builder()
-        .filter_level(LevelFilter::Debug)
+        .filter_level(LevelFilter::Info)
         .format_timestamp_millis()
         .init();
 
     let args: Vec<String> = env::args().collect();
-
-    if args.len() != 6_usize {
-        log::error!("there should be five arguments: pair(like `btc_jpy`), tick size(like: `1`), refresh_cycle(ms)(like `5000`), lot(like `0.0001`), max_lot(like `0.0005`).");
-        log::error!("example: cargo run --example best_mm xrp_jpy 0.001 300 1 5");
-        std::process::exit(-1);
+    let mode = args.get(1).map(String::as_str);
+    let expected_len = match mode {
+        Some("--live") => 7,
+        Some("--paper") => 9,
+        _ => 0,
+    };
+    if args.len() != expected_len {
+        log::error!(
+            "usage: cargo run --example best_mm -- --live PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT"
+        );
+        log::error!("   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL");
+        std::process::exit(2);
     }
 
-    let bitbank_key: String = env::var("BITBANK_API_KEY")
-        .expect("there should be BITBANK_API_KEY in enviroment variables");
-    let bitbank_secret: String = env::var("BITBANK_API_SECRET")
-        .expect("there should be BITBANK_API_SECRET in environment variables");
+    let pair = args[2].clone();
+    let tick_size: Decimal = args[3].parse().expect("invalid tick size");
+    let refresh_cycle: u128 = args[4].parse().expect("invalid refresh cycle");
+    let lot: Decimal = args[5].parse().expect("invalid lot");
+    let max_lot: Decimal = args[6].parse().expect("invalid max lot");
+    assert!(tick_size > Decimal::ZERO && lot > Decimal::ZERO && lot <= max_lot);
 
-    let mut wsc = WebSocketConfig::default();
-    wsc.refresh_after = Duration::from_secs(3600);
-    wsc.ignore_duplicate_during_reconnection = true;
-    let wsc = wsc; // 不変にする
+    let mut websocket_config = WebSocketConfig::default();
+    websocket_config.refresh_after = Duration::from_secs(3600);
+    websocket_config.ignore_duplicate_during_reconnection = true;
 
-    let pair = args[1].clone();
-    let tick_size: Decimal = args[2].parse().unwrap();
-    let refresh_cycle: u128 = args[3].parse().unwrap();
-    let lot: Decimal = args[4].parse().unwrap();
-    let max_lot: Decimal = args[5].parse().unwrap();
-
-    assert!(lot <= max_lot);
-
-    let bot = MyBot::new(
-        bitbank_key,
-        bitbank_secret,
-        pair.clone(),
-        tick_size,
-        refresh_cycle,
-        lot,
-        max_lot,
-    );
-
-    let _runtime = BitbankBotBuilder::new(bot)
-        .add_pair(pair)
-        .websocket_config(wsc)
-        .spawn();
+    let _runtime = match mode {
+        Some("--live") => {
+            let key =
+                env::var("BITBANK_API_KEY").expect("BITBANK_API_KEY is required for live mode");
+            let secret = env::var("BITBANK_API_SECRET")
+                .expect("BITBANK_API_SECRET is required for live mode");
+            let venue = BitbankTradingVenue::new(BitbankPrivateApiClient::new(key, secret, None));
+            spawn_bot(
+                venue,
+                pair,
+                tick_size,
+                refresh_cycle,
+                lot,
+                max_lot,
+                websocket_config,
+            )
+        }
+        Some("--paper") => {
+            let base_initial: Decimal = args[7].parse().expect("invalid base initial balance");
+            let jpy_initial: Decimal = args[8].parse().expect("invalid JPY initial balance");
+            let venue = paper_venue(&pair, base_initial, jpy_initial).expect("invalid paper setup");
+            spawn_bot(
+                venue,
+                pair,
+                tick_size,
+                refresh_cycle,
+                lot,
+                max_lot,
+                websocket_config,
+            )
+        }
+        _ => unreachable!(),
+    };
 
     loop {
         tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitbankutil_rs::market_event::MarketTrade;
+    use bitbankutil_rs::trading_venue::{PlacementRequest, TradingVenue};
+
+    #[derive(Clone, Default)]
+    struct ProbeVenue {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl TradingVenue for ProbeVenue {
+        fn account_snapshot<'a>(
+            &'a self,
+            _pair: &'a str,
+        ) -> bitbankutil_rs::trading_venue::TradingVenueFuture<
+            'a,
+            bitbankutil_rs::trading_venue::AccountSnapshot,
+        > {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("snapshot");
+                Ok(bitbankutil_rs::trading_venue::AccountSnapshot {
+                    open_orders: vec![],
+                    balances: vec![
+                        BalanceSnapshot {
+                            asset: "btc".to_owned(),
+                            free_amount: Decimal::ZERO,
+                            locked_amount: Decimal::ZERO,
+                            onhand_amount: Decimal::ZERO,
+                        },
+                        BalanceSnapshot {
+                            asset: "jpy".to_owned(),
+                            free_amount: Decimal::ZERO,
+                            locked_amount: Decimal::ZERO,
+                            onhand_amount: Decimal::ZERO,
+                        },
+                    ],
+                })
+            })
+        }
+
+        fn place_order(
+            &self,
+            _request: PlacementRequest,
+        ) -> bitbankutil_rs::trading_venue::TradingVenueFuture<
+            '_,
+            bitbankutil_rs::trading_venue::PlacedOrder,
+        > {
+            Box::pin(async { panic!("unexpected order") })
+        }
+
+        fn cancel_orders<'a>(
+            &'a self,
+            _pair: &'a str,
+            _order_ids: Vec<bitbankutil_rs::order_domain::OrderId>,
+        ) -> bitbankutil_rs::trading_venue::TradingVenueFuture<'a, ()> {
+            Box::pin(async { panic!("unexpected cancellation") })
+        }
+
+        fn observe_market_event(
+            &self,
+            _event: &MarketEvent,
+        ) -> Result<(), bitbankutil_rs::trading_venue::TradingVenueError> {
+            self.calls.lock().unwrap().push("observe");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_observes_trade_before_reading_account() {
+        let venue = ProbeVenue::default();
+        let mut bot = MyBot::new(
+            venue.clone(),
+            "btc_jpy".to_owned(),
+            Decimal::ONE,
+            0,
+            Decimal::new(1, 1),
+            Decimal::ONE,
+        );
+        let asks = [(Decimal::new(6_000_000, 0), 1.0)].into();
+        let bids = [(Decimal::new(5_000_000, 0), 1.0)].into();
+        bot.depth = MarketDepthSnapshot::new(asks, bids, 0);
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let context = BotContext::new(sender);
+        bot.handle_event(
+            MarketEvent::Transactions {
+                pair: "btc_jpy".to_owned(),
+                transactions: vec![],
+            },
+            &context,
+        )
+        .await;
+        assert_eq!(*venue.calls.lock().unwrap(), vec!["observe", "snapshot"]);
+    }
+
+    #[tokio::test]
+    async fn paper_mode_needs_no_credentials_and_exposes_initial_balances() {
+        let venue = paper_venue("btc_jpy", Decimal::ZERO, Decimal::new(1_000_000, 0)).unwrap();
+        let snapshot = venue.account_snapshot("btc_jpy").await.unwrap();
+        assert!(snapshot.open_orders.is_empty());
+        assert_eq!(
+            snapshot
+                .balances
+                .iter()
+                .find(|b| b.asset == "jpy")
+                .unwrap()
+                .free_amount,
+            Decimal::new(1_000_000, 0)
+        );
+    }
+
+    #[test]
+    fn paper_setup_rejects_negative_balance_and_unsupported_pair() {
+        assert!(paper_venue("btc_jpy", Decimal::new(-1, 0), Decimal::ZERO).is_err());
+        assert!(paper_venue("btc_usdt", Decimal::ZERO, Decimal::ZERO).is_err());
+    }
+
+    #[tokio::test]
+    async fn paper_trade_is_applied_before_next_account_read() {
+        let venue = paper_venue("btc_jpy", Decimal::ZERO, Decimal::new(1_000_000, 0)).unwrap();
+        let order = DesiredLimitOrder::limit(
+            "btc_jpy".to_owned(),
+            OrderSide::Buy,
+            Decimal::new(1, 1),
+            Decimal::new(5_000_000, 0),
+        );
+        venue
+            .place_order(PlacementRequest::from(order))
+            .await
+            .unwrap();
+        venue
+            .observe_market_event(&MarketEvent::Transactions {
+                pair: "btc_jpy".to_owned(),
+                transactions: vec![MarketTrade {
+                    amount: Decimal::new(5, 2),
+                    executed_at: 1,
+                    price: Decimal::new(5_000_000, 0),
+                    side: OrderSide::Sell,
+                    transaction_id: 1,
+                }],
+            })
+            .unwrap();
+        let snapshot = venue.account_snapshot("btc_jpy").await.unwrap();
+        assert_eq!(snapshot.open_orders[0].remaining_amount, Decimal::new(5, 2));
+        assert_eq!(
+            snapshot
+                .balances
+                .iter()
+                .find(|b| b.asset == "btc")
+                .unwrap()
+                .free_amount,
+            Decimal::new(5, 2)
+        );
+        assert_eq!(
+            snapshot
+                .balances
+                .iter()
+                .find(|b| b.asset == "jpy")
+                .unwrap()
+                .locked_amount,
+            Decimal::new(250_000, 0)
+        );
     }
 }
