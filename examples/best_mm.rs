@@ -5,7 +5,9 @@ use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, B
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::depth::Depth;
 use bitbankutil_rs::market_event::MarketDepthSnapshot;
-use bitbankutil_rs::order_domain::{DesiredLimitOrder, OpenOrder, OrderSide, OrderType};
+use bitbankutil_rs::order_domain::{
+    BalanceSnapshot, DesiredLimitOrder, OpenOrder, OrderSide, OrderType,
+};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
@@ -126,6 +128,10 @@ impl MyBot {
                 .iter()
                 .find(|asset| asset.asset == "jpy".to_owned())
                 .unwrap();
+            let btc_balance = BalanceSnapshot::try_from(btc_asset)
+                .expect("failed to convert bitbank base asset into BalanceSnapshot");
+            let jpy_balance = BalanceSnapshot::try_from(jpy_asset)
+                .expect("failed to convert bitbank jpy asset into BalanceSnapshot");
 
             let mut btc_locked_jpy_amount: Decimal = Decimal::zero();
             // このペアのロックされたjpyを計算する
@@ -142,12 +148,12 @@ impl MyBot {
                 }
             }
 
-            let btc_free_amount = btc_asset.free_amount.clone().parse::<Decimal>().unwrap();
-            let btc_locked_amount = btc_asset.locked_amount.clone().parse::<Decimal>().unwrap();
+            let btc_free_amount = btc_balance.free_amount;
+            let btc_locked_amount = btc_balance.locked_amount;
             let btc_amount = btc_free_amount + btc_locked_amount;
             let btc_amount_remainder =
                 btc_amount - (btc_amount / self.bot_config.lot).floor() * self.bot_config.lot;
-            let jpy_free_amount = jpy_asset.free_amount.clone().parse::<Decimal>().unwrap();
+            let jpy_free_amount = jpy_balance.free_amount;
             let jpy_amount = jpy_free_amount + btc_locked_jpy_amount;
 
             log::debug!("btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}", btc_free_amount, btc_locked_amount, jpy_free_amount, btc_locked_jpy_amount);
