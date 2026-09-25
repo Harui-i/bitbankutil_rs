@@ -84,6 +84,13 @@ impl MyBot {
 
             let bb_client2 = self.bot_config.bb_api_client.clone();
             let pair2 = self.bot_config.pair.clone();
+
+
+            // get_active_ordersをここで呼んで判定のたびにOpenOrderに置換してる……らしいが、ほんとか？
+            // →  OpenOrder::try_from(&hoge)がいっぱい
+            // これ結局bb_clientがBitbankPrivateApiClientだから、get_active_ordersとかしたやつの抽象化ができてないのが原因な気がする。
+            // TODO: Private GET APIの抽象化や隠蔽ができたら治す。
+
             let order_info_task = tokio::spawn(async move {
                 bb_client2
                     .get_active_orders(Some(&pair2), None, None, None, None, None)
