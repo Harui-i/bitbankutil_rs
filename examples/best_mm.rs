@@ -97,21 +97,21 @@ impl<V: TradingVenue> MyBot<V> {
             };
             let current_orders = account.open_orders;
             let asset_name = self.bot_config.pair.split('_').next().unwrap();
-             let Some(btc_balance_snapshot) = account
-                 .balances
-                 .iter()
-                 .find(|asset| asset.asset == asset_name)
-             else {
-                 log::error!("account snapshot is missing {}", asset_name);
-                 return;
+            let Some(btc_balance_snapshot) = account
+                .balances
+                .iter()
+                .find(|asset| asset.asset == asset_name)
+            else {
+                log::error!("account snapshot is missing {}", asset_name);
+                return;
             };
             let Some(jpy_balance_snapshot) =
                 account.balances.iter().find(|asset| asset.asset == "jpy")
             else {
-                 log::error!("account snapshot is missing jpy");
-                 return;
-             };
-             log::debug!("active orders: {:?}", current_orders);
+                log::error!("account snapshot is missing jpy");
+                return;
+            };
+            log::debug!("active orders: {:?}", current_orders);
 
             let mut btc_locked_jpy_amount: Decimal = Decimal::zero();
             // このペアのロックされたjpyを計算する
