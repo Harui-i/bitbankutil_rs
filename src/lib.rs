@@ -4,10 +4,10 @@ pub mod bitbank_public;
 pub mod bitbank_structs;
 pub mod market_event;
 pub mod order_domain;
-pub mod order_executor;
 pub mod order_manager;
 pub mod paper_execution;
 pub mod response_handler;
+pub mod trading_venue;
 pub mod websocket_handler;
 
 pub mod depth {

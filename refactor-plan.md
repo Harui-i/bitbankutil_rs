@@ -1,5 +1,7 @@
 # Refactor Plan
 
+この文書のブランチ順と実施済み項目は履歴です。現在の live / paper 共通インターフェースは `TradingVenue` で、発注・取消・口座状態取得・市場イベント反映をまとめています。
+
 ## 目的
 
 paper walk-forward trading を後から実装しやすくするために、取引ロジックと bitbank API 依存部分を段階的に分離する。
@@ -152,21 +154,13 @@ trait OrderExecutor {
 - 文字列ベースの `side` / `type` 分岐は新規コードでは避ける。
 - 実APIに依存するテストと、実APIなしで動くユニットテストを分ける。
 
-## 最終的な狙い
-
-最終的には次の形に寄せる。
+## 現在の構成
 
 ```text
-MarketDataSource
-  -> MarketEvent
-  -> Strategy
-  -> DesiredLimitOrder
-  -> OrderPlanner
-  -> OrderPlan
-  -> OrderExecutor
-       - BitbankOrderExecutor
-       - FakeOrderExecutor
-       - PaperOrderExecutor
+bitbank WebSocket -> MarketEvent -> best_mm の共通戦略
+                                      -> TradingVenue
+                                           - BitbankTradingVenue
+                                           - PaperTradingVenue
 ```
 
-この形にしておけば、リアルタイムの取引所データを使いつつ、実注文は出さずに paper execution へ流す構成を自然に作れる。
+`TradingVenue` は注文実行と口座状態参照をまとめて扱う。paper モードでは公開市場イベントを仮想約定にも反映し、Private API は使わない。

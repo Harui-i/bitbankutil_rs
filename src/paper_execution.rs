@@ -8,8 +8,9 @@ use rust_decimal::Decimal;
 use crate::{
     market_event::{MarketEvent, MarketTrade},
     order_domain::{BalanceSnapshot, DesiredLimitOrder, OpenOrder, OrderId, OrderSide, OrderType},
-    order_executor::{
-        OrderExecutionError, OrderExecutor, OrderExecutorFuture, PlacedOrder, PlacementRequest,
+    trading_venue::{
+        AccountSnapshot, PlacedOrder, PlacementRequest, TradingVenue, TradingVenueError,
+        TradingVenueFuture,
     },
 };
 
@@ -406,16 +407,17 @@ impl PaperExecutionEngine {
     }
 
     fn record_event(&mut self, event: PaperEvent) {
+        log::info!("paper event: {:?}", event);
         self.event_history.push(event);
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct PaperOrderExecutor {
+pub struct PaperTradingVenue {
     engine: Arc<Mutex<PaperExecutionEngine>>,
 }
 
-impl PaperOrderExecutor {
+impl PaperTradingVenue {
     pub fn new(engine: PaperExecutionEngine) -> Self {
         Self {
             engine: Arc::new(Mutex::new(engine)),
@@ -431,14 +433,35 @@ impl PaperOrderExecutor {
     }
 }
 
-impl OrderExecutor for PaperOrderExecutor {
-    fn place_order(&self, request: PlacementRequest) -> OrderExecutorFuture<'_, PlacedOrder> {
+impl TradingVenue for PaperTradingVenue {
+    fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
+        Box::pin(async move {
+            let engine = self
+                .engine
+                .lock()
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            if pair != engine.config().pair {
+                return Err(TradingVenueError::Paper(
+                    PaperExecutionError::PairMismatch {
+                        expected: engine.config().pair.clone(),
+                        actual: pair.to_owned(),
+                    },
+                ));
+            }
+            Ok(AccountSnapshot {
+                open_orders: engine.open_orders(),
+                balances: engine.balances(),
+            })
+        })
+    }
+
+    fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
         Box::pin(async move {
             self.engine
                 .lock()
-                .expect("paper execution engine mutex poisoned")
+                .map_err(|_| TradingVenueError::StatePoisoned)?
                 .place_order(request.order)
-                .map_err(|err| OrderExecutionError::Other(format!("{err:?}")))
+                .map_err(TradingVenueError::Paper)
         })
     }
 
@@ -446,14 +469,22 @@ impl OrderExecutor for PaperOrderExecutor {
         &'a self,
         pair: &'a str,
         order_ids: Vec<OrderId>,
-    ) -> OrderExecutorFuture<'a, ()> {
+    ) -> TradingVenueFuture<'a, ()> {
         Box::pin(async move {
             self.engine
                 .lock()
-                .expect("paper execution engine mutex poisoned")
+                .map_err(|_| TradingVenueError::StatePoisoned)?
                 .cancel_orders(pair, order_ids);
             Ok(())
         })
+    }
+
+    fn observe_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+        self.engine
+            .lock()
+            .map_err(|_| TradingVenueError::StatePoisoned)?
+            .apply_market_event(event);
+        Ok(())
     }
 }
 
@@ -1005,8 +1036,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paper_order_executor_places_and_cancels_through_order_executor_trait() {
-        let executor = PaperOrderExecutor::new(engine_with_balances(
+    async fn paper_trading_venue_places_and_cancels() {
+        let executor = PaperTradingVenue::new(engine_with_balances(
             Decimal::ZERO,
             Decimal::new(1_000_000, 0),
         ));
