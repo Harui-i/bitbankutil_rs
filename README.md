@@ -1,17 +1,13 @@
+# bitbankutil_rs
+
 [![GitHub Repo stars](https://img.shields.io/github/stars/Harui-i/bitbankutil_rs?style=social)](https://github.com/Harui-i/bitbankutil_rs)
 [![dependency status](https://deps.rs/repo/github/Harui-i/bitbankutil_rs/status.svg)](https://deps.rs/repo/github/Harui-i/bitbankutil_rs)
 
-
-
-# 日本語
-# bitbankutil_rs
 `bitbankutil_rs`は、RustでbitbankのAPI処理を複数サポートしたライブラリクレートです。 `bitbankutil_rs`を使うことで、以下のようなことが簡単に実現できます。
 
-変更内容は [CHANGELOG.md](CHANGELOG.md)、0.1.7からの移行方法は [MIGRATION.md](MIGRATION.md) を参照してください。
+## Examples
 
-# Examples
-
-## bitbankのPrivate APIを利用した処理(現在の残高の取得など)
+### bitbankのPrivate APIを利用した処理(現在の残高の取得など)
 
 `src/bitbank_private.rs`で定義されている、`BitbankPrivateApiClient`を使用することで、次のように簡単に実行することができます。
 
@@ -24,7 +20,7 @@
     println!("{:?}", assets);
 ```
 
-## bitbankのPublic APIを利用した処理(ティッカーの取得など)
+### bitbankのPublic APIを利用した処理(ティッカーの取得など)
 
 `src/bitbank_public.rs`で定義されている`BitbankPublicApiClient`を使用することで、簡単に実装できます。
 
@@ -34,10 +30,9 @@
     log::debug!("{:?}", res);
 ```
 
-
 以上のような処理には、取引所のjson形式のAPIレスポンスをRustで扱えるようにするために`serde_json`などを使ってデシリアライズする必要がありますが、そういった処理は`src/bitbank_structs.rs`で実装されているため、簡単に利用できます。
 
-## bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
+### bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
 
 取引を行うボットは [`examples/best_mm.rs`](examples/best_mm.rs)、
 取引せず板情報を表示するプログラムは [`examples/board_viewer.rs`](examples/board_viewer.rs) を参照してください。
@@ -55,25 +50,24 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000
 引数は、ペア、ティックサイズ、注文更新間隔（ミリ秒）、注文数量、最大保有数量です。
 `--paper`を指定する場合は対象通貨,初期残高も指定する必要があります。注文キュー内の順位やレイテンシは再現しません。
 
+## API カバレッジ
 
-# API カバレッジ
+### Public API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md))
 
-## Public API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md))
-
-| エンドポイント                    | 実装状況 | 
-| --------------------------- | ----------- | 
-|`GET /{pair}/ticker`        | ✅         | 
-|`GET /tickers`| ✅         |    
+| エンドポイント                    | 実装状況 |
+| --------------------------- | ----------- |
+|`GET /{pair}/ticker`        | ✅         |
+|`GET /tickers`| ✅         |
 |`GET /tickers_jpy`|✅ |
 |`GET /{pair}/depth`|✅ |
 |`GET /{pair}/transactions/{YYYYMMDD}`|✅ |
 |`GET /{pair}/candlestick/{candle-type}/{YYYY}`|✅ |
 |`GET /{pair}/circuit_break_info`| ✅ |
 
-## REST API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md))
+### REST API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md))
 
-| エンドポイント                    | 実装状況 | 
-| --------------------------- | ----------- | 
+| エンドポイント                    | 実装状況 |
+| --------------------------- | ----------- |
 |`GET /user/assets`|✅ |
 |`GET /user/spot/order`|✅ |
 |`POST /user/spot/order`|✅ |
@@ -95,22 +89,21 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000
 |`GET /spot/pairs`|❌️ |
 |`GET /user/subscribe`| ✅ |
 
-## Public Stream API
+### Public Stream API
 
-|チャンネル | 実装状況 | 
-| --------------------------- | ----------- | 
+|チャンネル | 実装状況 |
+| --------------------------- | ----------- |
 |`ticker_{pair}`|✅ |
 |`transactions_{pair}`|✅ |
 |`depth_diff_{pair}`|✅ |
 |`depth_whole_{pair}`|✅ |
 |`circuit_break_info_{pair}`|✅ |
 
-
-# 今後の実装予定
+## 今後の実装予定
 
 - Private Streaming APIへの対応
 
-# テスト
+## テスト
 
 通常の `cargo test` は、実際のbitbank APIを叩かない純粋関数・変換・バリデーションのテストだけを実行します。
 
@@ -139,18 +132,20 @@ cargo test --features live-private-api --test live_private_api -- --test-threads
 BITBANKUTIL_RUN_PRIVATE_ORDER_TESTS=1 cargo test --features live-private-order-api --test live_private_order_api -- --test-threads=1
 ```
 
-# 使い方
+## 使い方
 
 `Cargo.toml`の`[dependencies]`の欄に
+
 ```
 bitbankutil_rs = {git = "https://github.com/Harui-i/bitbankutil_rs" }
 ```
+
 などと追加してください。
 
-# 連絡先
+## 連絡先
 
 Twitter: [@Harui_botter](https://twitter.com/Harui_botter)
 
-# 注意
+## 注意
 
 このライブラリクレートやサンプルプログラムの利用によって生じたいかなる損失についても、当プロジェクトの開発者は責任を負いかねます。自己責任でご利用ください。
