@@ -1,5 +1,7 @@
 # Refactor Plan
 
+この文書のブランチ順と実施済み項目は履歴です。現在の live / paper 共通インターフェースは `TradingVenue` で、発注・取消・口座状態取得とランタイム向けの市場イベント通知を扱います。戦略はコンテキスト経由で取引先を利用します。
+
 ## 目的
 
 paper walk-forward trading を後から実装しやすくするために、取引ロジックと bitbank API 依存部分を段階的に分離する。
@@ -152,21 +154,28 @@ trait OrderExecutor {
 - 文字列ベースの `side` / `type` 分岐は新規コードでは避ける。
 - 実APIに依存するテストと、実APIなしで動くユニットテストを分ける。
 
-## 最終的な狙い
-
-最終的には次の形に寄せる。
+## 現在の構成
 
 ```text
-MarketDataSource
-  -> MarketEvent
-  -> Strategy
-  -> DesiredLimitOrder
-  -> OrderPlanner
-  -> OrderPlan
-  -> OrderExecutor
-       - BitbankOrderExecutor
-       - FakeOrderExecutor
-       - PaperOrderExecutor
+bitbank WebSocket / リプレイ / 手動送信
+  -> BotEvent::Market(MarketEvent)
+  -> ランタイムがTradingVenue::on_market_eventへ反映
+  -> BotStrategy::handle_event
+       -> ctx.venue()で注文操作・口座取得
+
+BotEvent::Custom -> BotStrategy::handle_event
 ```
 
-この形にしておけば、リアルタイムの取引所データを使いつつ、実注文は出さずに paper execution へ流す構成を自然に作れる。
+取引先は `BitbankBotBuilder::new(strategy, venue)` で指定し、ランタイムが保持する。
+戦略と市場イベント反映は同じ取引先を使い、一つのイベントの戦略実行を完了してから次へ進む。
+反映に失敗した市場イベントでは戦略を呼ばず、エラーを記録して次のイベントへ進む。
+
+`observe_market_event` は `on_market_event` に改名した。paper実装は内部の
+`PaperExecutionEngine::apply_market_event` へ委譲し、live実装は既定の何もしない通知を使う。
+`BitbankEvent` は削除し、市場データの表現は `MarketEvent` に統一した。
+独自イベントは `BotStrategy::CustomEvent` で指定し、使わない場合は `Infallible` とする。
+
+閲覧専用のサンプルは `BitbankBotBuilder::market_data(strategy)` を使用する。
+この場合の取引先は `NoTradingVenue` で、注文操作・口座取得は `Unavailable` を返す。
+
+約定モデル、注文計画、イベント重複排除、複数ランタイム間の仮想口座共有制御は今回変更しない。

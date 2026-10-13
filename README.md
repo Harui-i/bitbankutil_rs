@@ -7,6 +7,8 @@
 # bitbankutil_rs
 `bitbankutil_rs`は、RustでbitbankのAPI処理を複数サポートしたライブラリクレートです。 `bitbankutil_rs`を使うことで、以下のようなことが簡単に実現できます。
 
+変更内容は [CHANGELOG.md](CHANGELOG.md)、0.1.7からの移行方法は [MIGRATION.md](MIGRATION.md) を参照してください。
+
 # Examples
 
 ## bitbankのPrivate APIを利用した処理(現在の残高の取得など)
@@ -17,7 +19,7 @@
     let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
     let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
 
-    let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None)
+    let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None);
     let assets = bb_client.get_assets().await;
     println!("{:?}", assets);
 ```
@@ -37,14 +39,21 @@
 
 ## bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
 
-`bitbank_bot.rs`で定義されている`BitbankBotBuilder`と`BotStrategy`を利用すると、
-WebSocketイベントを扱う際に状態を自前で受け渡す必要がなくなり、取引ロジックに
-集中できます。`BotContext::event_sender`を使えば、ログのリプレイや他取引所の
-情報などユーザー独自のデータソースも同じランタイムに流し込めます。
+取引を行うボットは [`examples/best_mm.rs`](examples/best_mm.rs)、
+取引せず板情報を表示するプログラムは [`examples/board_viewer.rs`](examples/board_viewer.rs) を参照してください。
 
-`examples/best_mm.rs`は非同期イベント駆動で、best価格に指値注文をし続けるbotのサンプルコードです。実際に実行するには
-`cargo run --example best_mm mona_jpy 0.001 8000 0.001 0.002` のようにしてください。ここで、`mona_jpy`以降の引数の意味は、`examples/best_mm.rs`に書いてあるとおり、
-ペア,ティックサイズ(呼び値)、 注文を入れ替える感覚(ミリ秒)、 一回の注文のサイズ、 最大保有数となっています。
+`best_mm` は最良価格に指値注文を出し続けるサンプルです。起動時に実取引か模擬取引（paper）を指定できます。
+
+```sh
+# 実取引（BITBANK_API_KEY / BITBANK_API_SECRET が必要）
+cargo run --example best_mm -- --live mona_jpy 0.001 8000 0.001 0.002
+
+# 模擬取引（APIキー不要。公開WebSocketのデータを使い、注文・残高はメモリ上で管理）
+cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000
+```
+
+引数は、ペア、ティックサイズ、注文更新間隔（ミリ秒）、注文数量、最大保有数量です。
+`--paper`を指定する場合は対象通貨,初期残高も指定する必要があります。注文キュー内の順位やレイテンシは再現しません。
 
 
 # API カバレッジ
@@ -104,6 +113,13 @@ WebSocketイベントを扱う際に状態を自前で受け渡す必要がな�
 # テスト
 
 通常の `cargo test` は、実際のbitbank APIを叩かない純粋関数・変換・バリデーションのテストだけを実行します。
+
+CIではサンプル内のテストも含め、通常設定と `strict-validation` 有効時の両方を実行します。ローカルでも同じ確認を行えます:
+
+```sh
+cargo test --locked --all-targets
+cargo test --locked --all-targets --features strict-validation
+```
 
 実際のPublic APIを叩くテストを実行する場合:
 

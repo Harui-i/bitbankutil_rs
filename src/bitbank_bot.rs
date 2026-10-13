@@ -3,65 +3,90 @@ use crate::bitbank_structs::{
     BitbankTickerResponse, BitbankTransactionDatum,
 };
 use crate::market_event::{
-    MarketCircuitBreakInfo, MarketDepthSnapshot, MarketEvent, MarketEventConversionError,
-    MarketTicker, MarketTrade,
+    MarketDepthSnapshot, MarketEvent, MarketEventConversionError, MarketTrade,
 };
+use crate::trading_venue::{NoTradingVenue, TradingVenue};
 use crate::websocket_handler::run_websocket;
 use crypto_botters::bitbank::BitbankOption;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::{error, trace, warn};
-use std::marker::PhantomData;
+use std::convert::Infallible;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
-/// 戦略がフォローアップイベントをランタイムに送り返すことを可能にする共有コンテキスト。
-/// コンテキストは基になる送信者をクローンするため、戦略は後で作業をスケジュールする必要がある場合に自由に保存できる。
-#[derive(Clone)]
-pub struct BotContext<E> {
-    event_tx: mpsc::Sender<E>,
+/// ボットが受け取る市場データ、またはユーザー定義のイベント。
+/// 市場データはまず `TradingVenue::on_market_event()` に渡し、その後で戦略に渡す。
+/// paperでは、この順序により戦略が仮想約定後の注文・残高を参照できる。
+#[derive(Debug, Clone, PartialEq)]
+pub enum BotEvent<C = Infallible> {
+    Market(MarketEvent),
+    Custom(C),
 }
 
-impl<E: Send + 'static> BotContext<E> {
-    pub fn new(event_tx: mpsc::Sender<E>) -> Self {
-        Self { event_tx }
+/// 戦略が残高取得・発注・取消を行い、ボットへイベントを送るための窓口。
+/// `venue()` で実取引または模擬取引の注文・口座操作を利用できる。
+/// クローンしても別口座は作らず、同じ口座と注文を操作する。
+pub struct BotContext<C = Infallible, V = NoTradingVenue> {
+    event_tx: mpsc::Sender<BotEvent<C>>,
+    venue: V,
+}
+
+// CにCloneを要求せず、イベント送信者と注文・口座操作用の値だけをクローンする。
+impl<C, V: Clone> Clone for BotContext<C, V> {
+    fn clone(&self) -> Self {
+        Self {
+            event_tx: self.event_tx.clone(),
+            venue: self.venue.clone(),
+        }
+    }
+}
+
+impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
+    pub fn new(event_tx: mpsc::Sender<BotEvent<C>>, venue: V) -> Self {
+        Self { event_tx, venue }
     }
 
-    /// 内部イベント送信者のクローンを取得する。これは、戦略がBitbankのWebsocketを経由せずに
-    /// カスタムイベントをパイプしたり、データ（ログなどから）を再生したりする場合に便利である。
-    pub fn event_sender(&self) -> mpsc::Sender<E> {
+    pub fn venue(&self) -> &V {
+        &self.venue
+    }
+
+    /// 市場データやユーザー定義のイベントを、このボットへ送るための送信者を返す。
+    pub fn event_sender(&self) -> mpsc::Sender<BotEvent<C>> {
         self.event_tx.clone()
     }
 
-    /// イベントをランタイムにプッシュバックする。このヘルパーはチャネルの送信操作を待機し、
-    /// 結果を呼び出し元に伝播する。
-    pub async fn emit(&self, event: E) -> Result<(), mpsc::error::SendError<E>> {
+    pub async fn emit(
+        &self,
+        event: BotEvent<C>,
+    ) -> Result<(), mpsc::error::SendError<BotEvent<C>>> {
         self.event_tx.send(event).await
     }
 }
 
-/// 戦略は、受信イベントの処理方法を表現するためにこのトレイトを実装する。
-/// ランタイムは戦略インスタンスを所有し、イベントごとに排他的な可変アクセスを保証するため、
-/// ユーザーは`Mutex`などの外部同期プリミティブなしで`self`に直接状態を保持できる。
-pub trait BotStrategy: Send + 'static {
-    type Event: Send + 'static;
+/// 市場データなどを受け取り、発注や取消を判断する処理。
+/// paperの仮想約定・残高更新は、ボットが `handle_event()` を呼ぶ前に行う。
+/// 戦略内で `TradingVenue::on_market_event()` を呼ぶ必要はない。
+/// ユーザー定義のイベントを使わない場合はCustomEventにInfallibleを指定する。
+pub trait BotStrategy<V: TradingVenue = NoTradingVenue>: Send + 'static {
+    type CustomEvent: Send + 'static;
 
     fn handle_event(
         &mut self,
-        event: Self::Event,
-        ctx: &BotContext<Self::Event>,
+        event: BotEvent<Self::CustomEvent>,
+        ctx: &BotContext<Self::CustomEvent, V>,
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// ボットアクターを生かし続け、基本的なライフサイクル制御を提供するハンドル。
 pub struct BotHandle<E> {
-    event_tx: mpsc::Sender<E>,
+    event_tx: mpsc::Sender<BotEvent<E>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: Option<JoinHandle<()>>,
 }
 
 impl<E: Send + 'static> BotHandle<E> {
-    pub fn event_sender(&self) -> mpsc::Sender<E> {
+    pub fn event_sender(&self) -> mpsc::Sender<BotEvent<E>> {
         self.event_tx.clone()
     }
 
@@ -88,13 +113,14 @@ impl<E> Drop for BotHandle<E> {
     }
 }
 
-fn spawn_bot_actor<S>(mut strategy: S, buffer: usize) -> BotHandle<S::Event>
+fn spawn_bot_actor<S, V>(mut strategy: S, venue: V, buffer: usize) -> BotHandle<S::CustomEvent>
 where
-    S: BotStrategy,
+    V: TradingVenue,
+    S: BotStrategy<V>,
 {
     let (event_tx, mut event_rx) = mpsc::channel(buffer);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    let context = BotContext::new(event_tx.clone());
+    let context = BotContext::new(event_tx.clone(), venue);
 
     let join_handle = tokio::spawn(async move {
         loop {
@@ -106,6 +132,12 @@ where
                 }
                 maybe_event = event_rx.recv() => {
                     let Some(event) = maybe_event else { break; };
+                    if let BotEvent::Market(market_event) = &event {
+                        if let Err(err) = context.venue().on_market_event(market_event) {
+                            error!("market event processing failed: {:?}", err);
+                            continue;
+                        }
+                    }
                     strategy.handle_event(event, &context).await;
                 }
             }
@@ -127,41 +159,6 @@ pub enum BitbankInboundMessage {
     DepthDiff(BitbankDepthDiff),
     DepthWhole(BitbankDepthWhole),
     CircuitBreakInfo(BitbankCircuitBreakInfo),
-}
-
-/// ボット戦略に公開される高レベルのイベント。`DepthUpdated`は、
-/// 対応するペアの完全なオーダーブックスナップショットが利用可能な場合にのみ発生する。
-#[derive(Debug, Clone)]
-pub enum BitbankEvent {
-    Ticker {
-        pair: String,
-        ticker: MarketTicker,
-    },
-    Transactions {
-        pair: String,
-        transactions: Vec<MarketTrade>,
-    },
-    DepthUpdated {
-        pair: String,
-        depth: MarketDepthSnapshot,
-    },
-    CircuitBreakInfo {
-        pair: String,
-        info: MarketCircuitBreakInfo,
-    },
-}
-
-impl From<MarketEvent> for BitbankEvent {
-    fn from(event: MarketEvent) -> Self {
-        match event {
-            MarketEvent::Ticker { pair, ticker } => Self::Ticker { pair, ticker },
-            MarketEvent::Transactions { pair, transactions } => {
-                Self::Transactions { pair, transactions }
-            }
-            MarketEvent::DepthUpdated { pair, depth } => Self::DepthUpdated { pair, depth },
-            MarketEvent::CircuitBreakInfo { pair, info } => Self::CircuitBreakInfo { pair, info },
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -234,9 +231,9 @@ async fn run_bitbank_pair_feed<E>(
     pair: String,
     client_options: Vec<BitbankOption>,
     websocket_config: WebSocketConfig,
-    event_tx: mpsc::Sender<E>,
+    event_tx: mpsc::Sender<BotEvent<E>>,
 ) where
-    E: From<MarketEvent> + Send + 'static,
+    E: Send + 'static,
 {
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<BitbankInboundMessage>(128);
     let ws_task = tokio::spawn(run_websocket(
@@ -260,7 +257,7 @@ async fn run_bitbank_pair_feed<E>(
         };
 
         if let Some(event) = event {
-            if event_tx.send(event.into()).await.is_err() {
+            if event_tx.send(BotEvent::Market(event)).await.is_err() {
                 warn!(
                     "bitbank feed for pair {} stopped because downstream receiver closed",
                     pair
@@ -295,32 +292,32 @@ fn duplicate_bitbank_options(options: &[BitbankOption]) -> Vec<BitbankOption> {
 }
 
 /// BitbankのWebSocketフィードを[`BotStrategy`]に接続するビルダー。
-pub struct BitbankBotBuilder<S, E>
+pub struct BitbankBotBuilder<S, V = NoTradingVenue>
 where
-    S: BotStrategy<Event = E>,
-    E: From<MarketEvent> + Send + 'static,
+    V: TradingVenue,
+    S: BotStrategy<V>,
 {
     strategy: S,
     pairs: Vec<String>,
     default_options: Vec<BitbankOption>,
     websocket_config: WebSocketConfig,
     buffer_size: usize,
-    _marker: PhantomData<E>,
+    venue: V,
 }
 
-impl<S, E> BitbankBotBuilder<S, E>
+impl<S, V> BitbankBotBuilder<S, V>
 where
-    S: BotStrategy<Event = E>,
-    E: From<MarketEvent> + Send + 'static,
+    V: TradingVenue,
+    S: BotStrategy<V>,
 {
-    pub fn new(strategy: S) -> Self {
+    pub fn new(strategy: S, venue: V) -> Self {
         Self {
             strategy,
             pairs: Vec::new(),
             default_options: Vec::new(),
             websocket_config: WebSocketConfig::default(),
             buffer_size: 128,
-            _marker: PhantomData,
+            venue,
         }
     }
 
@@ -349,12 +346,12 @@ where
         self
     }
 
-    pub fn spawn(self) -> BitbankBotRuntime<E> {
+    pub fn spawn(self) -> BitbankBotRuntime<S::CustomEvent> {
         if self.pairs.is_empty() {
             warn!("spawning a Bitbank bot without any subscribed pair");
         }
 
-        let actor = spawn_bot_actor(self.strategy, self.buffer_size);
+        let actor = spawn_bot_actor(self.strategy, self.venue, self.buffer_size);
         let event_tx = actor.event_sender();
         let mut feed_handles = Vec::new();
 
@@ -375,6 +372,13 @@ where
     }
 }
 
+impl<S: BotStrategy> BitbankBotBuilder<S, NoTradingVenue> {
+    /// 注文・口座取得を使わない市場データ閲覧用の起動設定。
+    pub fn market_data(strategy: S) -> Self {
+        Self::new(strategy, NoTradingVenue)
+    }
+}
+
 /// アクターとフィードタスクを生かし続けるランタイム。ランタイムをドロップすると
 /// フィードタスクが中止される。正常に停止する必要がある場合は[`Self::shutdown`]を呼び出す。
 pub struct BitbankBotRuntime<E> {
@@ -383,7 +387,7 @@ pub struct BitbankBotRuntime<E> {
 }
 
 impl<E: Send + 'static> BitbankBotRuntime<E> {
-    pub fn event_sender(&self) -> mpsc::Sender<E> {
+    pub fn event_sender(&self) -> mpsc::Sender<BotEvent<E>> {
         self.bot_handle
             .as_ref()
             .expect("bitbank bot runtime missing actor handle")
@@ -419,9 +423,9 @@ impl<E> Drop for BitbankBotRuntime<E> {
 pub async fn forward_bitbank_messages<E>(
     pair: String,
     inbound_rx: &mut mpsc::Receiver<BitbankInboundMessage>,
-    event_tx: &mpsc::Sender<E>,
+    event_tx: &mpsc::Sender<BotEvent<E>>,
 ) where
-    E: From<MarketEvent> + Send + 'static,
+    E: Send + 'static,
 {
     let mut converter = BitbankMarketEventConverter::new(pair.clone());
     while let Some(message) = inbound_rx.recv().await {
@@ -437,7 +441,7 @@ pub async fn forward_bitbank_messages<E>(
         };
 
         if let Some(event) = event {
-            if event_tx.send(event.into()).await.is_err() {
+            if event_tx.send(BotEvent::Market(event)).await.is_err() {
                 error!(
                     "forwarder stopping: downstream closed while replaying {}",
                     pair
@@ -455,6 +459,289 @@ mod tests {
     use crate::order_domain::OrderSide;
     use rust_decimal::Decimal;
     use serde_json::Number;
+
+    use crate::order_domain::OrderId;
+    use crate::trading_venue::{
+        AccountSnapshot, PlacedOrder, PlacementRequest, TradingVenueError, TradingVenueFuture,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct ProbeVenue {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl TradingVenue for ProbeVenue {
+        fn account_snapshot<'a>(
+            &'a self,
+            _pair: &'a str,
+        ) -> TradingVenueFuture<'a, AccountSnapshot> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("snapshot");
+                Ok(AccountSnapshot {
+                    open_orders: vec![],
+                    balances: vec![],
+                })
+            })
+        }
+        fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
+            NoTradingVenue.place_order(request)
+        }
+        fn cancel_orders<'a>(
+            &'a self,
+            pair: &'a str,
+            ids: Vec<OrderId>,
+        ) -> TradingVenueFuture<'a, ()> {
+            NoTradingVenue.cancel_orders(pair, ids)
+        }
+        fn on_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+            self.calls.lock().unwrap().push("apply");
+            if matches!(event, MarketEvent::Transactions { pair, .. } if pair == "fail") {
+                return Err(TradingVenueError::StatePoisoned);
+            }
+            Ok(())
+        }
+    }
+
+    struct ProbeStrategy {
+        handled: mpsc::UnboundedSender<()>,
+        gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    }
+
+    impl BotStrategy<ProbeVenue> for ProbeStrategy {
+        type CustomEvent = ();
+        async fn handle_event(&mut self, event: BotEvent<()>, ctx: &BotContext<(), ProbeVenue>) {
+            if let Some((entered, release)) = self.gate.take() {
+                entered.send(()).unwrap();
+                release.await.unwrap();
+            }
+            ctx.venue().calls.lock().unwrap().push(match event {
+                BotEvent::Market(_) => "market",
+                BotEvent::Custom(()) => "custom",
+            });
+            ctx.venue().account_snapshot("btc_jpy").await.unwrap();
+            self.handled.send(()).unwrap();
+        }
+    }
+
+    fn transaction_event(pair: &str) -> BotEvent<()> {
+        BotEvent::Market(MarketEvent::Transactions {
+            pair: pair.to_owned(),
+            transactions: vec![],
+        })
+    }
+
+    async fn wait_handled(receiver: &mut mpsc::UnboundedReceiver<()>) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_applies_market_once_before_strategy_and_skips_failed_events() {
+        let venue = ProbeVenue::default();
+        let (handled, mut receiver) = mpsc::unbounded_channel();
+        let runtime = BitbankBotBuilder::new(
+            ProbeStrategy {
+                handled,
+                gate: None,
+            },
+            venue.clone(),
+        )
+        .spawn();
+        let sender = runtime.event_sender();
+        sender.send(transaction_event("btc_jpy")).await.unwrap();
+        sender.send(transaction_event("fail")).await.unwrap();
+        sender.send(BotEvent::Custom(())).await.unwrap();
+        wait_handled(&mut receiver).await;
+        wait_handled(&mut receiver).await;
+        runtime.shutdown().await.unwrap();
+        assert_eq!(
+            *venue.calls.lock().unwrap(),
+            ["apply", "market", "snapshot", "apply", "custom", "snapshot"]
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn next_market_event_cannot_apply_while_strategy_is_running() {
+        let venue = ProbeVenue::default();
+        let (handled, mut receiver) = mpsc::unbounded_channel();
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let runtime = BitbankBotBuilder::new(
+            ProbeStrategy {
+                handled,
+                gate: Some((entered, release_rx)),
+            },
+            venue.clone(),
+        )
+        .spawn();
+        let sender = runtime.event_sender();
+        sender.send(BotEvent::Custom(())).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        sender.send(transaction_event("btc_jpy")).await.unwrap();
+        assert!(venue.calls.lock().unwrap().is_empty());
+        release.send(()).unwrap();
+        wait_handled(&mut receiver).await;
+        wait_handled(&mut receiver).await;
+        runtime.shutdown().await.unwrap();
+        assert_eq!(
+            *venue.calls.lock().unwrap(),
+            ["custom", "snapshot", "apply", "market", "snapshot"]
+        );
+    }
+
+    #[tokio::test]
+    async fn context_clone_and_emit_do_not_require_custom_event_clone() {
+        struct Custom;
+        let (sender, mut receiver) = mpsc::channel(1);
+        let ctx = BotContext::new(sender, NoTradingVenue);
+        ctx.clone().emit(BotEvent::Custom(Custom)).await.unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(BotEvent::Custom(Custom))
+        ));
+    }
+
+    #[tokio::test]
+    async fn market_data_runtime_delivers_events_without_credentials() {
+        struct Strategy(Option<oneshot::Sender<()>>);
+        impl BotStrategy for Strategy {
+            type CustomEvent = Infallible;
+            async fn handle_event(&mut self, event: BotEvent, ctx: &BotContext) {
+                assert!(matches!(event, BotEvent::Market(_)));
+                assert!(matches!(
+                    ctx.venue().account_snapshot("btc_jpy").await,
+                    Err(TradingVenueError::Unavailable)
+                ));
+                self.0.take().unwrap().send(()).unwrap();
+            }
+        }
+        let (done, done_rx) = oneshot::channel();
+        let runtime = BitbankBotBuilder::market_data(Strategy(Some(done))).spawn();
+        runtime
+            .event_sender()
+            .send(BotEvent::Market(MarketEvent::Transactions {
+                pair: "btc_jpy".into(),
+                transactions: vec![],
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    struct PaperProbe {
+        snapshots: mpsc::UnboundedSender<AccountSnapshot>,
+    }
+
+    impl BotStrategy<crate::paper_execution::PaperTradingVenue> for PaperProbe {
+        type CustomEvent = Infallible;
+        async fn handle_event(
+            &mut self,
+            _event: BotEvent,
+            ctx: &BotContext<Infallible, crate::paper_execution::PaperTradingVenue>,
+        ) {
+            self.snapshots
+                .send(ctx.venue().account_snapshot("btc_jpy").await.unwrap())
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_and_replayed_trades_update_paper_before_strategy_reads_account() {
+        use crate::order_domain::{BalanceSnapshot, DesiredLimitOrder};
+        use crate::paper_execution::{
+            PaperExecutionConfig, PaperExecutionEngine, PaperTradingVenue,
+        };
+        let engine = PaperExecutionEngine::new(
+            PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+            vec![
+                BalanceSnapshot {
+                    asset: "btc".into(),
+                    free_amount: Decimal::ZERO,
+                    locked_amount: Decimal::ZERO,
+                    onhand_amount: Decimal::ZERO,
+                },
+                BalanceSnapshot {
+                    asset: "jpy".into(),
+                    free_amount: Decimal::new(1000, 0),
+                    locked_amount: Decimal::ZERO,
+                    onhand_amount: Decimal::new(1000, 0),
+                },
+            ],
+        )
+        .unwrap();
+        let venue = PaperTradingVenue::new(engine);
+        venue
+            .place_order(
+                DesiredLimitOrder::limit(
+                    "btc_jpy".into(),
+                    OrderSide::Buy,
+                    Decimal::ONE,
+                    Decimal::new(100, 0),
+                )
+                .into(),
+            )
+            .await
+            .unwrap();
+        let (snapshots, mut receiver) = mpsc::unbounded_channel();
+        let runtime = BitbankBotBuilder::new(PaperProbe { snapshots }, venue).spawn();
+        let sender = runtime.event_sender();
+        sender
+            .send(BotEvent::Market(MarketEvent::Transactions {
+                pair: "btc_jpy".into(),
+                transactions: vec![MarketTrade {
+                    amount: Decimal::new(25, 2),
+                    executed_at: 1,
+                    price: Decimal::new(100, 0),
+                    side: OrderSide::Sell,
+                    transaction_id: 1,
+                }],
+            }))
+            .await
+            .unwrap();
+        let (inbound, mut inbound_rx) = mpsc::channel(1);
+        inbound
+            .send(BitbankInboundMessage::Transactions(vec![
+                BitbankTransactionDatum {
+                    amount: Decimal::new(25, 2),
+                    executed_at: 2,
+                    price: Decimal::new(100, 0),
+                    side: "sell".into(),
+                    transaction_id: 2,
+                },
+            ]))
+            .await
+            .unwrap();
+        drop(inbound);
+        forward_bitbank_messages("btc_jpy".into(), &mut inbound_rx, &sender).await;
+        for remaining in [Decimal::new(75, 2), Decimal::new(5, 1)] {
+            let snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.open_orders[0].remaining_amount, remaining);
+            assert_eq!(
+                snapshot
+                    .balances
+                    .iter()
+                    .find(|b| b.asset == "btc")
+                    .unwrap()
+                    .free_amount,
+                Decimal::ONE - remaining
+            );
+        }
+        runtime.shutdown().await.unwrap();
+    }
 
     fn depth_whole() -> BitbankDepthWhole {
         serde_json::from_value(serde_json::json!({
@@ -595,7 +882,7 @@ mod tests {
     #[tokio::test]
     async fn forward_bitbank_messages_emits_market_events() {
         let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel::<MarketEvent>(4);
+        let (event_tx, mut event_rx) = mpsc::channel::<BotEvent>(4);
 
         inbound_tx
             .send(BitbankInboundMessage::Ticker(BitbankTickerResponse {
@@ -615,7 +902,7 @@ mod tests {
         forward_bitbank_messages("btc_jpy".to_owned(), &mut inbound_rx, &event_tx).await;
 
         let event = event_rx.recv().await.unwrap();
-        let MarketEvent::Ticker { pair, ticker } = event else {
+        let BotEvent::Market(MarketEvent::Ticker { pair, ticker }) = event else {
             panic!("expected ticker");
         };
         assert_eq!(pair, "btc_jpy");

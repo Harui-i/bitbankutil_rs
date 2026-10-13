@@ -92,7 +92,7 @@ checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "bitbankutil_rs"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "crypto-botters",
  "env_logger",
@@ -256,7 +256,7 @@ dependencies = [
 [[package]]
 name = "crypto-botters"
 version = "0.6.0"
-source = "git+https://github.com/Harui-i/crypto-botters.git?branch=feature%2Fbitbank#2e8c1a8e400cb71dccda075f874da1592958b79f"
+source = "git+https://github.com/Harui-i/crypto-botters.git?rev=2e8c1a8e400cb71dccda075f874da1592958b79f#2e8c1a8e400cb71dccda075f874da1592958b79f"
 dependencies = [
  "generic-api-client",
  "hex",
@@ -458,7 +458,7 @@ dependencies = [
 [[package]]
 name = "generic-api-client"
 version = "0.3.0"
-source = "git+https://github.com/Harui-i/crypto-botters.git?branch=feature%2Fbitbank#2e8c1a8e400cb71dccda075f874da1592958b79f"
+source = "git+https://github.com/Harui-i/crypto-botters.git?rev=2e8c1a8e400cb71dccda075f874da1592958b79f#2e8c1a8e400cb71dccda075f874da1592958b79f"
 dependencies = [
  "bytes",
  "futures-util",
