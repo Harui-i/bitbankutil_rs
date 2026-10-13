@@ -66,8 +66,9 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()>;
 
-    /// ランタイムが戦略実行前に呼ぶ市場イベント通知。
-    /// paper実装は仮想約定と残高を更新し、live実装は既定の何もしない処理を使う。
+    /// ボットが戦略へ市場データを渡す前に呼ぶ処理。
+    /// paperでは市場データから仮想約定を判定し、注文と残高を更新する。
+    /// 実取引では約定・残高を取引所が管理するため、ここでは何もしない。
     fn on_market_event(&self, _event: &MarketEvent) -> Result<(), TradingVenueError> {
         Ok(())
     }

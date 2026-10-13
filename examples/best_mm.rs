@@ -341,14 +341,14 @@ async fn main() {
     websocket_config.refresh_after = Duration::from_secs(3600);
     websocket_config.ignore_duplicate_during_reconnection = true;
 
-    let _runtime = match mode {
+    let (_runtime, paper_engine) = match mode {
         Some("--live") => {
             let key =
                 env::var("BITBANK_API_KEY").expect("BITBANK_API_KEY is required for live mode");
             let secret = env::var("BITBANK_API_SECRET")
                 .expect("BITBANK_API_SECRET is required for live mode");
             let venue = BitbankTradingVenue::new(BitbankPrivateApiClient::new(key, secret, None));
-            spawn_bot(
+            let runtime = spawn_bot(
                 venue,
                 pair,
                 tick_size,
@@ -356,13 +356,15 @@ async fn main() {
                 lot,
                 max_lot,
                 websocket_config,
-            )
+            );
+            (runtime, None)
         }
         Some("--paper") => {
             let base_initial: Decimal = args[7].parse().expect("invalid base initial balance");
             let jpy_initial: Decimal = args[8].parse().expect("invalid JPY initial balance");
             let venue = paper_venue(&pair, base_initial, jpy_initial).expect("invalid paper setup");
-            spawn_bot(
+            let engine = venue.engine();
+            let runtime = spawn_bot(
                 venue,
                 pair,
                 tick_size,
@@ -370,133 +372,24 @@ async fn main() {
                 lot,
                 max_lot,
                 websocket_config,
-            )
+            );
+            (runtime, Some(engine))
         }
         _ => unreachable!(),
     };
 
     loop {
-        tokio::time::sleep(Duration::from_secs(3600)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if let Some(engine) = &paper_engine {
+            // 各イベントは記録時にログ出力済み。履歴を破棄して長時間運用での蓄積を防ぐ。
+            engine
+                .lock()
+                .expect("paper engine lock poisoned")
+                .drain_events();
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bitbankutil_rs::trading_venue::{PlacementRequest, TradingVenue};
-
-    #[derive(Clone, Default)]
-    struct ProbeVenue {
-        calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
-        snapshot_read: std::sync::Arc<tokio::sync::Notify>,
-    }
-
-    impl TradingVenue for ProbeVenue {
-        fn account_snapshot<'a>(
-            &'a self,
-            _pair: &'a str,
-        ) -> bitbankutil_rs::trading_venue::TradingVenueFuture<
-            'a,
-            bitbankutil_rs::trading_venue::AccountSnapshot,
-        > {
-            Box::pin(async move {
-                self.calls.lock().unwrap().push("snapshot");
-                self.snapshot_read.notify_one();
-                Ok(bitbankutil_rs::trading_venue::AccountSnapshot {
-                    open_orders: vec![],
-                    balances: vec![
-                        BalanceSnapshot {
-                            asset: "btc".to_owned(),
-                            free_amount: Decimal::ZERO,
-                            locked_amount: Decimal::ZERO,
-                            onhand_amount: Decimal::ZERO,
-                        },
-                        BalanceSnapshot {
-                            asset: "jpy".to_owned(),
-                            free_amount: Decimal::ZERO,
-                            locked_amount: Decimal::ZERO,
-                            onhand_amount: Decimal::ZERO,
-                        },
-                    ],
-                })
-            })
-        }
-
-        fn place_order(
-            &self,
-            _request: PlacementRequest,
-        ) -> bitbankutil_rs::trading_venue::TradingVenueFuture<
-            '_,
-            bitbankutil_rs::trading_venue::PlacedOrder,
-        > {
-            Box::pin(async { panic!("unexpected order") })
-        }
-
-        fn cancel_orders<'a>(
-            &'a self,
-            _pair: &'a str,
-            _order_ids: Vec<bitbankutil_rs::order_domain::OrderId>,
-        ) -> bitbankutil_rs::trading_venue::TradingVenueFuture<'a, ()> {
-            Box::pin(async { panic!("unexpected cancellation") })
-        }
-
-        fn on_market_event(
-            &self,
-            _event: &MarketEvent,
-        ) -> Result<(), bitbankutil_rs::trading_venue::TradingVenueError> {
-            self.calls.lock().unwrap().push("apply");
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn runtime_applies_trade_before_bot_reads_account() {
-        let venue = ProbeVenue::default();
-        let mut bot = MyBot::new(
-            "btc_jpy".to_owned(),
-            Decimal::ONE,
-            0,
-            Decimal::new(1, 1),
-            Decimal::ONE,
-        );
-        let asks = [(Decimal::new(6_000_000, 0), 1.0)].into();
-        let bids = [(Decimal::new(5_000_000, 0), 1.0)].into();
-        bot.depth = MarketDepthSnapshot::new(asks, bids, 0);
-        let runtime = BitbankBotBuilder::new(bot, venue.clone()).spawn();
-        runtime
-            .event_sender()
-            .send(BotEvent::Market(MarketEvent::Transactions {
-                pair: "btc_jpy".to_owned(),
-                transactions: vec![],
-            }))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), venue.snapshot_read.notified())
-            .await
-            .unwrap();
-        runtime.shutdown().await.unwrap();
-        assert_eq!(*venue.calls.lock().unwrap(), vec!["apply", "snapshot"]);
-    }
-
-    #[tokio::test]
-    async fn paper_mode_needs_no_credentials_and_exposes_initial_balances() {
-        let venue = paper_venue("btc_jpy", Decimal::ZERO, Decimal::new(1_000_000, 0)).unwrap();
-        let snapshot = venue.account_snapshot("btc_jpy").await.unwrap();
-        assert!(snapshot.open_orders.is_empty());
-        assert_eq!(
-            snapshot
-                .balances
-                .iter()
-                .find(|b| b.asset == "jpy")
-                .unwrap()
-                .free_amount,
-            Decimal::new(1_000_000, 0)
-        );
-    }
-
-    #[test]
-    fn paper_setup_rejects_negative_balance_and_unsupported_pair() {
-        assert!(paper_venue("btc_jpy", Decimal::new(-1, 0), Decimal::ZERO).is_err());
-        assert!(paper_venue("btc_usdt", Decimal::ZERO, Decimal::ZERO).is_err());
-    }
-}
+#[path = "best_mm/tests.rs"]
+mod tests;

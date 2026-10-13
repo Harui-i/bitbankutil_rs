@@ -15,21 +15,24 @@ use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
-/// ランタイムと戦略が扱うイベント。市場イベントは戦略実行前に取引先へ反映される。
+/// ボットが受け取る市場データ、またはユーザー定義のイベント。
+/// 市場データはまず `TradingVenue::on_market_event()` に渡し、その後で戦略に渡す。
+/// paperでは、この順序により戦略が仮想約定後の注文・残高を参照できる。
 #[derive(Debug, Clone, PartialEq)]
 pub enum BotEvent<C = Infallible> {
     Market(MarketEvent),
     Custom(C),
 }
 
-/// ランタイムが管理する取引先と、同じ処理ループへのイベント送信口。
-/// クローンした取引先は同じ口座・注文状態を共有する必要がある。
+/// 戦略が残高取得・発注・取消を行い、ボットへイベントを送るための窓口。
+/// `venue()` で実取引または模擬取引の注文・口座操作を利用できる。
+/// クローンしても別口座は作らず、同じ口座と注文を操作する。
 pub struct BotContext<C = Infallible, V = NoTradingVenue> {
     event_tx: mpsc::Sender<BotEvent<C>>,
     venue: V,
 }
 
-// CにCloneを要求せず、チャネルと取引先だけをクローンする。
+// CにCloneを要求せず、イベント送信者と注文・口座操作用の値だけをクローンする。
 impl<C, V: Clone> Clone for BotContext<C, V> {
     fn clone(&self) -> Self {
         Self {
@@ -48,7 +51,7 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
         &self.venue
     }
 
-    /// 市場イベントの手動送信・ログ再生と独自イベントを同じランタイムへ送る。
+    /// 市場データやユーザー定義のイベントを、このボットへ送るための送信者を返す。
     pub fn event_sender(&self) -> mpsc::Sender<BotEvent<C>> {
         self.event_tx.clone()
     }
@@ -61,8 +64,10 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
     }
 }
 
-/// 戦略は判断と注文操作を担当し、市場イベントの反映はランタイムが先に行う。
-/// 独自イベントを使わない場合はCustomEventにInfallibleを指定する。
+/// 市場データなどを受け取り、発注や取消を判断する処理。
+/// paperの仮想約定・残高更新は、ボットが `handle_event()` を呼ぶ前に行う。
+/// 戦略内で `TradingVenue::on_market_event()` を呼ぶ必要はない。
+/// ユーザー定義のイベントを使わない場合はCustomEventにInfallibleを指定する。
 pub trait BotStrategy<V: TradingVenue = NoTradingVenue>: Send + 'static {
     type CustomEvent: Send + 'static;
 

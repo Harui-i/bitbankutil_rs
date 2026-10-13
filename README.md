@@ -37,65 +37,21 @@
 
 ## bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
 
-`BitbankBotBuilder` と `BotStrategy` を利用すると、戦略は市場データに応じた判断と注文操作に集中できます。
-取引を行う場合は `BitbankBotBuilder::new(strategy, venue)` で取引先を一度だけ指定します。
-戦略は `ctx.venue()` 経由で残高取得・発注・取消を行い、取引先を自身の設定に保持する必要はありません。
-板表示など注文機能が不要な場合は `BitbankBotBuilder::market_data(strategy)` を使います。
-この構成での口座取得・注文操作は `TradingVenueError::Unavailable` を返します。
+取引を行うボットは [`examples/best_mm.rs`](examples/best_mm.rs)、
+取引せず板情報を表示するプログラムは [`examples/board_viewer.rs`](examples/board_viewer.rs) を参照してください。
 
-戦略は `BotStrategy<V>` を実装し、関連型 `CustomEvent` に独自イベント型を指定します。
-独自イベントを使わない場合は `std::convert::Infallible` を指定します。
-`handle_event()` は `BotEvent::Market(MarketEvent)` または `BotEvent::Custom(CustomEvent)` を受け取ります。
-
-```rust,ignore
-impl<V: TradingVenue> BotStrategy<V> for MyBot {
-    type CustomEvent = std::convert::Infallible;
-
-    async fn handle_event(
-        &mut self,
-        event: BotEvent<Self::CustomEvent>,
-        ctx: &BotContext<Self::CustomEvent, V>,
-    ) {
-        if let BotEvent::Market(MarketEvent::Transactions { pair, .. }) = event {
-            let account = ctx.venue().account_snapshot(&pair).await;
-            // 更新済みの口座状態を使って判断する
-        }
-    }
-}
-
-let runtime = BitbankBotBuilder::new(strategy, venue)
-    .add_pair("btc_jpy")
-    .spawn();
-```
-
-市場イベントは、ランタイムが受信順に `TradingVenue::on_market_event()` へ反映してから戦略へ渡します。
-paperでは仮想約定・残高更新を先に行い、liveではこの通知自体は何もしません。
-戦略から市場イベント反映を手動で呼ぶ必要はありません。
-反映に失敗した場合はエラーを記録し、そのイベントの戦略実行をスキップします。
-独自イベントは取引先への反映を行わず、戦略へ渡します。
-
-`BotContext::event_sender()` とランタイムの `event_sender()` は `Sender<BotEvent<C>>` を返し、
-`ctx.emit(BotEvent::Custom(...))` などで独自イベントを送れます。
-市場イベントの手動送信には `BotEvent::Market(...)` を使います。
-`forward_bitbank_messages()` にも同じ送信者を渡せるため、ログ再生も同じ順序で処理されます。
-取引先のクローンは同じ口座・注文状態を共有する必要があります。
-
-旧APIからの移行では、`BitbankEvent` を `MarketEvent` と `BotEvent::Market` に置き換え、
-`BotStrategy::Event` を `CustomEvent` に変更します。`observe_market_event()` は削除しています。
-
-`examples/best_mm.rs`は非同期イベント駆動で、best価格に指値注文をし続けるbotのサンプルコードです。起動時に取引モードを明示します。
+`best_mm` は最良価格に指値注文を出し続けるサンプルです。起動時に実取引か模擬取引（paper）を指定できます。
 
 ```sh
-# 実注文を出す。BITBANK_API_KEY / BITBANK_API_SECRET が必要
+# 実取引（BITBANK_API_KEY / BITBANK_API_SECRET が必要）
 cargo run --example best_mm -- --live mona_jpy 0.001 8000 0.001 0.002
 
-# 公開WebSocketの実データを使い、注文・残高はメモリ上で模擬する。APIキーは不要
+# 模擬取引（APIキー不要。公開WebSocketのデータを使い、注文・残高はメモリ上で管理）
 cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000
 ```
 
-共通の引数は、ペア、ティックサイズ、注文更新間隔（ミリ秒）、一回の注文数量、最大保有数量です。paper モードではさらに対象通貨と JPY の初期残高を指定します。初期残高は非負で、paper モードは JPY ペアに対応します。状態は保存されず、再起動時は指定した初期残高から始まります。
-
-paper の約定は公開 WebSocket の取引イベントを使う既存の maker モデルで判定します。部分約定と手数料は反映しますが、発注時の板との交差、注文キュー内の順位、レイテンシは再現しません。注文受付・取消・約定・拒否はログに出力します。
+引数は、ペア、ティックサイズ、注文更新間隔（ミリ秒）、注文数量、最大保有数量です。
+`--paper`を指定する場合は対象通貨,初期残高も指定する必要があります。注文キュー内の順位やレイテンシは再現しません。
 
 
 # API カバレッジ
