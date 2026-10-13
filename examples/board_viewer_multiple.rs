@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankEvent, BotContext, BotStrategy};
+use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BotContext, BotEvent, BotStrategy};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 
@@ -14,10 +14,18 @@ impl MyBot {
 }
 
 impl BotStrategy for MyBot {
-    type Event = BitbankEvent;
+    type CustomEvent = std::convert::Infallible;
 
-    async fn handle_event(&mut self, event: Self::Event, _ctx: &BotContext<Self::Event>) {
-        if let BitbankEvent::DepthUpdated { pair, depth } = event {
+    async fn handle_event(
+        &mut self,
+        event: BotEvent<Self::CustomEvent>,
+        _ctx: &BotContext<Self::CustomEvent>,
+    ) {
+        if let BotEvent::Market(bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
+            pair,
+            depth,
+        }) = event
+        {
             log::info!("pair: {}, depth: {}", pair, depth);
         }
     }
@@ -44,7 +52,7 @@ async fn main() {
 
     let pairs = args[1..].to_vec();
     let bot = MyBot::new();
-    let _runtime = BitbankBotBuilder::new(bot)
+    let _runtime = BitbankBotBuilder::market_data(bot)
         .with_pairs(pairs)
         .websocket_config(wsc)
         .spawn();

@@ -10,6 +10,15 @@ use crate::{
     paper_execution::PaperExecutionError,
 };
 
+// Pin<Box<dyn Future<Output=Result<T,TradingVenueError>> + Send + 'a>>ってなんやねん
+/*
+Pin<T>やUnpinトレイトについてRust the bookを読んで勉強した.
+
+The book: https://doc.rust-lang.org/book/ch17-05-traits-for-async.html
+勉強記録: https://zenn.dev/harui/scraps/b191888e1cb762
+
+返り値がResult<T, TradingVenueError>であるFutureをBoxでヒープに確保しつつPinで固定することでFutureのアドレスが変わらないようになる(Unpinトレイトを実装していないなら)
+*/
 pub type TradingVenueFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TradingVenueError>> + Send + 'a>>;
 
@@ -19,6 +28,7 @@ pub enum TradingVenueError {
     Parse(ParseOrderError),
     Paper(PaperExecutionError),
     StatePoisoned,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +53,8 @@ pub struct PlacedOrder {
     pub order_id: Option<OrderId>,
 }
 
+/// 注文操作と口座取得の共通インターフェース。
+/// Cloneした値も同じ口座・注文状態を共有すること。
 pub trait TradingVenue: Clone + Send + Sync + 'static {
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot>;
 
@@ -54,7 +66,33 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()>;
 
-    fn observe_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError>;
+    /// ランタイムが戦略実行前に呼ぶ市場イベント通知。
+    /// paper実装は仮想約定と残高を更新し、live実装は既定の何もしない処理を使う。
+    fn on_market_event(&self, _event: &MarketEvent) -> Result<(), TradingVenueError> {
+        Ok(())
+    }
+}
+
+/// 市場データ閲覧専用。注文・口座操作は利用できない。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoTradingVenue;
+
+impl TradingVenue for NoTradingVenue {
+    fn account_snapshot<'a>(&'a self, _pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
+        Box::pin(async { Err(TradingVenueError::Unavailable) })
+    }
+
+    fn place_order(&self, _request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
+        Box::pin(async { Err(TradingVenueError::Unavailable) })
+    }
+
+    fn cancel_orders<'a>(
+        &'a self,
+        _pair: &'a str,
+        _order_ids: Vec<OrderId>,
+    ) -> TradingVenueFuture<'a, ()> {
+        Box::pin(async { Err(TradingVenueError::Unavailable) })
+    }
 }
 
 fn convert_account_snapshot(
@@ -141,10 +179,6 @@ impl TradingVenue for BitbankTradingVenue {
             Ok(())
         })
     }
-
-    fn observe_market_event(&self, _event: &MarketEvent) -> Result<(), TradingVenueError> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -153,6 +187,36 @@ mod tests {
     use crate::order_domain::OrderSide;
     use rust_decimal::Decimal;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn market_data_venue_has_no_order_or_account_operations() {
+        let event = MarketEvent::Transactions {
+            pair: "btc_jpy".into(),
+            transactions: vec![],
+        };
+        NoTradingVenue.on_market_event(&event).unwrap();
+        assert!(matches!(
+            NoTradingVenue.account_snapshot("btc_jpy").await,
+            Err(TradingVenueError::Unavailable)
+        ));
+        let request =
+            DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, Decimal::ONE, Decimal::ONE)
+                .into();
+        assert!(matches!(
+            NoTradingVenue.place_order(request).await,
+            Err(TradingVenueError::Unavailable)
+        ));
+        assert!(matches!(
+            NoTradingVenue.cancel_orders("btc_jpy", vec![]).await,
+            Err(TradingVenueError::Unavailable)
+        ));
+        let live = BitbankTradingVenue::new(BitbankPrivateApiClient::new(
+            "unused".into(),
+            "unused".into(),
+            None,
+        ));
+        live.on_market_event(&event).unwrap();
+    }
 
     #[test]
     fn live_snapshot_converts_orders_and_balances_together() {

@@ -479,7 +479,7 @@ impl TradingVenue for PaperTradingVenue {
         })
     }
 
-    fn observe_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+    fn on_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
         self.engine
             .lock()
             .map_err(|_| TradingVenueError::StatePoisoned)?

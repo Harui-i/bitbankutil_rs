@@ -292,13 +292,6 @@ mod tests {
             })
         }
 
-        fn observe_market_event(
-            &self,
-            _event: &crate::market_event::MarketEvent,
-        ) -> Result<(), TradingVenueError> {
-            Ok(())
-        }
-
         fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
             Box::pin(async move {
                 self.calls

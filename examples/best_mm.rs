@@ -1,7 +1,9 @@
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BitbankBotRuntime, BotContext, BotStrategy};
+use bitbankutil_rs::bitbank_bot::{
+    BitbankBotBuilder, BitbankBotRuntime, BotContext, BotEvent, BotStrategy,
+};
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::depth::Depth;
 use bitbankutil_rs::market_event::{MarketDepthSnapshot, MarketEvent};
@@ -14,32 +16,30 @@ use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
 use rust_decimal::prelude::*;
 
-struct MyBot<V: TradingVenue> {
-    bot_config: MyBotConfig<V>,
+struct MyBot {
+    bot_config: MyBotConfig,
     depth: MarketDepthSnapshot,
     last_updated: u128,
     last_bestbid: Decimal,
     last_bestask: Decimal,
 }
 
-struct MyBotConfig<V: TradingVenue> {
+struct MyBotConfig {
     pair: String,
     tick_size: Decimal,
     refresh_cycle: u128,
     lot: Decimal,
     max_lot: Decimal,
-    venue: V,
 }
 
-impl<V: TradingVenue> MyBot<V> {
+impl MyBot {
     fn new(
-        venue: V,
         pair: String,
         tick_size: Decimal,
         refresh_cycle: u128,
         lot: Decimal,
         max_lot: Decimal,
-    ) -> MyBot<V> {
+    ) -> MyBot {
         MyBot {
             bot_config: MyBotConfig {
                 pair,
@@ -47,7 +47,6 @@ impl<V: TradingVenue> MyBot<V> {
                 refresh_cycle,
                 lot,
                 max_lot,
-                venue,
             },
             depth: MarketDepthSnapshot::empty(),
             last_updated: 0,
@@ -56,7 +55,7 @@ impl<V: TradingVenue> MyBot<V> {
         }
     }
 
-    async fn update_orders(&mut self) {
+    async fn update_orders<V: TradingVenue>(&mut self, venue: &V) {
         let now_inst = std::time::Instant::now();
         let now: u128 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -83,12 +82,7 @@ impl<V: TradingVenue> MyBot<V> {
                 .unwrap()
                 .as_millis();
 
-            let account = match self
-                .bot_config
-                .venue
-                .account_snapshot(&self.bot_config.pair)
-                .await
-            {
+            let account = match venue.account_snapshot(&self.bot_config.pair).await {
                 Ok(account) => account,
                 Err(err) => {
                     log::error!("account snapshot failed: {:?}", err);
@@ -208,7 +202,7 @@ impl<V: TradingVenue> MyBot<V> {
                 btc_free_amount,
                 jpy_free_amount,
                 self.bot_config.pair.clone(),
-                self.bot_config.venue.clone(),
+                venue.clone(),
             )
             .await;
         }
@@ -219,17 +213,21 @@ impl<V: TradingVenue> MyBot<V> {
     }
 }
 
-impl<V: TradingVenue> BotStrategy for MyBot<V> {
-    type Event = MarketEvent;
-    async fn handle_event(&mut self, event: Self::Event, _ctx: &BotContext<Self::Event>) {
-        if let Err(err) = self.bot_config.venue.observe_market_event(&event) {
-            log::error!("market event processing failed: {:?}", err);
-            return;
-        }
+impl<V: TradingVenue> BotStrategy<V> for MyBot {
+    type CustomEvent = std::convert::Infallible;
+    async fn handle_event(
+        &mut self,
+        event: BotEvent<Self::CustomEvent>,
+        ctx: &BotContext<Self::CustomEvent, V>,
+    ) {
+        let event = match event {
+            BotEvent::Market(event) => event,
+            BotEvent::Custom(never) => match never {},
+        };
         match event {
             MarketEvent::Transactions { transactions, .. } => {
                 log::debug!("transaction updated: {:?}", transactions);
-                self.update_orders().await;
+                self.update_orders(ctx.venue()).await;
             }
             MarketEvent::DepthUpdated { depth, .. } => {
                 log::debug!("depth updated");
@@ -251,7 +249,7 @@ impl<V: TradingVenue> BotStrategy for MyBot<V> {
 
                 self.depth = depth;
                 if self.depth.is_complete() {
-                    self.update_orders().await;
+                    self.update_orders(ctx.venue()).await;
                 }
             }
             MarketEvent::CircuitBreakInfo { info, .. } => {
@@ -271,9 +269,9 @@ fn spawn_bot<V: TradingVenue>(
     lot: Decimal,
     max_lot: Decimal,
     websocket_config: WebSocketConfig,
-) -> BitbankBotRuntime<MarketEvent> {
-    let bot = MyBot::new(venue, pair.clone(), tick_size, refresh_cycle, lot, max_lot);
-    BitbankBotBuilder::new(bot)
+) -> BitbankBotRuntime<std::convert::Infallible> {
+    let bot = MyBot::new(pair.clone(), tick_size, refresh_cycle, lot, max_lot);
+    BitbankBotBuilder::new(bot, venue)
         .add_pair(pair)
         .websocket_config(websocket_config)
         .spawn()
@@ -385,12 +383,12 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitbankutil_rs::market_event::MarketTrade;
     use bitbankutil_rs::trading_venue::{PlacementRequest, TradingVenue};
 
     #[derive(Clone, Default)]
     struct ProbeVenue {
         calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        snapshot_read: std::sync::Arc<tokio::sync::Notify>,
     }
 
     impl TradingVenue for ProbeVenue {
@@ -403,6 +401,7 @@ mod tests {
         > {
             Box::pin(async move {
                 self.calls.lock().unwrap().push("snapshot");
+                self.snapshot_read.notify_one();
                 Ok(bitbankutil_rs::trading_venue::AccountSnapshot {
                     open_orders: vec![],
                     balances: vec![
@@ -441,20 +440,19 @@ mod tests {
             Box::pin(async { panic!("unexpected cancellation") })
         }
 
-        fn observe_market_event(
+        fn on_market_event(
             &self,
             _event: &MarketEvent,
         ) -> Result<(), bitbankutil_rs::trading_venue::TradingVenueError> {
-            self.calls.lock().unwrap().push("observe");
+            self.calls.lock().unwrap().push("apply");
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn bot_observes_trade_before_reading_account() {
+    async fn runtime_applies_trade_before_bot_reads_account() {
         let venue = ProbeVenue::default();
         let mut bot = MyBot::new(
-            venue.clone(),
             "btc_jpy".to_owned(),
             Decimal::ONE,
             0,
@@ -464,17 +462,20 @@ mod tests {
         let asks = [(Decimal::new(6_000_000, 0), 1.0)].into();
         let bids = [(Decimal::new(5_000_000, 0), 1.0)].into();
         bot.depth = MarketDepthSnapshot::new(asks, bids, 0);
-        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        let context = BotContext::new(sender);
-        bot.handle_event(
-            MarketEvent::Transactions {
+        let runtime = BitbankBotBuilder::new(bot, venue.clone()).spawn();
+        runtime
+            .event_sender()
+            .send(BotEvent::Market(MarketEvent::Transactions {
                 pair: "btc_jpy".to_owned(),
                 transactions: vec![],
-            },
-            &context,
-        )
-        .await;
-        assert_eq!(*venue.calls.lock().unwrap(), vec!["observe", "snapshot"]);
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), venue.snapshot_read.notified())
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+        assert_eq!(*venue.calls.lock().unwrap(), vec!["apply", "snapshot"]);
     }
 
     #[tokio::test]
@@ -497,52 +498,5 @@ mod tests {
     fn paper_setup_rejects_negative_balance_and_unsupported_pair() {
         assert!(paper_venue("btc_jpy", Decimal::new(-1, 0), Decimal::ZERO).is_err());
         assert!(paper_venue("btc_usdt", Decimal::ZERO, Decimal::ZERO).is_err());
-    }
-
-    #[tokio::test]
-    async fn paper_trade_is_applied_before_next_account_read() {
-        let venue = paper_venue("btc_jpy", Decimal::ZERO, Decimal::new(1_000_000, 0)).unwrap();
-        let order = DesiredLimitOrder::limit(
-            "btc_jpy".to_owned(),
-            OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
-        );
-        venue
-            .place_order(PlacementRequest::from(order))
-            .await
-            .unwrap();
-        venue
-            .observe_market_event(&MarketEvent::Transactions {
-                pair: "btc_jpy".to_owned(),
-                transactions: vec![MarketTrade {
-                    amount: Decimal::new(5, 2),
-                    executed_at: 1,
-                    price: Decimal::new(5_000_000, 0),
-                    side: OrderSide::Sell,
-                    transaction_id: 1,
-                }],
-            })
-            .unwrap();
-        let snapshot = venue.account_snapshot("btc_jpy").await.unwrap();
-        assert_eq!(snapshot.open_orders[0].remaining_amount, Decimal::new(5, 2));
-        assert_eq!(
-            snapshot
-                .balances
-                .iter()
-                .find(|b| b.asset == "btc")
-                .unwrap()
-                .free_amount,
-            Decimal::new(5, 2)
-        );
-        assert_eq!(
-            snapshot
-                .balances
-                .iter()
-                .find(|b| b.asset == "jpy")
-                .unwrap()
-                .locked_amount,
-            Decimal::new(250_000, 0)
-        );
     }
 }

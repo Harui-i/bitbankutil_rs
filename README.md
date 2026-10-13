@@ -37,10 +37,51 @@
 
 ## bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
 
-`bitbank_bot.rs`で定義されている`BitbankBotBuilder`と`BotStrategy`を利用すると、
-WebSocketイベントを扱う際に状態を自前で受け渡す必要がなくなり、取引ロジックに
-集中できます。`BotContext::event_sender`を使えば、ログのリプレイや他取引所の
-情報などユーザー独自のデータソースも同じランタイムに流し込めます。
+`BitbankBotBuilder` と `BotStrategy` を利用すると、戦略は市場データに応じた判断と注文操作に集中できます。
+取引を行う場合は `BitbankBotBuilder::new(strategy, venue)` で取引先を一度だけ指定します。
+戦略は `ctx.venue()` 経由で残高取得・発注・取消を行い、取引先を自身の設定に保持する必要はありません。
+板表示など注文機能が不要な場合は `BitbankBotBuilder::market_data(strategy)` を使います。
+この構成での口座取得・注文操作は `TradingVenueError::Unavailable` を返します。
+
+戦略は `BotStrategy<V>` を実装し、関連型 `CustomEvent` に独自イベント型を指定します。
+独自イベントを使わない場合は `std::convert::Infallible` を指定します。
+`handle_event()` は `BotEvent::Market(MarketEvent)` または `BotEvent::Custom(CustomEvent)` を受け取ります。
+
+```rust,ignore
+impl<V: TradingVenue> BotStrategy<V> for MyBot {
+    type CustomEvent = std::convert::Infallible;
+
+    async fn handle_event(
+        &mut self,
+        event: BotEvent<Self::CustomEvent>,
+        ctx: &BotContext<Self::CustomEvent, V>,
+    ) {
+        if let BotEvent::Market(MarketEvent::Transactions { pair, .. }) = event {
+            let account = ctx.venue().account_snapshot(&pair).await;
+            // 更新済みの口座状態を使って判断する
+        }
+    }
+}
+
+let runtime = BitbankBotBuilder::new(strategy, venue)
+    .add_pair("btc_jpy")
+    .spawn();
+```
+
+市場イベントは、ランタイムが受信順に `TradingVenue::on_market_event()` へ反映してから戦略へ渡します。
+paperでは仮想約定・残高更新を先に行い、liveではこの通知自体は何もしません。
+戦略から市場イベント反映を手動で呼ぶ必要はありません。
+反映に失敗した場合はエラーを記録し、そのイベントの戦略実行をスキップします。
+独自イベントは取引先への反映を行わず、戦略へ渡します。
+
+`BotContext::event_sender()` とランタイムの `event_sender()` は `Sender<BotEvent<C>>` を返し、
+`ctx.emit(BotEvent::Custom(...))` などで独自イベントを送れます。
+市場イベントの手動送信には `BotEvent::Market(...)` を使います。
+`forward_bitbank_messages()` にも同じ送信者を渡せるため、ログ再生も同じ順序で処理されます。
+取引先のクローンは同じ口座・注文状態を共有する必要があります。
+
+旧APIからの移行では、`BitbankEvent` を `MarketEvent` と `BotEvent::Market` に置き換え、
+`BotStrategy::Event` を `CustomEvent` に変更します。`observe_market_event()` は削除しています。
 
 `examples/best_mm.rs`は非同期イベント駆動で、best価格に指値注文をし続けるbotのサンプルコードです。起動時に取引モードを明示します。
 
