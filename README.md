@@ -7,6 +7,8 @@
 # bitbankutil_rs
 `bitbankutil_rs`は、RustでbitbankのAPI処理を複数サポートしたライブラリクレートです。 `bitbankutil_rs`を使うことで、以下のようなことが簡単に実現できます。
 
+変更内容は [CHANGELOG.md](CHANGELOG.md)、0.1.7からの移行方法は [MIGRATION.md](MIGRATION.md) を参照してください。
+
 # Examples
 
 ## bitbankのPrivate APIを利用した処理(現在の残高の取得など)
@@ -17,7 +19,7 @@
     let bitbank_key = env::var("BITBANK_API_KEY").unwrap();
     let bitbank_secret = env::var("BITBANK_API_SECRET").unwrap();
 
-    let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None)
+    let bb_client = BitbankPrivateApiClient::new(bitbank_key, bitbank_secret, None);
     let assets = bb_client.get_assets().await;
     println!("{:?}", assets);
 ```
@@ -111,6 +113,13 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000
 # テスト
 
 通常の `cargo test` は、実際のbitbank APIを叩かない純粋関数・変換・バリデーションのテストだけを実行します。
+
+CIではサンプル内のテストも含め、通常設定と `strict-validation` 有効時の両方を実行します。ローカルでも同じ確認を行えます:
+
+```sh
+cargo test --locked --all-targets
+cargo test --locked --all-targets --features strict-validation
+```
 
 実際のPublic APIを叩くテストを実行する場合:
 
