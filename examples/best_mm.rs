@@ -127,7 +127,13 @@ impl MyBot {
             let jpy_free_amount = jpy_balance_snapshot.free_amount;
             let jpy_amount = jpy_free_amount + btc_locked_jpy_amount;
 
-            log::debug!("btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}", btc_free_amount, btc_locked_amount, jpy_free_amount, btc_locked_jpy_amount);
+            log::debug!(
+                "btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}",
+                btc_free_amount,
+                btc_locked_amount,
+                jpy_free_amount,
+                btc_locked_jpy_amount
+            );
             log::info!(
                 "{}_amount: {}, jpy_amount: {}",
                 self.bot_config.pair.clone(),
@@ -326,7 +332,9 @@ async fn main() {
         log::error!(
             "usage: cargo run --example best_mm -- --live PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT"
         );
-        log::error!("   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL");
+        log::error!(
+            "   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL"
+        );
         std::process::exit(2);
     }
 

@@ -5,7 +5,7 @@ use crate::bitbank_structs::{
     BitbankTransactionsData,
 };
 use crypto_botters::{
-    bitbank::BitbankOption, generic_api_client::websocket::WebSocketConfig, Client,
+    Client, bitbank::BitbankOption, generic_api_client::websocket::WebSocketConfig,
 };
 use tokio::sync::mpsc;
 

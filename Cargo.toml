@@ -1,7 +1,7 @@
 [package]
 name = "bitbankutil_rs"
-version = "0.1.8"
-edition = "2021"
+version = "0.1.9"
+edition = "2024"
 
 [features]
 # bitbankのAPIレスポンスをstructにする際に、使われていないフィールドを許容しないようにするfeature。

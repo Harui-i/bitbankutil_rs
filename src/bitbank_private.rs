@@ -4,8 +4,8 @@ use crate::bitbank_structs::{
     BitbankGetOrderResponse, BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
 };
 use crypto_botters::{
-    bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
     Client, GetOptions,
+    bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
 };
 use std::time::Instant;
 

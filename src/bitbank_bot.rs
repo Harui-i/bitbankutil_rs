@@ -94,10 +94,9 @@ impl<E: Send + 'static> BotHandle<E> {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.join_handle.take() {
-            handle.await
-        } else {
-            Ok(())
+        match self.join_handle.take() {
+            Some(handle) => handle.await,
+            _ => Ok(()),
         }
     }
 }
@@ -398,10 +397,9 @@ impl<E: Send + 'static> BitbankBotRuntime<E> {
         for handle in &self.feed_handles {
             handle.abort();
         }
-        if let Some(bot_handle) = self.bot_handle.take() {
-            bot_handle.shutdown().await
-        } else {
-            Ok(())
+        match self.bot_handle.take() {
+            Some(bot_handle) => bot_handle.shutdown().await,
+            _ => Ok(()),
         }
     }
 }

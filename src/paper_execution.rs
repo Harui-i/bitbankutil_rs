@@ -920,33 +920,39 @@ mod tests {
             .unwrap();
         engine.drain_events();
 
-        assert!(engine
-            .apply_market_event(&transactions(vec![trade(
-                OrderSide::Sell,
-                Decimal::new(1, 1),
-                Decimal::new(5_100_000, 0),
-                12,
-            )]))
-            .is_empty());
-        assert!(engine
-            .apply_market_event(&transactions(vec![trade(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(4_900_000, 0),
-                13,
-            )]))
-            .is_empty());
-        assert!(engine
-            .apply_market_event(&MarketEvent::Transactions {
-                pair: "eth_jpy".to_owned(),
-                transactions: vec![trade(
-                    OrderSide::Buy,
+        assert!(
+            engine
+                .apply_market_event(&transactions(vec![trade(
+                    OrderSide::Sell,
                     Decimal::new(1, 1),
                     Decimal::new(5_100_000, 0),
-                    14,
-                )],
-            })
-            .is_empty());
+                    12,
+                )]))
+                .is_empty()
+        );
+        assert!(
+            engine
+                .apply_market_event(&transactions(vec![trade(
+                    OrderSide::Buy,
+                    Decimal::new(1, 1),
+                    Decimal::new(4_900_000, 0),
+                    13,
+                )]))
+                .is_empty()
+        );
+        assert!(
+            engine
+                .apply_market_event(&MarketEvent::Transactions {
+                    pair: "eth_jpy".to_owned(),
+                    transactions: vec![trade(
+                        OrderSide::Buy,
+                        Decimal::new(1, 1),
+                        Decimal::new(5_100_000, 0),
+                        14,
+                    )],
+                })
+                .is_empty()
+        );
         assert_eq!(engine.open_orders().len(), 1);
     }
 
