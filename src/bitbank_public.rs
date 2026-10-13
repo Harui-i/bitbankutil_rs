@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use crypto_botters::{
-    bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
     Client,
+    bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
 };
 
 use crate::bitbank_structs::{
