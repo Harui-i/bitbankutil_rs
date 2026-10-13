@@ -142,6 +142,10 @@ bitbankutil_rs = {git = "https://github.com/Harui-i/bitbankutil_rs" }
 
 などと追加してください。
 
+## ライセンス
+
+本プロジェクトはMITまたはApache-2.0のいずれかを選択して利用できます。
+
 ## 連絡先
 
 Twitter: [@Harui_botter](https://twitter.com/Harui_botter)
