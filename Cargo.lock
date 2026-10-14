@@ -94,7 +94,7 @@ checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 name = "bitbankutil_rs"
 version = "0.1.9"
 dependencies = [
- "crypto-botters",
+ "crypto-botters-bitbank",
  "env_logger",
  "log",
  "rust_decimal",
@@ -254,9 +254,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "crypto-botters"
-version = "0.6.0"
-source = "git+https://github.com/Harui-i/crypto-botters.git?rev=2e8c1a8e400cb71dccda075f874da1592958b79f#2e8c1a8e400cb71dccda075f874da1592958b79f"
+name = "crypto-botters-bitbank"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "002f4e7b8622918685172ead7f5d89b58d48cf414acaf23cfcbf834c8f9319fc"
 dependencies = [
  "generic-api-client",
  "hex",
@@ -264,7 +265,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "sha2",
 ]
 
@@ -458,7 +458,8 @@ dependencies = [
 [[package]]
 name = "generic-api-client"
 version = "0.3.0"
-source = "git+https://github.com/Harui-i/crypto-botters.git?rev=2e8c1a8e400cb71dccda075f874da1592958b79f#2e8c1a8e400cb71dccda075f874da1592958b79f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ed3703bfe7fac3a91b39350c16864ab3d1f55ed0aa0340092db96a09c6a47d"
 dependencies = [
  "bytes",
  "futures-util",

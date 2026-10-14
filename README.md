@@ -134,13 +134,15 @@ BITBANKUTIL_RUN_PRIVATE_ORDER_TESTS=1 cargo test --features live-private-order-a
 
 ## 使い方
 
-`Cargo.toml`の`[dependencies]`の欄に
+`Cargo.toml`の`[dependencies]`に以下を追加してください。
 
-```
-bitbankutil_rs = {git = "https://github.com/Harui-i/bitbankutil_rs" }
+```toml
+[dependencies]
+bitbankutil_rs = "0.1.9"
 ```
 
-などと追加してください。
+API通信には、bitbank対応を追加した`crypto-botters`のforkである
+[`crypto-botters-bitbank`](https://crates.io/crates/crypto-botters-bitbank)を使用しています。
 
 ## ライセンス
 
