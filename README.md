@@ -105,7 +105,7 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000
 
 ## テスト
 
-通常の `cargo test` は、実際のbitbank APIを叩かない純粋関数・変換・バリデーションのテストだけを実行します。
+通常の `cargo test` は、変換・バリデーション・Paperの状態遷移・ローカルHTTPモックによる照会のテストを実行します。実際のbitbank APIへの通信や注文は行いません。
 
 CIではサンプル内のテストも含め、通常設定と `strict-validation` 有効時の両方を実行します。ローカルでも同じ確認を行えます:
 
@@ -138,7 +138,7 @@ BITBANKUTIL_RUN_PRIVATE_ORDER_TESTS=1 cargo test --features live-private-order-a
 
 ```toml
 [dependencies]
-bitbankutil_rs = "0.1.9"
+bitbankutil_rs = "0.1.10"
 ```
 
 API通信には、bitbank対応を追加した`crypto-botters`のforkである

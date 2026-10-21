@@ -6,6 +6,7 @@ use std::{
 use rust_decimal::Decimal;
 
 use crate::{
+    account_domain::{LiquidityRole, OrderSnapshot, OrderStatus, OwnTrade, TradeHistoryQuery},
     market_event::{MarketEvent, MarketTrade},
     order_domain::{BalanceSnapshot, DesiredLimitOrder, OpenOrder, OrderId, OrderSide, OrderType},
     trading_venue::{
@@ -128,6 +129,8 @@ pub struct PaperExecutionEngine {
     balances: BTreeMap<String, BalanceSnapshot>,
     open_orders: BTreeMap<OrderId, OpenOrder>,
     event_history: Vec<PaperEvent>,
+    order_history: BTreeMap<OrderId, OrderSnapshot>,
+    trade_history: Vec<OwnTrade>,
 }
 
 impl PaperExecutionEngine {
@@ -155,6 +158,8 @@ impl PaperExecutionEngine {
             balances,
             open_orders: BTreeMap::new(),
             event_history: Vec::new(),
+            order_history: BTreeMap::new(),
+            trade_history: Vec::new(),
         })
     }
 
@@ -407,6 +412,85 @@ impl PaperExecutionEngine {
     }
 
     fn record_event(&mut self, event: PaperEvent) {
+        // drain_events()とは独立した照会用履歴。完了・取消後も残す。
+        match &event {
+            PaperEvent::OrderAccepted { order_id, order } => {
+                self.order_history.insert(
+                    *order_id,
+                    OrderSnapshot {
+                        order_id: *order_id,
+                        pair: order.pair.clone(),
+                        side: order.side,
+                        order_type: OrderType::Limit,
+                        position_side: None,
+                        start_amount: Some(order.amount),
+                        remaining_amount: Some(order.amount),
+                        executed_amount: Decimal::ZERO,
+                        price: Some(order.price),
+                        average_price: Decimal::ZERO,
+                        post_only: order.post_only,
+                        user_cancelable: true,
+                        status: OrderStatus::Unfilled,
+                        ordered_at: None,
+                        expire_at: None,
+                        canceled_at: None,
+                        triggered_at: None,
+                        trigger_price: None,
+                    },
+                );
+            }
+            PaperEvent::OrderCancelled { order_id, .. } => {
+                if let Some(state) = self.order_history.get_mut(order_id) {
+                    state.status = if state.executed_amount > Decimal::ZERO {
+                        OrderStatus::CanceledPartiallyFilled
+                    } else {
+                        OrderStatus::CanceledUnfilled
+                    };
+                    state.user_cancelable = false;
+                }
+            }
+            PaperEvent::OrderFilled {
+                order_id,
+                order,
+                price,
+                amount,
+                fee_amount_quote,
+                trade,
+            } => {
+                if let Some(state) = self.order_history.get_mut(order_id) {
+                    let notional = state.average_price * state.executed_amount + price * amount;
+                    state.executed_amount += amount;
+                    state.average_price = notional / state.executed_amount;
+                    state.remaining_amount =
+                        state.remaining_amount.map(|remaining| remaining - amount);
+                    let complete = state.remaining_amount == Some(Decimal::ZERO);
+                    state.status = if complete {
+                        OrderStatus::FullyFilled
+                    } else {
+                        OrderStatus::PartiallyFilled
+                    };
+                    state.user_cancelable = !complete;
+                }
+                self.trade_history.push(OwnTrade {
+                    trade_id: self.trade_history.len() as u64 + 1,
+                    order_id: *order_id,
+                    pair: order.pair.clone(),
+                    side: order.side,
+                    order_type: OrderType::Limit,
+                    position_side: None,
+                    amount: *amount,
+                    price: *price,
+                    liquidity: LiquidityRole::Maker,
+                    fee_amount_base: Decimal::ZERO,
+                    fee_amount_quote: *fee_amount_quote,
+                    fee_occurred_amount_quote: *fee_amount_quote,
+                    profit_loss: None,
+                    interest: None,
+                    executed_at: trade.executed_at,
+                });
+            }
+            PaperEvent::OrderRejected { .. } => {}
+        }
         log::info!("paper event: {:?}", event);
         self.event_history.push(event);
     }
@@ -434,6 +518,39 @@ impl PaperTradingVenue {
 }
 
 impl TradingVenue for PaperTradingVenue {
+    fn trade_history(&self, query: TradeHistoryQuery) -> TradingVenueFuture<'_, Vec<OwnTrade>> {
+        Box::pin(async move {
+            query.validate().map_err(TradingVenueError::InvalidQuery)?;
+            let engine = self
+                .engine
+                .lock()
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            Ok(query.select(&engine.trade_history))
+        })
+    }
+
+    fn get_order<'a>(
+        &'a self,
+        pair: &'a str,
+        order_id: OrderId,
+    ) -> TradingVenueFuture<'a, OrderSnapshot> {
+        Box::pin(async move {
+            let engine = self
+                .engine
+                .lock()
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            engine
+                .order_history
+                .get(&order_id)
+                .filter(|o| o.pair == pair)
+                .cloned()
+                .ok_or_else(|| TradingVenueError::OrderNotFound {
+                    pair: pair.into(),
+                    order_id,
+                })
+        })
+    }
+
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
         Box::pin(async move {
             let engine = self

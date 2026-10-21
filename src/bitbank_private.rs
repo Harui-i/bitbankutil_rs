@@ -373,3 +373,7 @@ mod tests {
         validate_post_order_args("buy", "market", Some(false));
     }
 }
+
+#[cfg(test)]
+#[path = "bitbank_private_tests.rs"]
+mod request_tests;

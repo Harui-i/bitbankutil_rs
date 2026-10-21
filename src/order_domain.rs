@@ -215,6 +215,9 @@ pub enum ParseOrderError {
     UnknownSide(String),
     UnknownType(String),
     InvalidOrderId,
+    InvalidInteger(String),
+    UnknownStatus(String),
+    UnknownLiquidityRole(String),
     MissingRemainingAmount,
     InvalidDecimal(String),
 }

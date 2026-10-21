@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use crate::{
+    account_domain::{OrderSnapshot, OwnTrade, TradeHistoryQuery},
     bitbank_private::BitbankPrivateApiClient,
     bitbank_structs::{BitbankActiveOrdersResponse, BitbankAssetsData},
     market_event::MarketEvent,
@@ -29,6 +30,8 @@ pub enum TradingVenueError {
     Paper(PaperExecutionError),
     StatePoisoned,
     Unavailable,
+    InvalidQuery(&'static str),
+    OrderNotFound { pair: String, order_id: OrderId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +68,20 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
         pair: &'a str,
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()>;
+
+    /// 自分の約定履歴を1ページ取得する。未対応の実装では Unavailable。
+    fn trade_history(&self, _query: TradeHistoryQuery) -> TradingVenueFuture<'_, Vec<OwnTrade>> {
+        Box::pin(async { Err(TradingVenueError::Unavailable) })
+    }
+
+    /// 完了・取消済み注文も含めた単一注文の照会。
+    fn get_order<'a>(
+        &'a self,
+        _pair: &'a str,
+        _order_id: OrderId,
+    ) -> TradingVenueFuture<'a, OrderSnapshot> {
+        Box::pin(async { Err(TradingVenueError::Unavailable) })
+    }
 
     /// ボットが戦略へ市場データを渡す前に呼ぶ処理。
     /// paperでは市場データから仮想約定を判定し、注文と残高を更新する。
@@ -128,6 +145,53 @@ impl BitbankTradingVenue {
 }
 
 impl TradingVenue for BitbankTradingVenue {
+    fn trade_history(&self, query: TradeHistoryQuery) -> TradingVenueFuture<'_, Vec<OwnTrade>> {
+        Box::pin(async move {
+            query.validate().map_err(TradingVenueError::InvalidQuery)?;
+            let response = self
+                .api_client
+                .get_trade_history(
+                    query.pair.as_deref(),
+                    Some(i64::from(query.count.unwrap_or(1000))),
+                    query.order_id.map(|id| id.0 as i64),
+                    query.since,
+                    query.end,
+                    Some(query.order.as_str()),
+                )
+                .await
+                .map_err(TradingVenueError::Bitbank)?;
+            response
+                .trades
+                .iter()
+                .map(OwnTrade::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(TradingVenueError::Parse)
+        })
+    }
+
+    fn get_order<'a>(
+        &'a self,
+        pair: &'a str,
+        order_id: OrderId,
+    ) -> TradingVenueFuture<'a, OrderSnapshot> {
+        Box::pin(async move {
+            let response = self
+                .api_client
+                .get_order(pair, order_id.0)
+                .await
+                .map_err(|err| match err {
+                    Some(crypto_botters::bitbank::BitbankHandleError::OrderNotFound(_)) => {
+                        TradingVenueError::OrderNotFound {
+                            pair: pair.into(),
+                            order_id,
+                        }
+                    }
+                    other => TradingVenueError::Bitbank(other),
+                })?;
+            OrderSnapshot::try_from(&response).map_err(TradingVenueError::Parse)
+        })
+    }
+
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
         Box::pin(async move {
             let (orders, assets) = tokio::join!(
