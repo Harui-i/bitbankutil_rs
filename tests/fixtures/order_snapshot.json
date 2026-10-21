@@ -1,0 +1,17 @@
+{
+  "order_id": 7,
+  "pair": "btc_jpy",
+  "side": "buy",
+  "type": "stop_limit",
+  "start_amount": "0.2",
+  "remaining_amount": "0.1",
+  "executed_amount": "0.1",
+  "price": "5000000.00000001",
+  "average_price": "4999999.12345678",
+  "user_cancelable": false,
+  "ordered_at": 1710000000000,
+  "canceled_at": 1710000000100,
+  "triggered_at": 1710000000050,
+  "trigger_price": "4999990",
+  "status": "CANCELED_PARTIALLY_FILLED"
+}

@@ -1,0 +1,14 @@
+{
+  "trade_id": 11,
+  "order_id": 7,
+  "pair": "btc_jpy",
+  "side": "buy",
+  "type": "limit",
+  "amount": "0.1",
+  "price": "4999999.12345678",
+  "maker_taker": "maker",
+  "fee_amount_base": "0",
+  "fee_amount_quote": "-99.9999824691356",
+  "fee_occurred_amount_quote": "-99.9999824691356",
+  "executed_at": 1710000000050
+}

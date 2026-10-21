@@ -293,6 +293,10 @@ pub struct BitbankGetOrderResponse {
     pub expire_at: Option<Number>,
     /// トリガー価格。
     pub trigger_price: Option<String>,
+    /// キャンセル時刻（Unixミリ秒）。
+    pub canceled_at: Option<Number>,
+    /// トリガー時刻（Unixミリ秒）。
+    pub triggered_at: Option<Number>,
     /// ステータス: `INACTIVE`、`UNFILLED`、`PARTIALLY_FILLED`、`FULLY_FILLED`、`CANCELED_UNFILLED`、`CANCELED_PARTIALLY_FILLED`。
     pub status: String,
 }
