@@ -36,16 +36,16 @@
 
 ### bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
 
-取引を行うボットは [`examples/best_mm.rs`](examples/best_mm.rs)、
+取引を行うbotは [`examples/best_mm.rs`](examples/best_mm.rs)、
 取引せず板情報を表示するプログラムは [`examples/board_viewer.rs`](examples/board_viewer.rs) を参照してください。
 
-`best_mm` は最良価格に指値注文を出し続けるサンプルです。起動時に実取引か模擬取引（paper）を指定できます。
+`best_mm` は最良価格に指値注文を出し続けるサンプルです。起動時にlive tradingかpaper trading（paper）を指定できます。
 
 ```sh
-# 実取引（BITBANK_API_KEY / BITBANK_API_SECRET が必要）
+# live trading（BITBANK_API_KEY / BITBANK_API_SECRET が必要）
 cargo run --example best_mm -- --live mona_jpy 0.001 8000 0.001 0.002
 
-# 模擬取引（APIキー不要。公開WebSocketのデータを使い、注文・残高はメモリ上で管理）
+# paper trading（APIキー不要。公開WebSocketのデータを使い、注文・残高はメモリ上で管理）
 cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000
 ```
 

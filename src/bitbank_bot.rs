@@ -25,7 +25,7 @@ pub enum BotEvent<C = Infallible> {
 }
 
 /// 戦略が残高取得・発注・取消を行い、ボットへイベントを送るための窓口。
-/// `venue()` で実取引または模擬取引の注文・口座操作を利用できる。
+/// `venue()` でlive tradingまたはpaper tradingの注文・口座操作を利用できる。
 /// クローンしても別口座は作らず、同じ口座と注文を操作する。
 pub struct BotContext<C = Infallible, V = NoTradingVenue> {
     event_tx: mpsc::Sender<BotEvent<C>>,

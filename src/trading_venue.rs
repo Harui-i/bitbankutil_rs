@@ -71,7 +71,7 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
 
     /// ボットが戦略へ市場データを渡す前に呼ぶ処理。
     /// paperでは市場データから仮想約定を判定し、注文と残高を更新する。
-    /// 実取引では約定・残高を取引所が管理するため、ここでは何もしない。
+    /// live tradingでは約定・残高を取引所が管理するため、ここでは何もしない。
     fn on_market_event(&self, _event: &MarketEvent) -> Result<(), TradingVenueError> {
         Ok(())
     }

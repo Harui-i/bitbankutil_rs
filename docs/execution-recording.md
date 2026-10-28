@@ -1,11 +1,11 @@
 # 実行記録
 
-`execution_recording` は、ボットが行った取引操作とその結果を保存し、実行後に調べるためのモジュールです。
+`execution_recording` は、botが行った取引操作とその結果を保存し、実行後に調べるためのモジュールです。
 たとえば「発注が失敗した理由を調べたい」「APIを何回呼んだか数えたい」
-「模擬取引で注文や残高がどう変わったか確認したい」ときに使います。
+「paper tradingで注文や残高がどう変わったか確認したい」ときに使います。
 
-実取引と模擬取引のどちらでも利用できます。記録には、口座情報の取得・発注・取消の要求と結果、
-HTTP通信の結果、模擬取引の約定や残高の変化などが含まれます。
+live tradingとpaper tradingのどちらでも利用できます。記録には、口座情報の取得・発注・取消の要求と結果、
+HTTP通信の結果、paper tradingの約定や残高の変化などが含まれます。
 保存したデータをプログラムから読み出すことで、操作の履歴を追跡したり、成功・失敗の件数を集計したりできます。
 
 ## 記録を始める
@@ -16,7 +16,7 @@ HTTP通信の結果、模擬取引の約定や残高の変化などが含まれ�
 以後、そのオブジェクトを通じて行った操作が記録されます。
 `with_recorder` を呼ばなければ、記録用のファイルは作られず、通常どおり取引操作だけを行います。
 
-次の例は、実取引の口座情報を取得し、その要求と結果を `execution.jsonl` に保存します。
+次の例は、live tradingの口座情報を取得し、その要求と結果を `execution.jsonl` に保存します。
 `JsonlSink` は、1行に1件のJSONを書き出す保存先です。
 
 ```rust,no_run
@@ -59,9 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 この例では、取引操作を記録する `venue` と、最後に `finish()` を呼ぶコードが、
 1つのレコーダーを共有しています。
 
-模擬取引では、作成した `PaperTradingVenue` に `with_recorder(recorder.clone())` を呼びます。
+paper tradingでは、作成した `PaperTradingVenue` に `with_recorder(recorder.clone())` を呼びます。
 この時点の残高・未約定注文・約定モデルの設定も保存されるため、取引操作を始める前に設定してください。
-実取引では、`BitbankTradingVenue::with_recorder` が内部のAPIクライアントにもレコーダーを設定するので、
+live tradingでは、`BitbankTradingVenue::with_recorder` が内部のAPIクライアントにもレコーダーを設定するので、
 HTTP通信を記録するために別途設定する必要はありません。
 
 `TradingVenue` を使わずにAPIクライアントを直接呼ぶ場合は、
@@ -72,7 +72,7 @@ HTTP通信を記録できます。
 
 `read_records(BufReader::new(File::open(path)?))` で、JSONLファイルを
 `ExecutionRecord` の一覧として読み出せます。
-模擬取引を実行し、記録の保存から読み出し・集計まで行うサンプルも用意しています。
+paper tradingを実行し、記録の保存から読み出し・集計まで行うサンプルも用意しています。
 実際のAPIには接続しません。
 
 ```sh
@@ -97,15 +97,15 @@ cargo run --example record_execution -- /tmp/execution.jsonl
   `operation_id` で対応付けます。終了側の `operation` と `success` から操作別の件数を集計できます。
   開始だけが残った操作は、結果不明として扱います。
 - `http_started` / `http_finished`: HTTPリクエストの各試行です。
-  `request_id` と `attempt` で対応付けます。たとえば、実取引の口座取得1操作には、
+  `request_id` と `attempt` で対応付けます。たとえば、live tradingの口座取得1操作には、
   注文一覧と残高を取得する2回のHTTP通信が伴います。
   終了側の `sent` がfalseなら、送信前にリクエストの構築に失敗しています。
   HTTPステータスは応答ハンドラーまで届いた場合のみ保存できます。
   エラーについては失敗した段階と取引所のエラーコードを保存し、エラーの全文は保存しません。
-- `paper_initial_state` / `paper_event`: 模擬取引の記録開始時の設定・口座状態と、
+- `paper_initial_state` / `paper_event`: paper tradingの記録開始時の設定・口座状態と、
   注文の受理・拒否・取消・約定、その直後の残高・未約定注文です。
   この保存処理は、模擬エンジンの `drain_events` で取得できるイベント履歴を消費しません。
-- `market_event`: ボットが受け取った市場イベントの参照情報です。
+- `market_event`: botが受け取った市場イベントの参照情報です。
   そのイベントを処理する戦略が直接行った操作に関連付けます。生の板データは保存しません。
   模擬約定の記録には、元になった取引のIDと約定時刻も含まれます。
 
@@ -129,7 +129,7 @@ cargo run --example record_execution -- /tmp/execution.jsonl
 記録順の採番と書き込みは、レコーダーが共有するロックで直列化します。
 別の保存先を使いたい場合は、`EventSink` を実装して `ExecutionRecorder::new` に渡してください。
 
-実行を終えるときは、ボットを停止して処理中の操作をすべて待ち、
+実行を終えるときは、botを停止して処理中の操作をすべて待ち、
 最後に `finish()` を1回呼んでください。終了イベントを記録し、バッファの内容を書き出します。
 実行中にバッファの内容を書き出したい場合は、`flush()` を呼べます。
 どちらも、電源断に対する永続性を保証するものではありません。
@@ -143,9 +143,9 @@ cargo run --example record_execution -- /tmp/execution.jsonl
 不確かになるため、`persistence_uncertain` がtrueになります。
 ファイルの末尾に壊れた行が残っていると、`read_records` は読み出しエラーを返します。
 
-## 実取引で記録できる範囲
+## live tradingで記録できる範囲
 
-実取引では、通常の取引操作に伴うAPI応答から取得できた情報を保存します。
+live tradingでは、通常の取引操作に伴うAPI応答から取得できた情報を保存します。
 記録するためだけに追加の通信を行うことはありません。
 口座情報は、それぞれのHTTP応答を取得した時点で観測した値です。
 注文一覧と残高を同時に確定した状態や、完全な約定履歴を表すものではありません。
