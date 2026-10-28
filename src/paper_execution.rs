@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -120,6 +120,9 @@ pub enum PaperExecutionError {
     UnsupportedPair(String),
 }
 
+/// メモリ上に保持する最近のpaperイベントの最大件数。
+pub const PAPER_EVENT_HISTORY_LIMIT: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub struct PaperExecutionEngine {
     config: PaperExecutionConfig,
@@ -127,7 +130,8 @@ pub struct PaperExecutionEngine {
     quote_asset: String,
     balances: BTreeMap<String, BalanceSnapshot>,
     open_orders: BTreeMap<OrderId, OpenOrder>,
-    event_history: Vec<PaperEvent>,
+    event_history: VecDeque<PaperEvent>,
+    discarded_events: u64,
     recorder: Option<crate::execution_recording::ExecutionRecorder>,
 }
 
@@ -156,7 +160,8 @@ impl PaperExecutionEngine {
             quote_asset,
             balances,
             open_orders: BTreeMap::new(),
-            event_history: Vec::new(),
+            event_history: VecDeque::new(),
+            discarded_events: 0,
             recorder,
         };
         if let Some(recorder) = &engine.recorder {
@@ -295,8 +300,14 @@ impl PaperExecutionEngine {
         self.balances.values().cloned().collect()
     }
 
+    /// 未取得のイベントを古い順に返す。上限を超えたイベントは古いものから破棄される。
     pub fn drain_events(&mut self) -> Vec<PaperEvent> {
-        std::mem::take(&mut self.event_history)
+        self.event_history.drain(..).collect()
+    }
+
+    /// 履歴の上限を超えて破棄されたイベントの累計件数。
+    pub fn discarded_event_count(&self) -> u64 {
+        self.discarded_events
     }
 
     pub fn config(&self) -> &PaperExecutionConfig {
@@ -424,7 +435,11 @@ impl PaperExecutionEngine {
         if let Some(r) = &self.recorder {
             r.record("paper_event",serde_json::json!({"event":event,"balances":self.balances(),"open_orders":self.open_orders()}));
         }
-        self.event_history.push(event);
+        if self.event_history.len() == PAPER_EVENT_HISTORY_LIMIT {
+            self.event_history.pop_front();
+            self.discarded_events = self.discarded_events.saturating_add(1);
+        }
+        self.event_history.push_back(event);
     }
 }
 

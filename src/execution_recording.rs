@@ -477,6 +477,80 @@ pub(crate) mod tests {
             );
         }
     }
+    #[test]
+    fn paper_history_is_bounded_without_losing_persistent_records() {
+        use crate::{
+            order_domain::{DesiredLimitOrder, OrderSide},
+            paper_execution::PAPER_EVENT_HISTORY_LIMIT,
+        };
+        let memory = Memory::default();
+        let recorder = ExecutionRecorder::new("bounded", json!({}), JsonlSink(memory.clone()));
+        for recording in [false, true] {
+            let mut engine = if recording {
+                recorded_paper(recorder.clone())
+            } else {
+                use crate::{order_domain::BalanceSnapshot, paper_execution::*};
+                PaperExecutionEngine::new(
+                    PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+                    vec![
+                        BalanceSnapshot {
+                            asset: "btc".into(),
+                            free_amount: 0.into(),
+                            locked_amount: 0.into(),
+                            onhand_amount: 0.into(),
+                        },
+                        BalanceSnapshot {
+                            asset: "jpy".into(),
+                            free_amount: 1000.into(),
+                            locked_amount: 0.into(),
+                            onhand_amount: 1000.into(),
+                        },
+                    ],
+                    None,
+                )
+                .unwrap()
+            };
+            for index in 0..(PAPER_EVENT_HISTORY_LIMIT + 50) {
+                // Rejections do not change the account, making a long run deterministic.
+                assert!(
+                    engine
+                        .place_order(DesiredLimitOrder::limit(
+                            "btc_jpy".into(),
+                            OrderSide::Buy,
+                            1.into(),
+                            (10000 + index as i64).into()
+                        ))
+                        .is_err()
+                );
+            }
+            assert_eq!(engine.discarded_event_count(), 50);
+            let history = engine.drain_events();
+            assert_eq!(history.len(), PAPER_EVENT_HISTORY_LIMIT);
+            match (&history[0], history.last().unwrap()) {
+                (
+                    crate::paper_execution::PaperEvent::OrderRejected { order: first, .. },
+                    crate::paper_execution::PaperEvent::OrderRejected { order: last, .. },
+                ) => {
+                    assert_eq!(first.price, 10050.into());
+                    assert_eq!(
+                        last.price,
+                        (10000 + PAPER_EVENT_HISTORY_LIMIT as i64 + 49).into()
+                    );
+                }
+                _ => panic!("expected rejected orders"),
+            }
+            assert!(engine.drain_events().is_empty());
+            assert_eq!(engine.discarded_event_count(), 50);
+        }
+        recorder.finish().unwrap();
+        let bytes = memory.0.lock().unwrap().clone();
+        let records = read_records(&bytes[..]).unwrap();
+        assert_eq!(
+            records.iter().filter(|r| r.kind == "paper_event").count(),
+            PAPER_EVENT_HISTORY_LIMIT + 50
+        );
+    }
+
     struct Broken;
     impl EventSink for Broken {
         fn append(&mut self, _: &ExecutionRecord) -> io::Result<()> {

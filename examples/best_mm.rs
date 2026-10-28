@@ -390,7 +390,7 @@ async fn main() {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if let Some(engine) = &paper_engine {
-            // 各イベントは記録時にログ出力済み。履歴を破棄して長時間運用での蓄積を防ぐ。
+            // 各イベントは記録時にログ出力済み。取得済みの履歴を定期的に破棄する。
             engine
                 .lock()
                 .expect("paper engine lock poisoned")
