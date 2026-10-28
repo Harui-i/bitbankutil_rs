@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperExecutionConfig {
     pub pair: String,
     pub fee_schedule: PaperFeeSchedule,
@@ -32,7 +32,7 @@ impl PaperExecutionConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperFeeSchedule {
     pub maker_fee_rate_quote: Decimal,
     pub taker_fee_rate_quote: Decimal,
@@ -59,7 +59,7 @@ impl PaperFeeSchedule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PaperEvent {
     OrderAccepted {
         order_id: OrderId,
@@ -83,7 +83,7 @@ pub enum PaperEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaperRejectReason {
     PairMismatch {
         expected: String,
@@ -101,7 +101,7 @@ pub enum PaperRejectReason {
     UnsupportedPair(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PaperExecutionError {
     PairMismatch {
         expected: String,
@@ -120,6 +120,9 @@ pub enum PaperExecutionError {
     UnsupportedPair(String),
 }
 
+/// メモリ上に保持する最近のpaperイベントの最大件数。
+pub const PAPER_EVENT_HISTORY_LIMIT: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub struct PaperExecutionEngine {
     config: PaperExecutionConfig,
@@ -127,13 +130,16 @@ pub struct PaperExecutionEngine {
     quote_asset: String,
     balances: BTreeMap<String, BalanceSnapshot>,
     open_orders: BTreeMap<OrderId, OpenOrder>,
-    event_history: Vec<PaperEvent>,
+    event_history: VecDeque<PaperEvent>,
+    discarded_events: u64,
+    recorder: Option<crate::execution_recording::ExecutionRecorder>,
 }
 
 impl PaperExecutionEngine {
     pub fn new(
         config: PaperExecutionConfig,
         balances: Vec<BalanceSnapshot>,
+        recorder: Option<crate::execution_recording::ExecutionRecorder>,
     ) -> Result<Self, PaperExecutionError> {
         let (base_asset, quote_asset) = parse_jpy_pair(&config.pair)?;
         let balances = balances
@@ -148,14 +154,26 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::MissingBalance(quote_asset));
         }
 
-        Ok(Self {
+        let engine = Self {
             config,
             base_asset,
             quote_asset,
             balances,
             open_orders: BTreeMap::new(),
-            event_history: Vec::new(),
-        })
+            event_history: VecDeque::new(),
+            discarded_events: 0,
+            recorder,
+        };
+        if let Some(recorder) = &engine.recorder {
+            recorder.record(
+                "paper_initial_state",
+                serde_json::json!({
+                    "config": engine.config(), "model": "limit_price_trade_volume_v1",
+                    "balances": engine.balances(), "open_orders": engine.open_orders()
+                }),
+            );
+        }
+        Ok(engine)
     }
 
     pub fn place_order(
@@ -282,8 +300,14 @@ impl PaperExecutionEngine {
         self.balances.values().cloned().collect()
     }
 
+    /// 未取得のイベントを古い順に返す。上限を超えたイベントは古いものから破棄される。
     pub fn drain_events(&mut self) -> Vec<PaperEvent> {
-        std::mem::take(&mut self.event_history)
+        self.event_history.drain(..).collect()
+    }
+
+    /// 履歴の上限を超えて破棄されたイベントの累計件数。
+    pub fn discarded_event_count(&self) -> u64 {
+        self.discarded_events
     }
 
     pub fn config(&self) -> &PaperExecutionConfig {
@@ -408,7 +432,14 @@ impl PaperExecutionEngine {
 
     fn record_event(&mut self, event: PaperEvent) {
         log::info!("paper event: {:?}", event);
-        self.event_history.push(event);
+        if let Some(r) = &self.recorder {
+            r.record("paper_event",serde_json::json!({"event":event,"balances":self.balances(),"open_orders":self.open_orders()}));
+        }
+        if self.event_history.len() == PAPER_EVENT_HISTORY_LIMIT {
+            self.event_history.pop_front();
+            self.discarded_events = self.discarded_events.saturating_add(1);
+        }
+        self.event_history.push_back(event);
     }
 }
 
@@ -434,34 +465,60 @@ impl PaperTradingVenue {
 }
 
 impl TradingVenue for PaperTradingVenue {
+    fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
+        self.engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recorder
+            .clone()
+    }
+
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
         Box::pin(async move {
-            let engine = self
-                .engine
-                .lock()
-                .map_err(|_| TradingVenueError::StatePoisoned)?;
-            if pair != engine.config().pair {
-                return Err(TradingVenueError::Paper(
-                    PaperExecutionError::PairMismatch {
-                        expected: engine.config().pair.clone(),
-                        actual: pair.to_owned(),
-                    },
-                ));
-            }
-            Ok(AccountSnapshot {
-                open_orders: engine.open_orders(),
-                balances: engine.balances(),
-            })
+            let recorder = self.recorder();
+            crate::execution_recording::operation(
+                recorder.as_ref(),
+                "account_snapshot",
+                serde_json::json!({"pair":pair}),
+                async move {
+                    let engine = self
+                        .engine
+                        .lock()
+                        .map_err(|_| TradingVenueError::StatePoisoned)?;
+                    if pair != engine.config().pair {
+                        return Err(TradingVenueError::Paper(
+                            PaperExecutionError::PairMismatch {
+                                expected: engine.config().pair.clone(),
+                                actual: pair.to_owned(),
+                            },
+                        ));
+                    }
+                    Ok(AccountSnapshot {
+                        open_orders: engine.open_orders(),
+                        balances: engine.balances(),
+                    })
+                },
+            )
+            .await
         })
     }
 
     fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
         Box::pin(async move {
-            self.engine
-                .lock()
-                .map_err(|_| TradingVenueError::StatePoisoned)?
-                .place_order(request.order)
-                .map_err(TradingVenueError::Paper)
+            let recorder = self.recorder();
+            crate::execution_recording::operation(
+                recorder.as_ref(),
+                "place_order",
+                serde_json::json!(&request),
+                async move {
+                    self.engine
+                        .lock()
+                        .map_err(|_| TradingVenueError::StatePoisoned)?
+                        .place_order(request.order)
+                        .map_err(TradingVenueError::Paper)
+                },
+            )
+            .await
         })
     }
 
@@ -471,11 +528,20 @@ impl TradingVenue for PaperTradingVenue {
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()> {
         Box::pin(async move {
-            self.engine
-                .lock()
-                .map_err(|_| TradingVenueError::StatePoisoned)?
-                .cancel_orders(pair, order_ids);
-            Ok(())
+            let recorder = self.recorder();
+            crate::execution_recording::operation(
+                recorder.as_ref(),
+                "cancel_orders",
+                serde_json::json!({"pair":pair,"order_ids":order_ids}),
+                async move {
+                    self.engine
+                        .lock()
+                        .map_err(|_| TradingVenueError::StatePoisoned)?
+                        .cancel_orders(pair, order_ids);
+                    Ok(())
+                },
+            )
+            .await
         })
     }
 
@@ -598,6 +664,7 @@ mod tests {
         PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
             vec![balance("btc", btc_free), balance("jpy", jpy_free)],
+            None,
         )
         .unwrap()
     }
@@ -876,6 +943,7 @@ mod tests {
                 balance("btc", Decimal::ZERO),
                 balance("jpy", Decimal::new(1_000_000, 0)),
             ],
+            None,
         )
         .unwrap();
         engine
@@ -964,6 +1032,7 @@ mod tests {
                 balance("eth", Decimal::new(1, 0)),
                 balance("jpy", Decimal::ZERO),
             ],
+            None,
         )
         .unwrap();
         engine

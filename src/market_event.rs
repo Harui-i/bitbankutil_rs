@@ -35,7 +35,7 @@ impl From<BitbankTickerResponse> for MarketTicker {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MarketTrade {
     pub amount: Decimal,
     pub executed_at: i64,

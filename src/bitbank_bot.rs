@@ -25,7 +25,7 @@ pub enum BotEvent<C = Infallible> {
 }
 
 /// 戦略が残高取得・発注・取消を行い、ボットへイベントを送るための窓口。
-/// `venue()` で実取引または模擬取引の注文・口座操作を利用できる。
+/// `venue()` でlive tradingまたはpaper tradingの注文・口座操作を利用できる。
 /// クローンしても別口座は作らず、同じ口座と注文を操作する。
 pub struct BotContext<C = Infallible, V = NoTradingVenue> {
     event_tx: mpsc::Sender<BotEvent<C>>,
@@ -131,13 +131,22 @@ where
                 }
                 maybe_event = event_rx.recv() => {
                     let Some(event) = maybe_event else { break; };
+                    let recorder = context.venue().recorder();
+                    let mut recording_context = crate::execution_recording::RecordingContext::default();
+                    if let (Some(r), BotEvent::Market(market)) = (&recorder, &event) {
+                        let id = r.next_id();
+                        recording_context.market_event_id = Some(id);
+                        r.record("market_event", serde_json::json!({"id":id,"type":match market {MarketEvent::Ticker{..}=>"ticker",MarketEvent::Transactions{..}=>"transactions",MarketEvent::DepthUpdated{..}=>"depth",MarketEvent::CircuitBreakInfo{..}=>"circuit_break_info"}}));
+                    }
+                    crate::execution_recording::scope(recording_context, async {
                     if let BotEvent::Market(market_event) = &event {
                         if let Err(err) = context.venue().on_market_event(market_event) {
                             error!("market event processing failed: {:?}", err);
-                            continue;
+                            return;
                         }
                     }
                     strategy.handle_event(event, &context).await;
+                    }).await;
                 }
             }
         }
@@ -676,6 +685,7 @@ mod tests {
                     onhand_amount: Decimal::new(1000, 0),
                 },
             ],
+            None,
         )
         .unwrap();
         let venue = PaperTradingVenue::new(engine);
