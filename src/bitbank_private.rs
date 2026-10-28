@@ -478,9 +478,8 @@ mod recording_tests {
     }
     #[tokio::test]
     async fn snapshot_is_one_operation_two_http_calls() {
-        // Same response supports both concurrent endpoint requests.
+        // 同じ応答を並行する両方のエンドポイント要求に返す。
         let body = r#"{"success":1,"data":{"orders":[],"assets":[]}}"#;
-        // strict-validation requires endpoint-specific fields, so select by request path below instead.
         let (c, m, r, server) = client(vec![Some((200, body)); 2], 1);
         let venue = BitbankTradingVenue::new(c).with_recorder(r.clone());
         let result = venue.account_snapshot("btc_jpy").await;

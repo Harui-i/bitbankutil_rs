@@ -370,7 +370,7 @@ pub(crate) mod tests {
             },
             async {
                 let account = venue.account_snapshot("btc_jpy").await.unwrap();
-                // Budget forces one placement before cancellation and another after it.
+                // 資金の制約により、取消の前後に1件ずつ発注する。
                 place_wanna_orders_concurrent(
                     vec![order(90.into()), order(80.into())],
                     account.open_orders,
@@ -515,7 +515,7 @@ pub(crate) mod tests {
                 .unwrap()
             };
             for index in 0..(PAPER_EVENT_HISTORY_LIMIT + 50) {
-                // Rejections do not change the account, making a long run deterministic.
+                // 注文拒否は口座を変更しないため、長時間の実行でも結果が決まる。
                 assert!(
                     engine
                         .place_order(DesiredLimitOrder::limit(

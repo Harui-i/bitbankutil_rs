@@ -1,4 +1,6 @@
-# オフライン戦略実行
+# オフライン戦略実行とbacktest
+
+過去の市場データを使ったbacktestでは、逐次ランナーと市場データの再生機能を組み合わせます。
 
 `BotRunner::new(strategy, venue)` は通信を起動しない逐次ランナーです。
 `process(time_ms, input_id, event).await` の完了時には、口座更新、戦略、

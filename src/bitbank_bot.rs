@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 
 /// ボットが受け取る市場データ、またはユーザー定義のイベント。
 /// 市場データはまず `TradingVenue::on_market_event()` に渡し、その後で戦略に渡す。
-/// paperでは、この順序により戦略が仮想約定後の注文・残高を参照できる。
+/// paper tradingでは、この順序により戦略がシミュレーションした約定後の注文・残高を参照できる。
 #[derive(Debug, Clone, PartialEq)]
 pub enum BotEvent<C = Infallible> {
     Market(MarketEvent),
@@ -76,7 +76,7 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
 }
 
 /// 市場データなどを受け取り、発注や取消を判断する処理。
-/// paperの仮想約定・残高更新は、ボットが `handle_event()` を呼ぶ前に行う。
+/// paper tradingの約定判定・残高更新は、ボットが `handle_event()` を呼ぶ前に行う。
 /// 戦略内で `TradingVenue::on_market_event()` を呼ぶ必要はない。
 /// ユーザー定義のイベントを使わない場合はCustomEventにInfallibleを指定する。
 pub trait BotStrategy<V: TradingVenue = NoTradingVenue>: Send + 'static {
@@ -918,7 +918,7 @@ mod tests {
     }
 }
 
-/// Input identity from a capture session.
+/// 記録セッション内の入力を識別するセッションIDとsequence。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InputId {
     pub session_id: String,
@@ -933,7 +933,9 @@ pub enum BotRunError<E> {
     DerivedLimit,
 }
 
-/// Sequential execution shared by network and offline inputs.
+/// ネットワーク入力とオフライン入力を逐次処理するランナー。
+/// 直接入力では `process` に指定した時刻で市場イベント、戦略、派生イベントを順に処理する。
+/// 詳しい実行手順は `docs/offline-replay.md` を参照。
 pub struct BotRunner<S: BotStrategy<V>, V: TradingVenue> {
     strategy: S,
     venue: V,

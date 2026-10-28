@@ -499,7 +499,7 @@ async fn custom_input_cannot_bypass_capture_validation() {
         let report = custom_replay(records.into_iter().map(|r| (0, r)).collect()).await;
         assert!(report.error.is_some(), "case {index}: {report:?}");
     }
-    // Rejection occurs before the invalid message reaches the user adapter.
+    // 不正なメッセージがユーザーのアダプターに届く前に拒否される。
     let mut invalid = next.clone();
     invalid.format_version = 999;
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);

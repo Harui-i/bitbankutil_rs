@@ -216,9 +216,8 @@ impl PaperExecutionEngine {
         let order_id = self.config.next_order_id;
         self.config.next_order_id = OrderId(self.config.next_order_id.0 + 1);
 
-        // Paper execution currently models every accepted limit order as resting
-        // maker liquidity. Non-post-only orders are intentionally stored here
-        // too, but crossing/taker execution and taker fees are not simulated.
+        // 受理した指値注文はすべて板に残るmaker注文として扱う。
+        // post-onlyでない注文も保持するが、板を横切るtaker約定とtaker手数料は再現しない。
         self.open_orders.insert(
             order_id,
             OpenOrder {
