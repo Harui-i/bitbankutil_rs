@@ -1,4 +1,4 @@
-//! cargo run --example offline_replay -- /tmp/replay.jsonl
+//! backtestのサンプル: cargo run --example offline_replay -- /tmp/replay.jsonl
 use bitbankutil_rs::{
     bitbank_bot::*, depth::Depth, execution_recording::*, market_event::MarketEvent,
     order_domain::*, paper_execution::*, replay::*, trading_venue::TradingVenue,

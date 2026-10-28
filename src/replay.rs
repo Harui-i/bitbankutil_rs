@@ -1,4 +1,5 @@
-//! Streaming market-data-v1 reader and deterministic offline execution.
+//! 市場データv1の逐次読み込みと、backtestなどの決定的なオフライン実行。
+//! 入力形式と実行手順は `docs/offline-replay.md` を参照。
 use crate::bitbank_bot::{
     BitbankInboundMessage, BitbankMarketEventConverter, BotEvent, BotRunner, BotStrategy, InputId,
 };
@@ -50,7 +51,7 @@ pub struct SourceSpec {
     pub stream: String,
     pub files: Vec<String>,
 }
-/// Session and connection validation shared by file and caller-supplied inputs.
+// ファイル入力と呼び出し元が渡す入力に共通するセッション・接続の検証。
 #[derive(Default)]
 struct SourceValidation {
     identity: Option<(String, String, String)>,
@@ -196,12 +197,15 @@ impl Source {
 fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
-/// Keeps one pending record per source; file boundaries do not reset state.
+/// manifestで指定した各sourceからレコードを逐次読み込み、受信時刻順にマージする。
+/// 各sourceで保持する未処理レコードは1件で、ファイル境界でも状態を維持する。
 pub struct ReplayInput {
     sources: Vec<Source>,
     failed: bool,
 }
 impl ReplayInput {
+    /// manifestを開く。sourceのファイルパスはmanifestのディレクトリを基準に解決する。
+    /// manifestを開けない場合や形式が不正な場合はエラーを返す。レコードは反復時に読み込み、検証する。
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let manifest: Manifest =
@@ -269,7 +273,8 @@ impl Iterator for ReplayInput {
         Some(Ok((index, self.sources[index].head.take().unwrap())))
     }
 }
-/// Decode the complete callback JSON without losing the pair in the room name.
+/// BitbankのコールバックJSONを通貨ペアとメッセージに変換する。
+/// メッセージ以外や未知のチャネルは `Ok(None)`、必要なフィールドや既知チャネルのデータが不正ならエラーを返す。
 pub fn decode_bitbank(raw: &Value) -> io::Result<Option<(String, BitbankInboundMessage)>> {
     if raw.get(0).and_then(Value::as_str) != Some("message") {
         return Ok(None);
@@ -394,7 +399,11 @@ impl ReplayAdapter {
         }
     }
 }
-/// Stop normally only at EOF. Disconnects stop evaluation unless recovery is explicit.
+/// 市場データを検証し、受信時刻に従って戦略を逐次実行する。
+/// `input` は `(受信時刻、source番号、sequence)` 順に渡す。`custom` はBitbank以外のメッセージを変換する。
+/// 切断時は `recovery` がfalseなら停止し、trueなら欠損を記録して継続する。
+/// `cancel` は入力の境界で確認する。入力や戦略のエラー、欠損、中断は戻り値に記録する。
+/// 詳しい入力形式と完了条件は `docs/offline-replay.md` を参照。
 pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
     runner: &mut BotRunner<S, V>,
     input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
@@ -470,8 +479,8 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
                         && gap.subscriptions == subscriptions
                 })
                 .collect();
-            // Identical subscriptions can still refer to several disconnected connections.
-            // Close only an unambiguous replacement; unknown correspondence stays open.
+            // 同じ購読集合の切断が複数ある場合は対応を特定できない。
+            // 再接続との対応が一意な欠損だけを終了する。
             if candidates.len() == 1 {
                 candidates.into_iter().next().unwrap().end = Some(id.clone());
             }

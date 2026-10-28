@@ -10,15 +10,7 @@ use crate::{
     paper_execution::PaperExecutionError,
 };
 
-// Pin<Box<dyn Future<Output=Result<T,TradingVenueError>> + Send + 'a>>ってなんやねん
-/*
-Pin<T>やUnpinトレイトについてRust the bookを読んで勉強した.
-
-The book: https://doc.rust-lang.org/book/ch17-05-traits-for-async.html
-勉強記録: https://zenn.dev/harui/scraps/b191888e1cb762
-
-返り値がResult<T, TradingVenueError>であるFutureをBoxでヒープに確保しつつPinで固定することでFutureのアドレスが変わらないようになる(Unpinトレイトを実装していないなら)
-*/
+/// 取引操作の結果を返す、スレッド間で送信可能なFuture。
 pub type TradingVenueFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TradingVenueError>> + Send + 'a>>;
 
@@ -70,7 +62,7 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
     ) -> TradingVenueFuture<'a, ()>;
 
     /// ボットが戦略へ市場データを渡す前に呼ぶ処理。
-    /// paperでは市場データから仮想約定を判定し、注文と残高を更新する。
+    /// paper tradingでは市場データから約定を判定し、注文と残高を更新する。
     /// live tradingでは約定・残高を取引所が管理するため、ここでは何もしない。
     fn on_market_event(&self, _event: &MarketEvent) -> Result<(), TradingVenueError> {
         Ok(())

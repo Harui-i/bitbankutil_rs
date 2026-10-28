@@ -1,4 +1,4 @@
-//! Offline recording and aggregation: cargo run --example record_execution -- /tmp/run.jsonl
+//! オフラインでの記録と集計: cargo run --example record_execution -- /tmp/run.jsonl
 use bitbankutil_rs::{
     execution_recording::{ExecutionRecorder, JsonlSink, read_records},
     market_event::{MarketEvent, MarketTrade},
