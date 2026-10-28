@@ -179,6 +179,7 @@ pub enum MarketEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarketEventConversionError {
+    InvalidDepth(String),
     InvalidTradeSide(ParseOrderError),
 }
 

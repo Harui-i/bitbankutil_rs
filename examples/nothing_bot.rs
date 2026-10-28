@@ -15,12 +15,15 @@ impl MyBot {
 
 impl BotStrategy for MyBot {
     type CustomEvent = std::convert::Infallible;
+    type Error = String;
 
     async fn handle_event(
         &mut self,
         _event: BotEvent<Self::CustomEvent>,
         _ctx: &BotContext<Self::CustomEvent>,
-    ) {
+    ) -> Result<(), Self::Error> {
+        (async {}).await;
+        Ok(())
     }
 }
 

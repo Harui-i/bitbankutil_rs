@@ -76,7 +76,7 @@ async fn test_public_get_depth() {
     let res = public_client.get_depth("eth_jpy").await;
 
     let mut depth = BitbankDepth::new();
-    depth.update_whole(res.unwrap());
+    depth.update_whole(res.unwrap()).unwrap();
     log::debug!("{}", depth);
 }
 

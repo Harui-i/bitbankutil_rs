@@ -15,12 +15,13 @@ impl MyBot {
 
 impl BotStrategy for MyBot {
     type CustomEvent = std::convert::Infallible;
+    type Error = String;
 
     async fn handle_event(
         &mut self,
         event: BotEvent<Self::CustomEvent>,
         _ctx: &BotContext<Self::CustomEvent>,
-    ) {
+    ) -> Result<(), Self::Error> {
         if let BotEvent::Market(bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
             pair,
             depth,
@@ -28,6 +29,7 @@ impl BotStrategy for MyBot {
         {
             log::info!("pair: {}, depth: {}", pair, depth);
         }
+        Ok(())
     }
 }
 

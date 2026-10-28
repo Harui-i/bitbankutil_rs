@@ -9,11 +9,11 @@ use crate::trading_venue::{NoTradingVenue, TradingVenue};
 use crate::websocket_handler::run_websocket;
 use crypto_botters::bitbank::BitbankOption;
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
-use log::{error, trace, warn};
+use log::{error, warn};
 use std::convert::Infallible;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinHandle;
 
 /// ボットが受け取る市場データ、またはユーザー定義のイベント。
 /// 市場データはまず `TradingVenue::on_market_event()` に渡し、その後で戦略に渡す。
@@ -28,39 +28,50 @@ pub enum BotEvent<C = Infallible> {
 /// `venue()` でlive tradingまたはpaper tradingの注文・口座操作を利用できる。
 /// クローンしても別口座は作らず、同じ口座と注文を操作する。
 pub struct BotContext<C = Infallible, V = NoTradingVenue> {
-    event_tx: mpsc::Sender<BotEvent<C>>,
     venue: V,
+    time: Option<i64>,
+    pending: std::sync::Arc<std::sync::Mutex<Pending<C>>>,
 }
 
-// CにCloneを要求せず、イベント送信者と注文・口座操作用の値だけをクローンする。
+// CにCloneを要求せず、同じ派生キューと注文・口座操作を共有する。
 impl<C, V: Clone> Clone for BotContext<C, V> {
     fn clone(&self) -> Self {
         Self {
-            event_tx: self.event_tx.clone(),
             venue: self.venue.clone(),
+            time: self.time,
+            pending: self.pending.clone(),
         }
     }
 }
 
 impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
-    pub fn new(event_tx: mpsc::Sender<BotEvent<C>>, venue: V) -> Self {
-        Self { event_tx, venue }
+    pub fn now_ms(&self) -> i64 {
+        self.time
+            .unwrap_or_else(|| crate::execution_recording::timestamp_ms() as i64)
     }
 
     pub fn venue(&self) -> &V {
         &self.venue
     }
 
-    /// 市場データやユーザー定義のイベントを、このボットへ送るための送信者を返す。
-    pub fn event_sender(&self) -> mpsc::Sender<BotEvent<C>> {
-        self.event_tx.clone()
-    }
-
     pub async fn emit(
         &self,
         event: BotEvent<C>,
     ) -> Result<(), mpsc::error::SendError<BotEvent<C>>> {
-        self.event_tx.send(event).await
+        {
+            let pending = &self.pending;
+            let mut guard = pending.lock().unwrap();
+            if !guard.open {
+                return Err(mpsc::error::SendError(event));
+            }
+            if guard.emitted >= guard.limit {
+                guard.overflow = true;
+                return Err(mpsc::error::SendError(event));
+            }
+            guard.emitted += 1;
+            guard.queue.push_back(event);
+            return Ok(());
+        }
     }
 }
 
@@ -70,19 +81,20 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
 /// ユーザー定義のイベントを使わない場合はCustomEventにInfallibleを指定する。
 pub trait BotStrategy<V: TradingVenue = NoTradingVenue>: Send + 'static {
     type CustomEvent: Send + 'static;
+    type Error: std::fmt::Debug + Send + 'static;
 
     fn handle_event(
         &mut self,
         event: BotEvent<Self::CustomEvent>,
         ctx: &BotContext<Self::CustomEvent, V>,
-    ) -> impl std::future::Future<Output = ()> + Send;
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 }
 
 /// ボットアクターを生かし続け、基本的なライフサイクル制御を提供するハンドル。
 pub struct BotHandle<E> {
     event_tx: mpsc::Sender<BotEvent<E>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
-    join_handle: Option<JoinHandle<()>>,
+    join_handle: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl<E: Send + 'static> BotHandle<E> {
@@ -90,12 +102,12 @@ impl<E: Send + 'static> BotHandle<E> {
         self.event_tx.clone()
     }
 
-    pub async fn shutdown(mut self) -> Result<(), JoinError> {
+    pub async fn shutdown(mut self) -> Result<(), String> {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
         match self.join_handle.take() {
-            Some(handle) => handle.await,
+            Some(handle) => handle.await.map_err(|e| e.to_string())?,
             _ => Ok(()),
         }
     }
@@ -112,44 +124,27 @@ impl<E> Drop for BotHandle<E> {
     }
 }
 
-fn spawn_bot_actor<S, V>(mut strategy: S, venue: V, buffer: usize) -> BotHandle<S::CustomEvent>
+fn spawn_bot_actor<S, V>(strategy: S, venue: V, buffer: usize) -> BotHandle<S::CustomEvent>
 where
     V: TradingVenue,
     S: BotStrategy<V>,
 {
     let (event_tx, mut event_rx) = mpsc::channel(buffer);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    let context = BotContext::new(event_tx.clone(), venue);
-
     let join_handle = tokio::spawn(async move {
+        let mut runner = BotRunner::new(strategy, venue);
+        let mut stopping = false;
         loop {
             select! {
                 biased;
-                _ = &mut shutdown_rx => {
-                    trace!("bot actor received shutdown");
-                    break;
-                }
+                _ = &mut shutdown_rx, if !stopping => { stopping = true; event_rx.close(); }
                 maybe_event = event_rx.recv() => {
                     let Some(event) = maybe_event else { break; };
-                    let recorder = context.venue().recorder();
-                    let mut recording_context = crate::execution_recording::RecordingContext::default();
-                    if let (Some(r), BotEvent::Market(market)) = (&recorder, &event) {
-                        let id = r.next_id();
-                        recording_context.market_event_id = Some(id);
-                        r.record("market_event", serde_json::json!({"id":id,"type":match market {MarketEvent::Ticker{..}=>"ticker",MarketEvent::Transactions{..}=>"transactions",MarketEvent::DepthUpdated{..}=>"depth",MarketEvent::CircuitBreakInfo{..}=>"circuit_break_info"}}));
-                    }
-                    crate::execution_recording::scope(recording_context, async {
-                    if let BotEvent::Market(market_event) = &event {
-                        if let Err(err) = context.venue().on_market_event(market_event) {
-                            error!("market event processing failed: {:?}", err);
-                            return;
-                        }
-                    }
-                    strategy.handle_event(event, &context).await;
-                    }).await;
+                    if let Err(err) = runner.process_live(event).await { return Err(format!("bot processing failed: {err:?}")); }
                 }
             }
         }
+        Ok(())
     });
 
     BotHandle {
@@ -170,20 +165,20 @@ pub enum BitbankInboundMessage {
 }
 
 #[derive(Debug)]
-struct BitbankMarketEventConverter {
+pub struct BitbankMarketEventConverter {
     pair: String,
     depth: BitbankDepth,
 }
 
 impl BitbankMarketEventConverter {
-    fn new(pair: String) -> Self {
+    pub fn new(pair: String) -> Self {
         Self {
             pair,
             depth: BitbankDepth::new(),
         }
     }
 
-    fn convert(
+    pub fn convert(
         &mut self,
         message: BitbankInboundMessage,
     ) -> Result<Option<MarketEvent>, MarketEventConversionError> {
@@ -204,7 +199,9 @@ impl BitbankMarketEventConverter {
                 })
             }
             BitbankInboundMessage::DepthDiff(depth_diff) => {
-                self.depth.insert_diff(depth_diff);
+                self.depth
+                    .insert_diff(depth_diff)
+                    .map_err(MarketEventConversionError::InvalidDepth)?;
                 if self.depth.is_complete() {
                     Some(MarketEvent::DepthUpdated {
                         pair: self.pair.clone(),
@@ -215,7 +212,9 @@ impl BitbankMarketEventConverter {
                 }
             }
             BitbankInboundMessage::DepthWhole(depth_whole) => {
-                self.depth.update_whole(depth_whole);
+                self.depth
+                    .update_whole(depth_whole)
+                    .map_err(MarketEventConversionError::InvalidDepth)?;
                 if self.depth.is_complete() {
                     Some(MarketEvent::DepthUpdated {
                         pair: self.pair.clone(),
@@ -402,7 +401,7 @@ impl<E: Send + 'static> BitbankBotRuntime<E> {
             .event_sender()
     }
 
-    pub async fn shutdown(mut self) -> Result<(), JoinError> {
+    pub async fn shutdown(mut self) -> Result<(), String> {
         for handle in &self.feed_handles {
             handle.abort();
         }
@@ -517,7 +516,12 @@ mod tests {
 
     impl BotStrategy<ProbeVenue> for ProbeStrategy {
         type CustomEvent = ();
-        async fn handle_event(&mut self, event: BotEvent<()>, ctx: &BotContext<(), ProbeVenue>) {
+        type Error = String;
+        async fn handle_event(
+            &mut self,
+            event: BotEvent<()>,
+            ctx: &BotContext<(), ProbeVenue>,
+        ) -> Result<(), Self::Error> {
             if let Some((entered, release)) = self.gate.take() {
                 entered.send(()).unwrap();
                 release.await.unwrap();
@@ -528,6 +532,7 @@ mod tests {
             });
             ctx.venue().account_snapshot("btc_jpy").await.unwrap();
             self.handled.send(()).unwrap();
+            Ok(())
         }
     }
 
@@ -546,7 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_applies_market_once_before_strategy_and_skips_failed_events() {
+    async fn actor_applies_market_once_before_strategy() {
         let venue = ProbeVenue::default();
         let (handled, mut receiver) = mpsc::unbounded_channel();
         let runtime = BitbankBotBuilder::new(
@@ -559,14 +564,13 @@ mod tests {
         .spawn();
         let sender = runtime.event_sender();
         sender.send(transaction_event("btc_jpy")).await.unwrap();
-        sender.send(transaction_event("fail")).await.unwrap();
         sender.send(BotEvent::Custom(())).await.unwrap();
         wait_handled(&mut receiver).await;
         wait_handled(&mut receiver).await;
         runtime.shutdown().await.unwrap();
         assert_eq!(
             *venue.calls.lock().unwrap(),
-            ["apply", "market", "snapshot", "apply", "custom", "snapshot"]
+            ["apply", "market", "snapshot", "custom", "snapshot"]
         );
         assert!(receiver.try_recv().is_err());
     }
@@ -604,29 +608,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_clone_and_emit_do_not_require_custom_event_clone() {
-        struct Custom;
-        let (sender, mut receiver) = mpsc::channel(1);
-        let ctx = BotContext::new(sender, NoTradingVenue);
-        ctx.clone().emit(BotEvent::Custom(Custom)).await.unwrap();
-        assert!(matches!(
-            receiver.recv().await,
-            Some(BotEvent::Custom(Custom))
-        ));
-    }
-
-    #[tokio::test]
     async fn market_data_runtime_delivers_events_without_credentials() {
         struct Strategy(Option<oneshot::Sender<()>>);
         impl BotStrategy for Strategy {
             type CustomEvent = Infallible;
-            async fn handle_event(&mut self, event: BotEvent, ctx: &BotContext) {
+            type Error = String;
+            async fn handle_event(
+                &mut self,
+                event: BotEvent,
+                ctx: &BotContext,
+            ) -> Result<(), Self::Error> {
                 assert!(matches!(event, BotEvent::Market(_)));
                 assert!(matches!(
                     ctx.venue().account_snapshot("btc_jpy").await,
                     Err(TradingVenueError::Unavailable)
                 ));
                 self.0.take().unwrap().send(()).unwrap();
+                Ok(())
             }
         }
         let (done, done_rx) = oneshot::channel();
@@ -652,14 +650,16 @@ mod tests {
 
     impl BotStrategy<crate::paper_execution::PaperTradingVenue> for PaperProbe {
         type CustomEvent = Infallible;
+        type Error = String;
         async fn handle_event(
             &mut self,
             _event: BotEvent,
             ctx: &BotContext<Infallible, crate::paper_execution::PaperTradingVenue>,
-        ) {
+        ) -> Result<(), Self::Error> {
             self.snapshots
                 .send(ctx.venue().account_snapshot("btc_jpy").await.unwrap())
                 .unwrap();
+            Ok(())
         }
     }
 
@@ -917,3 +917,163 @@ mod tests {
         assert_eq!(ticker.last, "100");
     }
 }
+
+/// Input identity from a capture session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InputId {
+    pub session_id: String,
+    pub sequence: u64,
+}
+
+#[derive(Debug)]
+pub enum BotRunError<E> {
+    TimeReversed,
+    Venue(crate::trading_venue::TradingVenueError),
+    Strategy(E),
+    DerivedLimit,
+}
+
+/// Sequential execution shared by network and offline inputs.
+pub struct BotRunner<S: BotStrategy<V>, V: TradingVenue> {
+    strategy: S,
+    venue: V,
+    last_time: Option<i64>,
+    pub derived_limit: usize,
+}
+impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
+    pub fn new(strategy: S, venue: V) -> Self {
+        Self {
+            strategy,
+            venue,
+            last_time: None,
+            derived_limit: 10_000,
+        }
+    }
+    pub fn venue(&self) -> &V {
+        &self.venue
+    }
+    pub fn advance_time(&mut self, time_ms: i64) -> Result<(), BotRunError<S::Error>> {
+        if self.last_time.is_some_and(|t| time_ms < t) {
+            return Err(BotRunError::TimeReversed);
+        }
+        self.last_time = Some(time_ms);
+        Ok(())
+    }
+    pub async fn process(
+        &mut self,
+        time_ms: i64,
+        input_id: Option<InputId>,
+        event: BotEvent<S::CustomEvent>,
+    ) -> Result<(), BotRunError<S::Error>> {
+        self.advance_time(time_ms)?;
+        self.process_inner(Some(time_ms), input_id, event).await
+    }
+    async fn process_live(
+        &mut self,
+        event: BotEvent<S::CustomEvent>,
+    ) -> Result<(), BotRunError<S::Error>> {
+        self.process_inner(None, None, event).await
+    }
+    async fn process_inner(
+        &mut self,
+        time: Option<i64>,
+        input_id: Option<InputId>,
+        event: BotEvent<S::CustomEvent>,
+    ) -> Result<(), BotRunError<S::Error>> {
+        let mut queue = std::collections::VecDeque::from([(event, None)]);
+        let mut count = 0;
+        while let Some((event, inherited_market_id)) = queue.pop_front() {
+            if count > self.derived_limit {
+                return Err(BotRunError::DerivedLimit);
+            }
+            count += 1;
+            let pending = std::sync::Arc::new(std::sync::Mutex::new(Pending {
+                queue: std::collections::VecDeque::new(),
+                open: true,
+                emitted: 0,
+                limit: self.derived_limit.saturating_sub(count - 1 + queue.len()),
+                overflow: false,
+            }));
+            let _close = ClosePending(pending.clone());
+            let ctx = BotContext {
+                venue: self.venue.clone(),
+                time,
+                pending: pending.clone(),
+            };
+            let recorder = self.venue.recorder();
+            let is_market = matches!(event, BotEvent::Market(_));
+            let recording_context = crate::execution_recording::RecordingContext {
+                event_time_ms: Some(ctx.now_ms()),
+                market_event_id: if is_market {
+                    recorder.as_ref().map(|r| r.next_id())
+                } else {
+                    inherited_market_id
+                },
+                input_id: input_id.clone(),
+                ..Default::default()
+            };
+            let market_id = recording_context.market_event_id;
+            let result = crate::execution_recording::scope(recording_context, async {
+                if let Some(r) = &recorder {
+                    r.record(
+                        if is_market {
+                            "market_event"
+                        } else {
+                            "custom_event"
+                        },
+                        serde_json::json!({"id":market_id,"input_id":input_id,"type":match &event {
+                            BotEvent::Market(MarketEvent::Ticker{..})=>"ticker",
+                            BotEvent::Market(MarketEvent::Transactions{..})=>"transactions",
+                            BotEvent::Market(MarketEvent::DepthUpdated{..})=>"depth",
+                            BotEvent::Market(MarketEvent::CircuitBreakInfo{..})=>"circuit_break_info",
+                            BotEvent::Custom(_)=>"custom",
+                        }}),
+                    );
+                }
+                if let BotEvent::Market(market) = &event {
+                    self.venue
+                        .on_market_event(market)
+                        .map_err(BotRunError::Venue)?;
+                }
+                self.strategy
+                    .handle_event(event, &ctx)
+                    .await
+                    .map_err(BotRunError::Strategy)
+            })
+            .await;
+            {
+                let mut p = pending.lock().unwrap();
+                p.open = false;
+                if p.overflow {
+                    return Err(BotRunError::DerivedLimit);
+                }
+                queue.extend(p.queue.drain(..).map(|event| (event, market_id)));
+            }
+            result?;
+        }
+        Ok(())
+    }
+}
+
+struct Pending<C> {
+    queue: std::collections::VecDeque<BotEvent<C>>,
+    open: bool,
+    emitted: usize,
+    limit: usize,
+    overflow: bool,
+}
+struct ClosePending<C>(std::sync::Arc<std::sync::Mutex<Pending<C>>>);
+impl<C> Drop for ClosePending<C> {
+    fn drop(&mut self) {
+        if let Ok(mut p) = self.0.lock() {
+            p.open = false;
+        }
+    }
+}
+
+impl<E: std::fmt::Debug> std::fmt::Display for BotRunError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl<E: std::fmt::Debug> std::error::Error for BotRunError<E> {}

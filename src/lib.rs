@@ -311,3 +311,5 @@ pub mod bybit {
 pub mod execution_recording;
 
 mod recording_http;
+
+pub mod replay;

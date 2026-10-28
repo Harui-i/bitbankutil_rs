@@ -482,7 +482,9 @@ pub struct BitbankDepthWhole {
 #[derive(Debug, Clone)]
 pub struct BitbankDepth {
     /// 差分バッファ（シーケンスID順）。
-    diff_buffer: BTreeMap<String, BitbankDepthDiff>,
+    diff_buffer: BTreeMap<u64, BitbankDepthDiff>,
+    last_whole: Option<u64>,
+    last_diff: Option<u64>,
     /// 価格、数量。
     asks: BTreeMap<Decimal, f64>,
     /// 価格、数量。
@@ -522,6 +524,8 @@ impl BitbankDepth {
     pub fn new() -> Self {
         BitbankDepth {
             diff_buffer: BTreeMap::new(),
+            last_whole: None,
+            last_diff: None,
             asks: BTreeMap::new(),
             bids: BTreeMap::new(),
             last_timestamp: 0,
@@ -537,100 +541,75 @@ impl BitbankDepth {
         self.last_timestamp
     }
 
-    pub fn insert_diff(&mut self, diff: BitbankDepthDiff) {
-        for ask in &diff.a {
-            let price = &ask[0].parse::<Decimal>().unwrap();
-            let amount = ask[1].parse::<f64>().unwrap();
-
-            if amount == f64::zero() {
-                self.asks.remove(price);
-            } else {
-                self.asks.insert(*price, amount);
-            }
+    pub fn insert_diff(&mut self, diff: BitbankDepthDiff) -> Result<(), String> {
+        let seq = diff.s.parse::<u64>().map_err(|e| e.to_string())?;
+        Self::validate_levels(&diff.a, false)?;
+        Self::validate_levels(&diff.b, false)?;
+        if self.last_whole.is_some_and(|s| seq <= s) || self.diff_buffer.contains_key(&seq) {
+            return Ok(());
         }
-
-        for bid in &diff.b {
-            let price = &bid[0].parse::<Decimal>().unwrap();
-            let amount = bid[1].parse::<f64>().unwrap();
-
-            if amount == f64::zero() {
-                self.bids.remove(price);
-            } else {
-                self.bids.insert(*price, amount);
-            }
+        if !self.last_diff.is_some_and(|s| seq < s) {
+            Self::apply_levels(&mut self.asks, &diff.a);
+            Self::apply_levels(&mut self.bids, &diff.b);
+            self.last_timestamp = self.last_timestamp.max(diff.t);
+            self.last_diff = Some(seq);
         }
-
-        if self.last_timestamp < diff.t {
-            self.last_timestamp = diff.t;
-        }
-        self.diff_buffer.insert(diff.s.clone(), diff);
+        self.diff_buffer.insert(seq, diff);
+        Ok(())
     }
-
-    pub fn update_whole(&mut self, whole: BitbankDepthWhole) {
-        let seq = whole.sequenceId.clone();
-
-        // `diff_buffer`に残っている、シーケンスIDが`whole`のシーケンスID以下のdiff項目を削除する。
-        let keys_to_remove: Vec<String> = self
-            .diff_buffer
-            .iter()
-            .filter(|(key, _)| key < &&seq)
-            .map(|(key, _)| key.clone())
-            .collect();
-
-        for key in keys_to_remove {
-            self.diff_buffer.remove(&key);
+    pub fn update_whole(&mut self, whole: BitbankDepthWhole) -> Result<(), String> {
+        let seq = whole.sequenceId.parse::<u64>().map_err(|e| e.to_string())?;
+        Self::validate_levels(&whole.asks, true)?;
+        Self::validate_levels(&whole.bids, true)?;
+        if self.last_whole.is_some_and(|s| seq <= s) {
+            return Ok(());
         }
-
+        self.diff_buffer.retain(|s, _| *s > seq);
         self.asks.clear();
         self.bids.clear();
-
-        for ask in whole.asks {
-            let price = &ask[0].parse::<Decimal>().unwrap();
-            let amount = ask[1].parse::<f64>().unwrap();
-
-            assert_ne!(amount, f64::zero());
-            self.asks.insert(*price, amount);
-        }
-
-        for bid in whole.bids {
-            let price = &bid[0].parse::<Decimal>().unwrap();
-            let amount = bid[1].parse::<f64>().unwrap();
-
-            assert_ne!(amount, f64::zero());
-            self.bids.insert(*price, amount);
-        }
-
-        if self.last_timestamp < whole.timestamp {
-            self.last_timestamp = whole.timestamp;
-        }
-
+        Self::apply_levels(&mut self.asks, &whole.asks);
+        Self::apply_levels(&mut self.bids, &whole.bids);
+        self.last_timestamp = self.last_timestamp.max(whole.timestamp);
+        self.last_whole = Some(seq);
+        self.last_diff = Some(self.last_diff.unwrap_or(seq).max(seq));
         self.process_diff_buffer();
         self.is_complete = true;
+        Ok(())
+    }
+    fn validate_levels(levels: &[Vec<String>], whole: bool) -> Result<(), String> {
+        for level in levels {
+            if level.len() != 2 {
+                return Err("invalid price level".into());
+            }
+            let price = level[0].parse::<Decimal>().map_err(|e| e.to_string())?;
+            let amount = level[1].parse::<f64>().map_err(|e| e.to_string())?;
+            if price <= Decimal::ZERO
+                || !amount.is_finite()
+                || amount < 0.0
+                || (whole && amount == 0.0)
+            {
+                return Err("invalid price or amount".into());
+            }
+        }
+        Ok(())
+    }
+    fn apply_levels(book: &mut BTreeMap<Decimal, f64>, levels: &[Vec<String>]) {
+        for level in levels {
+            let price = level[0].parse::<Decimal>().expect("validated price");
+            let amount = level[1].parse::<f64>().expect("validated amount");
+            if amount == 0.0 {
+                book.remove(&price);
+            } else {
+                book.insert(price, amount);
+            }
+        }
     }
 
     fn process_diff_buffer(&mut self) {
-        for (_sequence_id, depth_diff) in self.diff_buffer.iter() {
-            for ask in &depth_diff.a {
-                let price = &ask[0].parse::<Decimal>().unwrap();
-                let amount = ask[1].parse::<f64>().unwrap();
-
-                if amount == f64::zero() {
-                    self.asks.remove(price);
-                } else {
-                    self.asks.insert(*price, amount);
-                }
-            }
-
-            for bid in &depth_diff.b {
-                let price = &bid[0].parse::<Decimal>().unwrap();
-                let amount = bid[1].parse::<f64>().unwrap();
-
-                if amount == f64::zero() {
-                    self.bids.remove(price);
-                } else {
-                    self.bids.insert(*price, amount);
-                }
-            }
+        for diff in self.diff_buffer.values() {
+            Self::apply_levels(&mut self.asks, &diff.a);
+            Self::apply_levels(&mut self.bids, &diff.b);
+            self.last_timestamp = self.last_timestamp.max(diff.t);
         }
     }
 }

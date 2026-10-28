@@ -1,0 +1,165 @@
+{
+  "format_version": 1,
+  "synthetic": true,
+  "description": "合成の契約確認用データ。実市場履歴ではない。source配列順をマージの同時刻優先順位に使う。",
+  "sources": [
+    {
+      "session_id": "sample-bb",
+      "exchange": "bitbank",
+      "stream": "public",
+      "files": [
+        "bitbank-20261027.jsonl",
+        "bitbank-20261028.jsonl"
+      ]
+    },
+    {
+      "session_id": "sample-byb",
+      "exchange": "bybit",
+      "stream": "linear",
+      "files": [
+        "bybit-20261027.jsonl"
+      ]
+    }
+  ],
+  "merge_key": [
+    "received_at_micros",
+    "source_index",
+    "sequence"
+  ],
+  "expected": {
+    "record_count": 14,
+    "merged_record_ids": [
+      [
+        "sample-bb",
+        1
+      ],
+      [
+        "sample-byb",
+        1
+      ],
+      [
+        "sample-bb",
+        2
+      ],
+      [
+        "sample-byb",
+        2
+      ],
+      [
+        "sample-byb",
+        3
+      ],
+      [
+        "sample-bb",
+        3
+      ],
+      [
+        "sample-byb",
+        4
+      ],
+      [
+        "sample-bb",
+        4
+      ],
+      [
+        "sample-bb",
+        5
+      ],
+      [
+        "sample-bb",
+        6
+      ],
+      [
+        "sample-bb",
+        7
+      ],
+      [
+        "sample-bb",
+        8
+      ],
+      [
+        "sample-bb",
+        9
+      ],
+      [
+        "sample-bb",
+        10
+      ]
+    ],
+    "bitbank_book_checkpoints": [
+      {
+        "after_sequence": 2,
+        "ready": false
+      },
+      {
+        "after_sequence": 3,
+        "ready": true,
+        "best_bid": [
+          "100",
+          "0.4"
+        ],
+        "best_ask": [
+          "101",
+          "1.5"
+        ]
+      },
+      {
+        "after_sequence": 4,
+        "ready": true,
+        "best_bid": [
+          "99.5",
+          "2"
+        ],
+        "best_ask": [
+          "101",
+          "1.5"
+        ]
+      },
+      {
+        "after_sequence": 6,
+        "ready": false
+      },
+      {
+        "after_sequence": 8,
+        "ready": false
+      },
+      {
+        "after_sequence": 9,
+        "ready": true,
+        "best_bid": [
+          "98",
+          "3"
+        ],
+        "best_ask": [
+          "103",
+          "2"
+        ]
+      }
+    ],
+    "bitbank_public_trade_amount": "0.75",
+    "bybit_book_after_sequence_3": {
+      "best_bid": [
+        "64999",
+        "3"
+      ],
+      "best_ask": [
+        "65001",
+        "1.5"
+      ]
+    },
+    "normal_evaluation_stop_before": [
+      [
+        "sample-bb",
+        6
+      ]
+    ],
+    "notes": [
+      "connected/disconnectedは市場イベントではないが、マージ順と時計・状態の検証対象。",
+      "Bitbankの後半ファイルは接続情報と初期板を前半から引き継ぐ。",
+      "全体を読むケースは切断後の継続を明示的に許す検証モード。",
+      "Bitbankの約定数量0.75は公開約定の合計であり、模擬口座の約定量を規定しない。",
+      "Bybitの板復元期待値は利用者側アダプター向け。#34では生JSONの受け渡しまでを必須とする。",
+      "Bybit入力のEOFは選択した有限入力の終端であり、接続切断を意味しない。"
+    ]
+  }
+}
