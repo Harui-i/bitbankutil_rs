@@ -50,17 +50,105 @@ pub struct SourceSpec {
     pub stream: String,
     pub files: Vec<String>,
 }
+/// Session and connection validation shared by file and caller-supplied inputs.
+#[derive(Default)]
+struct SourceValidation {
+    identity: Option<(String, String, String)>,
+    sequence: u64,
+    time: u64,
+    active: HashSet<String>,
+    subscriptions: BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+impl SourceValidation {
+    fn validate(&mut self, r: &CaptureRecord) -> io::Result<()> {
+        if r.format_version != 1 {
+            return Err(invalid("unsupported format version"));
+        }
+        if !matches!(
+            (r.exchange.as_str(), r.stream.as_str()),
+            ("bitbank", "public") | ("bybit", "linear")
+        ) {
+            return Err(invalid("unsupported exchange/stream"));
+        }
+        let identity = (r.session_id.clone(), r.exchange.clone(), r.stream.clone());
+        if self
+            .identity
+            .as_ref()
+            .is_some_and(|expected| expected != &identity)
+        {
+            return Err(invalid("source identity mismatch"));
+        }
+        if self.sequence.checked_add(1) != Some(r.sequence) {
+            return Err(invalid("sequence mismatch"));
+        }
+        if r.received_at_micros < self.time {
+            return Err(invalid("received time reversed"));
+        }
+        match &r.payload {
+            CapturePayload::Connected { subscriptions, .. } => {
+                if self.subscriptions.contains_key(&r.connection_id) {
+                    return Err(invalid("reused connection"));
+                }
+                self.subscriptions.insert(
+                    r.connection_id.clone(),
+                    subscriptions.iter().cloned().collect(),
+                );
+                self.active.insert(r.connection_id.clone());
+            }
+            CapturePayload::Message { .. } => {
+                if !self.active.contains(&r.connection_id) {
+                    return Err(invalid("message outside connection"));
+                }
+            }
+            CapturePayload::Disconnected { reason } => {
+                if !matches!(
+                    reason.as_str(),
+                    "transport_closed" | "scheduled_refresh" | "shutdown" | "capture_gap"
+                ) || !self.active.contains(&r.connection_id)
+                {
+                    return Err(invalid("invalid disconnect"));
+                }
+                self.active.remove(&r.connection_id);
+            }
+        }
+        self.identity = Some(identity);
+        self.sequence = r.sequence;
+        self.time = r.received_at_micros;
+        Ok(())
+    }
+}
+#[derive(Default)]
+struct ReplayValidation {
+    sources: BTreeMap<usize, SourceValidation>,
+    sessions: BTreeMap<String, usize>,
+    last_key: Option<(u64, usize, u64)>,
+}
+impl ReplayValidation {
+    fn validate(&mut self, source: usize, r: &CaptureRecord) -> io::Result<()> {
+        let key = (r.received_at_micros, source, r.sequence);
+        if self.last_key.is_some_and(|previous| key < previous) {
+            return Err(invalid("merge order reversed"));
+        }
+        if self
+            .sessions
+            .get(&r.session_id)
+            .is_some_and(|index| *index != source)
+        {
+            return Err(invalid("session assigned to multiple sources"));
+        }
+        self.sources.entry(source).or_default().validate(r)?;
+        self.sessions.insert(r.session_id.clone(), source);
+        self.last_key = Some(key);
+        Ok(())
+    }
+}
 struct Source {
-    spec: SourceSpec,
     files: std::collections::VecDeque<String>,
     reader: Option<Box<dyn BufRead + Send>>,
     base: std::path::PathBuf,
     file: String,
     line: usize,
-    sequence: u64,
-    time: u64,
-    active: HashSet<String>,
-    used: HashSet<String>,
+    validation: SourceValidation,
     head: Option<CaptureRecord>,
 }
 impl Source {
@@ -87,51 +175,19 @@ impl Source {
                     return Err(invalid("missing final newline"));
                 }
                 let r: CaptureRecord = serde_json::from_str(&line).map_err(invalid)?;
-                if r.format_version != 1
-                    || r.session_id != self.spec.session_id
-                    || r.exchange != self.spec.exchange
-                    || r.stream != self.spec.stream
-                    || r.sequence != self.sequence + 1
-                    || r.received_at_micros < self.time
-                {
-                    return Err(invalid("version, source, sequence or time mismatch"));
-                }
-                if !matches!(
-                    (r.exchange.as_str(), r.stream.as_str()),
-                    ("bitbank", "public") | ("bybit", "linear")
-                ) {
-                    return Err(invalid("unsupported exchange/stream"));
-                }
-                match &r.payload {
-                    CapturePayload::Connected { .. } => {
-                        if !self.used.insert(r.connection_id.clone()) {
-                            return Err(invalid("reused connection"));
-                        }
-                        self.active.insert(r.connection_id.clone());
-                    }
-                    CapturePayload::Message { .. } => {
-                        if !self.active.contains(&r.connection_id) {
-                            return Err(invalid("message outside connection"));
-                        }
-                    }
-                    CapturePayload::Disconnected { reason } => {
-                        if !matches!(
-                            reason.as_str(),
-                            "transport_closed" | "scheduled_refresh" | "shutdown" | "capture_gap"
-                        ) || !self.active.remove(&r.connection_id)
-                        {
-                            return Err(invalid("invalid disconnect"));
-                        }
-                    }
-                }
-                self.sequence = r.sequence;
-                self.time = r.received_at_micros;
+                self.validation.validate(&r)?;
                 Ok(r)
             })();
             return result.map(Some).map_err(|e: io::Error| {
                 invalid(format!(
                     "{}:{} session {}: {e}",
-                    self.file, self.line, self.spec.session_id
+                    self.file,
+                    self.line,
+                    self.validation
+                        .identity
+                        .as_ref()
+                        .map(|i| i.0.as_str())
+                        .unwrap_or("unknown")
                 ))
             });
         }
@@ -161,15 +217,18 @@ impl ReplayInput {
             }
             sources.push(Source {
                 files: spec.files.clone().into(),
-                spec,
                 reader: None,
                 base: path.parent().unwrap_or(Path::new(".")).into(),
                 file: String::new(),
                 line: 0,
-                sequence: 0,
-                time: 0,
-                active: HashSet::new(),
-                used: HashSet::new(),
+                validation: SourceValidation {
+                    identity: Some((
+                        spec.session_id.clone(),
+                        spec.exchange.clone(),
+                        spec.stream.clone(),
+                    )),
+                    ..Default::default()
+                },
                 head: None,
             });
         }
@@ -265,6 +324,7 @@ pub struct ReplayGap {
     pub source_index: usize,
     pub connection_id: String,
     pub reason: String,
+    pub subscriptions: std::collections::BTreeSet<String>,
     pub start: InputId,
     pub end: Option<InputId>,
 }
@@ -344,6 +404,7 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
 ) -> ReplayReport {
     let mut report = ReplayReport::default();
     let mut adapter = ReplayAdapter::default();
+    let mut validation = ReplayValidation::default();
     for item in input {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             report.interrupted = true;
@@ -361,6 +422,10 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
             sequence: record.sequence,
         };
         report.last_input = Some(id.clone());
+        if let Err(error) = validation.validate(source, &record) {
+            report.error = Some(format!("source {source} {id:?}: {error}"));
+            break;
+        }
         let time = match i64::try_from(record.received_at_micros / 1000) {
             Ok(t) => t,
             Err(_) => {
@@ -383,6 +448,8 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
                 source_index: source,
                 connection_id: record.connection_id.clone(),
                 reason,
+                subscriptions: validation.sources[&source].subscriptions[&record.connection_id]
+                    .clone(),
                 start: id.clone(),
                 end: None,
             });
@@ -390,11 +457,23 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
                 break;
             }
         }
-        if matches!(record.payload, CapturePayload::Connected { .. }) {
-            for gap in &mut report.gaps {
-                if gap.source_index == source && gap.end.is_none() {
-                    gap.end = Some(id.clone());
-                }
+        if let CapturePayload::Connected { subscriptions, .. } = &record.payload {
+            let subscriptions: std::collections::BTreeSet<_> =
+                subscriptions.iter().cloned().collect();
+            let candidates: Vec<_> = report
+                .gaps
+                .iter_mut()
+                .filter(|gap| {
+                    gap.source_index == source
+                        && gap.end.is_none()
+                        && !subscriptions.is_empty()
+                        && gap.subscriptions == subscriptions
+                })
+                .collect();
+            // Identical subscriptions can still refer to several disconnected connections.
+            // Close only an unambiguous replacement; unknown correspondence stays open.
+            if candidates.len() == 1 {
+                candidates.into_iter().next().unwrap().end = Some(id.clone());
             }
         }
         let event = match adapter.adapt(source, &record, &mut custom) {

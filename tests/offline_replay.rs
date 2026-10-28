@@ -410,3 +410,198 @@ async fn empty_input_and_application_failure() {
         .await;
     assert!(matches!(result, Err(BotRunError::Venue(_))));
 }
+
+fn capture(sequence: u64, connection: &str, payload: CapturePayload) -> CaptureRecord {
+    CaptureRecord {
+        format_version: 1,
+        exchange: "bybit".into(),
+        stream: "linear".into(),
+        session_id: "custom-session".into(),
+        connection_id: connection.into(),
+        sequence,
+        received_at_micros: 1_000_000 + sequence,
+        payload,
+    }
+}
+fn connected(subscriptions: &[&str]) -> CapturePayload {
+    CapturePayload::Connected {
+        endpoint: "wss://example.invalid".into(),
+        subscriptions: subscriptions.iter().map(|s| (*s).into()).collect(),
+    }
+}
+fn message() -> CapturePayload {
+    CapturePayload::Message {
+        message: serde_json::json!({"raw":"preserved"}),
+    }
+}
+fn disconnected() -> CapturePayload {
+    CapturePayload::Disconnected {
+        reason: "transport_closed".into(),
+    }
+}
+async fn custom_replay(records: Vec<(usize, CaptureRecord)>) -> ReplayReport {
+    let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
+    run_replay(
+        &mut runner,
+        records.into_iter().map(Ok),
+        true,
+        &AtomicBool::new(false),
+        |_| Ok(None),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn custom_input_cannot_bypass_capture_validation() {
+    let start = capture(1, "first", connected(&["publicTrade.BTCUSDT"]));
+    let next = capture(2, "first", message());
+    let mut wrong_version = start.clone();
+    wrong_version.format_version = 999;
+    let without_connection = capture(1, "first", message());
+    let mut reversed_sequence = next.clone();
+    reversed_sequence.sequence = 1;
+    let mut missing_sequence = next.clone();
+    missing_sequence.sequence = 3;
+    let mut reversed_micros = next.clone();
+    reversed_micros.received_at_micros = start.received_at_micros - 1;
+    assert_eq!(
+        reversed_micros.received_at_micros / 1000,
+        start.received_at_micros / 1000
+    );
+    let mut changed_session = next.clone();
+    changed_session.session_id = "other".into();
+    let mut changed_exchange = next.clone();
+    changed_exchange.exchange = "bitbank".into();
+    changed_exchange.stream = "public".into();
+    let mut unsupported = start.clone();
+    unsupported.stream = "unsupported".into();
+    let outside = capture(2, "not-connected", message());
+    let reused = capture(3, "first", connected(&["publicTrade.BTCUSDT"]));
+    let mut bad_reason = capture(2, "first", disconnected());
+    bad_reason.payload = CapturePayload::Disconnected {
+        reason: "unknown".into(),
+    };
+    let sequences = vec![
+        vec![wrong_version],
+        vec![without_connection],
+        vec![unsupported],
+        vec![start.clone(), reversed_sequence],
+        vec![start.clone(), missing_sequence],
+        vec![start.clone(), reversed_micros],
+        vec![start.clone(), changed_session],
+        vec![start.clone(), changed_exchange],
+        vec![start.clone(), outside],
+        vec![start.clone(), next.clone(), next.clone()],
+        vec![start.clone(), capture(2, "first", disconnected()), reused],
+        vec![start.clone(), bad_reason],
+    ];
+    for (index, records) in sequences.into_iter().enumerate() {
+        let report = custom_replay(records.into_iter().map(|r| (0, r)).collect()).await;
+        assert!(report.error.is_some(), "case {index}: {report:?}");
+    }
+    // Rejection occurs before the invalid message reaches the user adapter.
+    let mut invalid = next.clone();
+    invalid.format_version = 999;
+    let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
+    let report = run_replay(
+        &mut runner,
+        vec![Ok((0, start.clone())), Ok((0, invalid))],
+        true,
+        &AtomicBool::new(false),
+        |_| panic!("invalid input reached adapter"),
+    )
+    .await;
+    assert!(report.error.is_some());
+    assert_eq!(report.records, 1);
+    let report = custom_replay(vec![(0, start), (0, next)]).await;
+    assert!(report.error.is_none());
+    assert_eq!(report.records, 2);
+}
+
+#[tokio::test]
+async fn custom_input_enforces_merge_order_and_unique_session_assignment() {
+    let first = capture(1, "first", connected(&["publicTrade.BTCUSDT"]));
+    let mut other = first.clone();
+    other.session_id = "second-session".into();
+    let report = custom_replay(vec![(1, first.clone()), (0, other.clone())]).await;
+    assert!(report.error.as_ref().unwrap().contains("merge order"));
+    let report = custom_replay(vec![(0, first.clone()), (1, first.clone())]).await;
+    assert!(report.error.as_ref().unwrap().contains("multiple sources"));
+    let report = custom_replay(vec![(0, first), (1, other)]).await;
+    assert!(report.error.is_none());
+    assert_eq!(report.records, 2);
+}
+
+#[tokio::test]
+async fn only_matching_subscriptions_close_a_gap() {
+    let btc = ["orderbook.50.BTCUSDT", "publicTrade.BTCUSDT"];
+    let eth = ["orderbook.50.ETHUSDT", "publicTrade.ETHUSDT"];
+    let mut records = vec![
+        (0, capture(1, "btc-old", connected(&btc))),
+        (0, capture(2, "eth-old", connected(&eth))),
+        (0, capture(3, "btc-old", disconnected())),
+        (0, capture(4, "eth-new", connected(&eth))),
+    ];
+    let report = custom_replay(records.clone()).await;
+    assert!(report.error.is_none());
+    assert!(report.incomplete);
+    assert_eq!(report.gaps.len(), 1);
+    assert!(report.gaps[0].end.is_none());
+    assert_eq!(report.gaps[0].connection_id, "btc-old");
+    let mut reordered = btc;
+    reordered.reverse();
+    records.push((0, capture(5, "btc-new", connected(&reordered))));
+    let report = custom_replay(records).await;
+    assert!(report.error.is_none());
+    assert!(report.incomplete);
+    assert_eq!(report.gaps[0].end.as_ref().unwrap().sequence, 5);
+    assert_eq!(
+        report.gaps[0].subscriptions,
+        btc.iter().map(|s| s.to_string()).collect()
+    );
+}
+
+#[tokio::test]
+async fn unknown_partial_or_ambiguous_subscriptions_leave_gaps_open() {
+    for subscriptions in [
+        vec![],
+        vec!["orderbook.50.BTCUSDT"],
+        vec!["orderbook.50.ETHUSDT", "publicTrade.ETHUSDT"],
+    ] {
+        let report = custom_replay(vec![
+            (
+                0,
+                capture(
+                    1,
+                    "old",
+                    connected(&["orderbook.50.BTCUSDT", "publicTrade.BTCUSDT"]),
+                ),
+            ),
+            (0, capture(2, "old", disconnected())),
+            (0, capture(3, "new", connected(&subscriptions))),
+        ])
+        .await;
+        assert!(report.error.is_none());
+        assert!(report.gaps[0].end.is_none());
+    }
+    let report = custom_replay(vec![
+        (0, capture(1, "old", connected(&[]))),
+        (0, capture(2, "old", disconnected())),
+        (0, capture(3, "new", connected(&[]))),
+    ])
+    .await;
+    assert!(report.error.is_none());
+    assert!(report.gaps[0].end.is_none());
+    let btc = ["publicTrade.BTCUSDT"];
+    let report = custom_replay(vec![
+        (0, capture(1, "first", connected(&btc))),
+        (0, capture(2, "second", connected(&btc))),
+        (0, capture(3, "first", disconnected())),
+        (0, capture(4, "second", disconnected())),
+        (0, capture(5, "new", connected(&btc))),
+    ])
+    .await;
+    assert!(report.error.is_none());
+    assert_eq!(report.gaps.len(), 2);
+    assert!(report.gaps.iter().all(|gap| gap.end.is_none()));
+}
