@@ -31,13 +31,13 @@ pub enum TradingVenueError {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AccountSnapshot {
     pub open_orders: Vec<OpenOrder>,
     pub balances: Vec<BalanceSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlacementRequest {
     pub order: DesiredLimitOrder,
 }
@@ -48,7 +48,7 @@ impl From<DesiredLimitOrder> for PlacementRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlacedOrder {
     pub order_id: Option<OrderId>,
 }
@@ -56,6 +56,9 @@ pub struct PlacedOrder {
 /// 注文操作と口座取得の共通インターフェース。
 /// Cloneした値も同じ口座・注文状態を共有すること。
 pub trait TradingVenue: Clone + Send + Sync + 'static {
+    fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
+        None
+    }
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot>;
 
     fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder>;
@@ -118,50 +121,77 @@ fn convert_account_snapshot(
 
 #[derive(Clone)]
 pub struct BitbankTradingVenue {
+    recorder: Option<crate::execution_recording::ExecutionRecorder>,
     api_client: BitbankPrivateApiClient,
 }
 
 impl BitbankTradingVenue {
+    pub fn with_recorder(
+        mut self,
+        recorder: crate::execution_recording::ExecutionRecorder,
+    ) -> Self {
+        self.api_client = self.api_client.with_recorder(recorder.clone());
+        self.recorder = Some(recorder);
+        self
+    }
+
     pub fn new(api_client: BitbankPrivateApiClient) -> Self {
-        Self { api_client }
+        Self {
+            api_client,
+            recorder: None,
+        }
     }
 }
 
 impl TradingVenue for BitbankTradingVenue {
+    fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
+        self.recorder.clone()
+    }
+
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
-        Box::pin(async move {
-            let (orders, assets) = tokio::join!(
-                self.api_client
-                    .get_active_orders(Some(pair), None, None, None, None, None),
-                self.api_client.get_assets()
-            );
-            let orders = orders.map_err(TradingVenueError::Bitbank)?;
-            let assets = assets.map_err(TradingVenueError::Bitbank)?;
-            convert_account_snapshot(orders, assets)
-        })
+        Box::pin(crate::execution_recording::operation(
+            self.recorder.as_ref(),
+            "account_snapshot",
+            serde_json::json!({"pair":pair}),
+            async move {
+                let (orders, assets) = tokio::join!(
+                    self.api_client
+                        .get_active_orders(Some(pair), None, None, None, None, None),
+                    self.api_client.get_assets()
+                );
+                let orders = orders.map_err(TradingVenueError::Bitbank)?;
+                let assets = assets.map_err(TradingVenueError::Bitbank)?;
+                convert_account_snapshot(orders, assets)
+            },
+        ))
     }
 
     fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
-        Box::pin(async move {
-            let order = request.order;
-            let response = self
-                .api_client
-                .post_order(
-                    &order.pair,
-                    &order.amount.to_string(),
-                    Some(&order.price.to_string()),
-                    order.side.as_str(),
-                    OrderType::Limit.as_str(),
-                    order.post_only,
-                    None,
-                )
-                .await
-                .map_err(TradingVenueError::Bitbank)?;
+        Box::pin(crate::execution_recording::operation(
+            self.recorder.as_ref(),
+            "place_order",
+            serde_json::json!(&request),
+            async move {
+                let order = request.order;
+                let response = self
+                    .api_client
+                    .post_order(
+                        &order.pair,
+                        &order.amount.to_string(),
+                        Some(&order.price.to_string()),
+                        order.side.as_str(),
+                        OrderType::Limit.as_str(),
+                        order.post_only,
+                        None,
+                    )
+                    .await
+                    .map_err(TradingVenueError::Bitbank)?;
 
-            Ok(PlacedOrder {
-                order_id: response.order_id.as_u64().map(OrderId),
-            })
-        })
+                Ok(PlacedOrder {
+                    order_id: response.order_id.as_u64().map(OrderId),
+                })
+            },
+        ))
     }
 
     fn cancel_orders<'a>(
@@ -169,16 +199,21 @@ impl TradingVenue for BitbankTradingVenue {
         pair: &'a str,
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()> {
-        Box::pin(async move {
-            self.api_client
-                .post_cancel_orders(
-                    pair,
-                    order_ids.into_iter().map(|order_id| order_id.0).collect(),
-                )
-                .await
-                .map_err(TradingVenueError::Bitbank)?;
-            Ok(())
-        })
+        Box::pin(crate::execution_recording::operation(
+            self.recorder.as_ref(),
+            "cancel_orders",
+            serde_json::json!({"pair":pair,"order_ids":order_ids}),
+            async move {
+                self.api_client
+                    .post_cancel_orders(
+                        pair,
+                        order_ids.into_iter().map(|order_id| order_id.0).collect(),
+                    )
+                    .await
+                    .map_err(TradingVenueError::Bitbank)?;
+                Ok(())
+            },
+        ))
     }
 }
 

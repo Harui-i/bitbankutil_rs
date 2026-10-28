@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperExecutionConfig {
     pub pair: String,
     pub fee_schedule: PaperFeeSchedule,
@@ -32,7 +32,7 @@ impl PaperExecutionConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperFeeSchedule {
     pub maker_fee_rate_quote: Decimal,
     pub taker_fee_rate_quote: Decimal,
@@ -59,7 +59,7 @@ impl PaperFeeSchedule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PaperEvent {
     OrderAccepted {
         order_id: OrderId,
@@ -83,7 +83,7 @@ pub enum PaperEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaperRejectReason {
     PairMismatch {
         expected: String,
@@ -101,7 +101,7 @@ pub enum PaperRejectReason {
     UnsupportedPair(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PaperExecutionError {
     PairMismatch {
         expected: String,
@@ -128,6 +128,7 @@ pub struct PaperExecutionEngine {
     balances: BTreeMap<String, BalanceSnapshot>,
     open_orders: BTreeMap<OrderId, OpenOrder>,
     event_history: Vec<PaperEvent>,
+    recorder: Option<crate::execution_recording::ExecutionRecorder>,
 }
 
 impl PaperExecutionEngine {
@@ -155,6 +156,7 @@ impl PaperExecutionEngine {
             balances,
             open_orders: BTreeMap::new(),
             event_history: Vec::new(),
+            recorder: None,
         })
     }
 
@@ -408,24 +410,44 @@ impl PaperExecutionEngine {
 
     fn record_event(&mut self, event: PaperEvent) {
         log::info!("paper event: {:?}", event);
+        if let Some(r) = &self.recorder {
+            r.record("paper_event",serde_json::json!({"event":event,"balances":self.balances(),"open_orders":self.open_orders()}));
+        }
         self.event_history.push(event);
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct PaperTradingVenue {
+    recorder: Option<crate::execution_recording::ExecutionRecorder>,
     engine: Arc<Mutex<PaperExecutionEngine>>,
 }
 
 impl PaperTradingVenue {
+    pub fn with_recorder(
+        mut self,
+        recorder: crate::execution_recording::ExecutionRecorder,
+    ) -> Self {
+        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+        recorder.record("paper_initial_state", serde_json::json!({"config":engine.config(),"model":"limit_price_trade_volume_v1","balances":engine.balances(),"open_orders":engine.open_orders()}));
+        engine.recorder = Some(recorder.clone());
+        drop(engine);
+        self.recorder = Some(recorder);
+        self
+    }
+
     pub fn new(engine: PaperExecutionEngine) -> Self {
         Self {
             engine: Arc::new(Mutex::new(engine)),
+            recorder: None,
         }
     }
 
     pub fn from_shared(engine: Arc<Mutex<PaperExecutionEngine>>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            recorder: None,
+        }
     }
 
     pub fn engine(&self) -> Arc<Mutex<PaperExecutionEngine>> {
@@ -434,35 +456,49 @@ impl PaperTradingVenue {
 }
 
 impl TradingVenue for PaperTradingVenue {
+    fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
+        self.recorder.clone()
+    }
+
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
-        Box::pin(async move {
-            let engine = self
-                .engine
-                .lock()
-                .map_err(|_| TradingVenueError::StatePoisoned)?;
-            if pair != engine.config().pair {
-                return Err(TradingVenueError::Paper(
-                    PaperExecutionError::PairMismatch {
-                        expected: engine.config().pair.clone(),
-                        actual: pair.to_owned(),
-                    },
-                ));
-            }
-            Ok(AccountSnapshot {
-                open_orders: engine.open_orders(),
-                balances: engine.balances(),
-            })
-        })
+        Box::pin(crate::execution_recording::operation(
+            self.recorder.as_ref(),
+            "account_snapshot",
+            serde_json::json!({"pair":pair}),
+            async move {
+                let engine = self
+                    .engine
+                    .lock()
+                    .map_err(|_| TradingVenueError::StatePoisoned)?;
+                if pair != engine.config().pair {
+                    return Err(TradingVenueError::Paper(
+                        PaperExecutionError::PairMismatch {
+                            expected: engine.config().pair.clone(),
+                            actual: pair.to_owned(),
+                        },
+                    ));
+                }
+                Ok(AccountSnapshot {
+                    open_orders: engine.open_orders(),
+                    balances: engine.balances(),
+                })
+            },
+        ))
     }
 
     fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
-        Box::pin(async move {
-            self.engine
-                .lock()
-                .map_err(|_| TradingVenueError::StatePoisoned)?
-                .place_order(request.order)
-                .map_err(TradingVenueError::Paper)
-        })
+        Box::pin(crate::execution_recording::operation(
+            self.recorder.as_ref(),
+            "place_order",
+            serde_json::json!(&request),
+            async move {
+                self.engine
+                    .lock()
+                    .map_err(|_| TradingVenueError::StatePoisoned)?
+                    .place_order(request.order)
+                    .map_err(TradingVenueError::Paper)
+            },
+        ))
     }
 
     fn cancel_orders<'a>(
@@ -470,13 +506,18 @@ impl TradingVenue for PaperTradingVenue {
         pair: &'a str,
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()> {
-        Box::pin(async move {
-            self.engine
-                .lock()
-                .map_err(|_| TradingVenueError::StatePoisoned)?
-                .cancel_orders(pair, order_ids);
-            Ok(())
-        })
+        Box::pin(crate::execution_recording::operation(
+            self.recorder.as_ref(),
+            "cancel_orders",
+            serde_json::json!({"pair":pair,"order_ids":order_ids}),
+            async move {
+                self.engine
+                    .lock()
+                    .map_err(|_| TradingVenueError::StatePoisoned)?
+                    .cancel_orders(pair, order_ids);
+                Ok(())
+            },
+        ))
     }
 
     fn on_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {

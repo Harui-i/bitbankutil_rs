@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use crypto_botters::{
-    Client,
-    bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption},
+    bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption, BitbankOptions},
+    traits::HandlerOptions,
 };
 
 use crate::bitbank_structs::{
@@ -12,7 +12,8 @@ use crate::bitbank_structs::{
 
 #[derive(Clone)]
 pub struct BitbankPublicApiClient {
-    client: Client,
+    options: BitbankOptions,
+    transport: crate::recording_http::Transport,
 }
 
 impl Default for BitbankPublicApiClient {
@@ -22,11 +23,22 @@ impl Default for BitbankPublicApiClient {
 }
 
 impl BitbankPublicApiClient {
+    pub fn with_recorder(
+        mut self,
+        recorder: crate::execution_recording::ExecutionRecorder,
+    ) -> Self {
+        self.transport.recorder = Some(recorder);
+        self
+    }
+
     pub fn new() -> BitbankPublicApiClient {
-        let mut client = Client::new();
+        let mut client_options = BitbankOptions::default();
         let opt = BitbankOption::HttpUrl(BitbankHttpUrl::Public);
-        client.update_default_option(opt);
-        BitbankPublicApiClient { client }
+        client_options.update(opt);
+        BitbankPublicApiClient {
+            options: client_options,
+            transport: Default::default(),
+        }
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
@@ -42,11 +54,13 @@ impl BitbankPublicApiClient {
                 crypto_botters::bitbank::BitbankHandleError,
             >,
         > = self
-            .client
-            .get(
+            .transport
+            .request(
+                &self.options,
+                crypto_botters::generic_api_client::http::Method::GET,
                 &format!("/{}/ticker", pair),
                 Some(&serde_json::json!({"pair": pair})),
-                [BitbankOption::Default],
+                None::<()>,
             )
             .await;
 
@@ -65,8 +79,14 @@ impl BitbankPublicApiClient {
             BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
-            .client
-            .get_no_query("/tickers", [BitbankOption::Default])
+            .transport
+            .request(
+                &self.options,
+                crypto_botters::generic_api_client::http::Method::GET,
+                "/tickers",
+                None::<&()>,
+                None::<()>,
+            )
             .await;
 
         let duration = start_time.elapsed();
@@ -84,8 +104,14 @@ impl BitbankPublicApiClient {
             BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
-            .client
-            .get_no_query("/tickers_jpy", [BitbankOption::Default])
+            .transport
+            .request(
+                &self.options,
+                crypto_botters::generic_api_client::http::Method::GET,
+                "/tickers_jpy",
+                None::<&()>,
+                None::<()>,
+            )
             .await;
 
         let duration = start_time.elapsed();
@@ -113,8 +139,14 @@ impl BitbankPublicApiClient {
             BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
-            .client
-            .get_no_query(&url, [BitbankOption::Default])
+            .transport
+            .request(
+                &self.options,
+                crypto_botters::generic_api_client::http::Method::GET,
+                &url,
+                None::<&()>,
+                None::<()>,
+            )
             .await;
 
         let duration = start_time.elapsed();
@@ -132,11 +164,13 @@ impl BitbankPublicApiClient {
             BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
-            .client
-            .get(
+            .transport
+            .request(
+                &self.options,
+                crypto_botters::generic_api_client::http::Method::GET,
                 &format!("/{}/depth", pair),
                 Some(&serde_json::json!({"pair": pair})),
-                [BitbankOption::Default],
+                None::<()>,
             )
             .await;
 
@@ -159,8 +193,14 @@ impl BitbankPublicApiClient {
             BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
-            .client
-            .get_no_query(&url, [BitbankOption::Default])
+            .transport
+            .request(
+                &self.options,
+                crypto_botters::generic_api_client::http::Method::GET,
+                &url,
+                None::<&()>,
+                None::<()>,
+            )
             .await;
 
         let duration = start_time.elapsed();
@@ -178,11 +218,13 @@ impl BitbankPublicApiClient {
             BitbankApiResponse,
             crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
         > = self
-            .client
-            .get(
+            .transport
+            .request(
+                &self.options,
+                crypto_botters::generic_api_client::http::Method::GET,
                 &format!("/{}/circuit_break_info", pair),
                 Some(&serde_json::json!({"pair": pair})),
-                [BitbankOption::Default],
+                None::<()>,
             )
             .await;
         let duration = start_time.elapsed();

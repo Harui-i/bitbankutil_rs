@@ -4,7 +4,9 @@ use rust_decimal::Decimal;
 
 use crate::bitbank_structs::{BitbankAssetDatum, BitbankGetOrderResponse};
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy, Hash)]
+#[derive(
+    PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum OrderSide {
     Buy,
     Sell,
@@ -37,7 +39,9 @@ impl FromStr for OrderSide {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy, Hash)]
+#[derive(
+    PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum OrderType {
     Limit,
     Market,
@@ -85,10 +89,12 @@ impl FromStr for OrderType {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy, Hash)]
+#[derive(
+    PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct OrderId(pub u64);
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DesiredLimitOrder {
     pub pair: String,
     pub side: OrderSide,
@@ -126,7 +132,7 @@ fn post_only_matches(desired: Option<bool>, existing: Option<bool>) -> bool {
     existing.is_none() || desired == existing
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OpenOrder {
     pub order_id: OrderId,
     pub pair: String,
@@ -189,7 +195,7 @@ impl TryFrom<&BitbankGetOrderResponse> for OpenOrder {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BalanceSnapshot {
     pub asset: String,
     pub free_amount: Decimal,
@@ -210,7 +216,7 @@ impl TryFrom<&BitbankAssetDatum> for BalanceSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum ParseOrderError {
     UnknownSide(String),
     UnknownType(String),
