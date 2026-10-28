@@ -1,5 +1,5 @@
 use std::env;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bitbankutil_rs::bitbank_bot::{
     BitbankBotBuilder, BitbankBotRuntime, BotContext, BotEvent, BotStrategy,
@@ -55,12 +55,8 @@ impl MyBot {
         }
     }
 
-    async fn update_orders<V: TradingVenue>(&mut self, venue: &V) {
+    async fn update_orders<V: TradingVenue>(&mut self, venue: &V, now: u128) {
         let now_inst = std::time::Instant::now();
-        let now: u128 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
 
         assert!(self.last_updated <= now);
 
@@ -77,10 +73,7 @@ impl MyBot {
 
             // APIの呼び出し頻度が高くなりすぎないように、ここで `self.last_updated` を更新する
             // ここでは可変参照が必要である。
-            self.last_updated = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
+            self.last_updated = now;
 
             let account = match venue.account_snapshot(&self.bot_config.pair).await {
                 Ok(account) => account,
@@ -221,11 +214,12 @@ impl MyBot {
 
 impl<V: TradingVenue> BotStrategy<V> for MyBot {
     type CustomEvent = std::convert::Infallible;
+    type Error = String;
     async fn handle_event(
         &mut self,
         event: BotEvent<Self::CustomEvent>,
         ctx: &BotContext<Self::CustomEvent, V>,
-    ) {
+    ) -> Result<(), Self::Error> {
         let event = match event {
             BotEvent::Market(event) => event,
             BotEvent::Custom(never) => match never {},
@@ -233,7 +227,7 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
         match event {
             MarketEvent::Transactions { transactions, .. } => {
                 log::debug!("transaction updated: {:?}", transactions);
-                self.update_orders(ctx.venue()).await;
+                self.update_orders(ctx.venue(), ctx.now_ms() as u128).await;
             }
             MarketEvent::DepthUpdated { depth, .. } => {
                 log::debug!("depth updated");
@@ -255,7 +249,7 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
 
                 self.depth = depth;
                 if self.depth.is_complete() {
-                    self.update_orders(ctx.venue()).await;
+                    self.update_orders(ctx.venue(), ctx.now_ms() as u128).await;
                 }
             }
             MarketEvent::CircuitBreakInfo { info, .. } => {
@@ -264,6 +258,7 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
             // Tickerイベントはこの戦略では意図的に無視される。
             MarketEvent::Ticker { .. } => {}
         }
+        Ok(())
     }
 }
 

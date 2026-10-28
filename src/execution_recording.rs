@@ -39,6 +39,8 @@ pub struct ExecutionRecord {
     pub sequence: u64,
     pub recorded_at_ms: u64,
     pub event_time_ms: Option<i64>,
+    #[serde(default)]
+    pub input_id: Option<crate::bitbank_bot::InputId>,
     pub operation_id: Option<u64>,
     pub market_event_id: Option<u64>,
     pub kind: String,
@@ -69,6 +71,7 @@ pub struct RecordingContext {
     pub operation_id: Option<u64>,
     pub market_event_id: Option<u64>,
     pub event_time_ms: Option<i64>,
+    pub input_id: Option<crate::bitbank_bot::InputId>,
 }
 tokio::task_local! { static CONTEXT: RecordingContext; }
 pub fn current_context() -> RecordingContext {
@@ -117,6 +120,7 @@ impl ExecutionRecorder {
             sequence: s.sequence,
             recorded_at_ms: timestamp_ms(),
             event_time_ms: c.event_time_ms,
+            input_id: c.input_id,
             operation_id: c.operation_id,
             market_event_id: c.market_event_id,
             kind: kind.into(),
