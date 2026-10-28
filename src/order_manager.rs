@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
+    execution_recording::{current_context, scope},
     order_domain::{DesiredLimitOrder, OpenOrder, OrderId, OrderSide},
     trading_venue::{PlacedOrder, PlacementRequest, TradingVenue, TradingVenueError},
 };
@@ -143,7 +144,9 @@ pub async fn place_wanna_orders(
     // 注文を発注する
     for sord in placements {
         let venue2 = venue.clone();
-        js.spawn(async move { venue2.place_order(PlacementRequest::from(sord)).await });
+        js.spawn(scope(current_context(), async move {
+            venue2.place_order(PlacementRequest::from(sord)).await
+        }));
     }
 
     while let Some(js_res) = js.join_next().await {
@@ -198,19 +201,19 @@ pub async fn place_wanna_orders_concurrent(
         let venue2 = venue.clone();
         let pair2 = pair.clone();
 
-        first_js.spawn(async move {
+        first_js.spawn(scope(current_context(), async move {
             FirstJoinSetResponse::CancelResponse(venue2.cancel_orders(&pair2, cancels).await)
-        });
+        }));
     }
 
     for sord in first_placements {
         let venue2 = venue.clone();
 
-        first_js.spawn(async move {
+        first_js.spawn(scope(current_context(), async move {
             FirstJoinSetResponse::PostResponse(
                 venue2.place_order(PlacementRequest::from(sord)).await,
             )
-        });
+        }));
     }
 
     while let Some(first_js_res) = first_js.join_next().await {
@@ -237,7 +240,9 @@ pub async fn place_wanna_orders_concurrent(
 
         for sord in second_placements {
             let venue2 = venue.clone();
-            second_js.spawn(async move { venue2.place_order(PlacementRequest::from(sord)).await });
+            second_js.spawn(scope(current_context(), async move {
+                venue2.place_order(PlacementRequest::from(sord)).await
+            }));
         }
 
         while let Some(second_js_res) = second_js.join_next().await {

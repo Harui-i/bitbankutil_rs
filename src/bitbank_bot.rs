@@ -685,6 +685,7 @@ mod tests {
                     onhand_amount: Decimal::new(1000, 0),
                 },
             ],
+            None,
         )
         .unwrap();
         let venue = PaperTradingVenue::new(engine);

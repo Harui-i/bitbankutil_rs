@@ -135,6 +135,7 @@ impl PaperExecutionEngine {
     pub fn new(
         config: PaperExecutionConfig,
         balances: Vec<BalanceSnapshot>,
+        recorder: Option<crate::execution_recording::ExecutionRecorder>,
     ) -> Result<Self, PaperExecutionError> {
         let (base_asset, quote_asset) = parse_jpy_pair(&config.pair)?;
         let balances = balances
@@ -149,15 +150,25 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::MissingBalance(quote_asset));
         }
 
-        Ok(Self {
+        let engine = Self {
             config,
             base_asset,
             quote_asset,
             balances,
             open_orders: BTreeMap::new(),
             event_history: Vec::new(),
-            recorder: None,
-        })
+            recorder,
+        };
+        if let Some(recorder) = &engine.recorder {
+            recorder.record(
+                "paper_initial_state",
+                serde_json::json!({
+                    "config": engine.config(), "model": "limit_price_trade_volume_v1",
+                    "balances": engine.balances(), "open_orders": engine.open_orders()
+                }),
+            );
+        }
+        Ok(engine)
     }
 
     pub fn place_order(
@@ -419,35 +430,18 @@ impl PaperExecutionEngine {
 
 #[derive(Debug, Clone)]
 pub struct PaperTradingVenue {
-    recorder: Option<crate::execution_recording::ExecutionRecorder>,
     engine: Arc<Mutex<PaperExecutionEngine>>,
 }
 
 impl PaperTradingVenue {
-    pub fn with_recorder(
-        mut self,
-        recorder: crate::execution_recording::ExecutionRecorder,
-    ) -> Self {
-        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        recorder.record("paper_initial_state", serde_json::json!({"config":engine.config(),"model":"limit_price_trade_volume_v1","balances":engine.balances(),"open_orders":engine.open_orders()}));
-        engine.recorder = Some(recorder.clone());
-        drop(engine);
-        self.recorder = Some(recorder);
-        self
-    }
-
     pub fn new(engine: PaperExecutionEngine) -> Self {
         Self {
             engine: Arc::new(Mutex::new(engine)),
-            recorder: None,
         }
     }
 
     pub fn from_shared(engine: Arc<Mutex<PaperExecutionEngine>>) -> Self {
-        Self {
-            engine,
-            recorder: None,
-        }
+        Self { engine }
     }
 
     pub fn engine(&self) -> Arc<Mutex<PaperExecutionEngine>> {
@@ -457,48 +451,60 @@ impl PaperTradingVenue {
 
 impl TradingVenue for PaperTradingVenue {
     fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
-        self.recorder.clone()
+        self.engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recorder
+            .clone()
     }
 
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
-        Box::pin(crate::execution_recording::operation(
-            self.recorder.as_ref(),
-            "account_snapshot",
-            serde_json::json!({"pair":pair}),
-            async move {
-                let engine = self
-                    .engine
-                    .lock()
-                    .map_err(|_| TradingVenueError::StatePoisoned)?;
-                if pair != engine.config().pair {
-                    return Err(TradingVenueError::Paper(
-                        PaperExecutionError::PairMismatch {
-                            expected: engine.config().pair.clone(),
-                            actual: pair.to_owned(),
-                        },
-                    ));
-                }
-                Ok(AccountSnapshot {
-                    open_orders: engine.open_orders(),
-                    balances: engine.balances(),
-                })
-            },
-        ))
+        Box::pin(async move {
+            let recorder = self.recorder();
+            crate::execution_recording::operation(
+                recorder.as_ref(),
+                "account_snapshot",
+                serde_json::json!({"pair":pair}),
+                async move {
+                    let engine = self
+                        .engine
+                        .lock()
+                        .map_err(|_| TradingVenueError::StatePoisoned)?;
+                    if pair != engine.config().pair {
+                        return Err(TradingVenueError::Paper(
+                            PaperExecutionError::PairMismatch {
+                                expected: engine.config().pair.clone(),
+                                actual: pair.to_owned(),
+                            },
+                        ));
+                    }
+                    Ok(AccountSnapshot {
+                        open_orders: engine.open_orders(),
+                        balances: engine.balances(),
+                    })
+                },
+            )
+            .await
+        })
     }
 
     fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
-        Box::pin(crate::execution_recording::operation(
-            self.recorder.as_ref(),
-            "place_order",
-            serde_json::json!(&request),
-            async move {
-                self.engine
-                    .lock()
-                    .map_err(|_| TradingVenueError::StatePoisoned)?
-                    .place_order(request.order)
-                    .map_err(TradingVenueError::Paper)
-            },
-        ))
+        Box::pin(async move {
+            let recorder = self.recorder();
+            crate::execution_recording::operation(
+                recorder.as_ref(),
+                "place_order",
+                serde_json::json!(&request),
+                async move {
+                    self.engine
+                        .lock()
+                        .map_err(|_| TradingVenueError::StatePoisoned)?
+                        .place_order(request.order)
+                        .map_err(TradingVenueError::Paper)
+                },
+            )
+            .await
+        })
     }
 
     fn cancel_orders<'a>(
@@ -506,18 +512,22 @@ impl TradingVenue for PaperTradingVenue {
         pair: &'a str,
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()> {
-        Box::pin(crate::execution_recording::operation(
-            self.recorder.as_ref(),
-            "cancel_orders",
-            serde_json::json!({"pair":pair,"order_ids":order_ids}),
-            async move {
-                self.engine
-                    .lock()
-                    .map_err(|_| TradingVenueError::StatePoisoned)?
-                    .cancel_orders(pair, order_ids);
-                Ok(())
-            },
-        ))
+        Box::pin(async move {
+            let recorder = self.recorder();
+            crate::execution_recording::operation(
+                recorder.as_ref(),
+                "cancel_orders",
+                serde_json::json!({"pair":pair,"order_ids":order_ids}),
+                async move {
+                    self.engine
+                        .lock()
+                        .map_err(|_| TradingVenueError::StatePoisoned)?
+                        .cancel_orders(pair, order_ids);
+                    Ok(())
+                },
+            )
+            .await
+        })
     }
 
     fn on_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
@@ -639,6 +649,7 @@ mod tests {
         PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
             vec![balance("btc", btc_free), balance("jpy", jpy_free)],
+            None,
         )
         .unwrap()
     }
@@ -917,6 +928,7 @@ mod tests {
                 balance("btc", Decimal::ZERO),
                 balance("jpy", Decimal::new(1_000_000, 0)),
             ],
+            None,
         )
         .unwrap();
         engine
@@ -1005,6 +1017,7 @@ mod tests {
                 balance("eth", Decimal::new(1, 0)),
                 balance("jpy", Decimal::ZERO),
             ],
+            None,
         )
         .unwrap();
         engine

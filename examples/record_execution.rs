@@ -37,8 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             onhand_amount: Decimal::from(1000),
         },
     ];
-    let venue = PaperTradingVenue::new(PaperExecutionEngine::new(config, balances).unwrap())
-        .with_recorder(recorder.clone());
+    let venue = PaperTradingVenue::new(
+        PaperExecutionEngine::new(config, balances, Some(recorder.clone())).unwrap(),
+    );
     let order = DesiredLimitOrder::limit(
         "btc_jpy".into(),
         OrderSide::Buy,

@@ -238,9 +238,10 @@ pub(crate) mod tests {
                     onhand_amount: 1000.into(),
                 },
             ],
+            Some(r.clone()),
         )
         .unwrap();
-        let v = PaperTradingVenue::new(engine).with_recorder(r.clone());
+        let v = PaperTradingVenue::new(engine);
         let order =
             DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 2.into(), 100.into());
         let placed = v.place_order(order.into()).await.unwrap();
@@ -305,7 +306,14 @@ pub(crate) mod tests {
             77
         );
         let failed = ExecutionRecorder::new("broken", json!({}), Broken);
-        let still_trading = v.with_recorder(failed.clone());
+        let still_trading = PaperTradingVenue::new(
+            PaperExecutionEngine::new(
+                v.engine().lock().unwrap().config().clone(),
+                account.balances.clone(),
+                Some(failed.clone()),
+            )
+            .unwrap(),
+        );
         assert!(still_trading.account_snapshot("btc_jpy").await.is_ok());
         assert!(failed.status().error.is_some());
         assert!(failed.flush().is_err());
@@ -314,6 +322,160 @@ pub(crate) mod tests {
             records.iter().filter(|r| r.kind == "http_started").count(),
             0
         );
+    }
+
+    fn recorded_paper(recorder: ExecutionRecorder) -> crate::paper_execution::PaperExecutionEngine {
+        use crate::{order_domain::BalanceSnapshot, paper_execution::*};
+        let balances = [("btc", 10), ("jpy", 1000)]
+            .into_iter()
+            .map(|(asset, amount)| BalanceSnapshot {
+                asset: asset.into(),
+                free_amount: amount.into(),
+                locked_amount: 0.into(),
+                onhand_amount: amount.into(),
+            })
+            .collect();
+        PaperExecutionEngine::new(
+            PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+            balances,
+            Some(recorder),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn order_manager_tasks_inherit_market_context() {
+        use crate::{
+            order_domain::{DesiredLimitOrder, OrderSide},
+            order_manager::{place_wanna_orders, place_wanna_orders_concurrent},
+            paper_execution::PaperTradingVenue,
+            trading_venue::TradingVenue,
+        };
+        let memory = Memory::default();
+        let recorder = ExecutionRecorder::new("parallel", json!({}), JsonlSink(memory.clone()));
+        let mut engine = recorded_paper(recorder.clone());
+        let order =
+            |price| DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 1.into(), price);
+        engine.place_order(order(100.into())).unwrap();
+        let venue = PaperTradingVenue::new(engine);
+        scope(
+            RecordingContext {
+                market_event_id: Some(77),
+                event_time_ms: Some(123),
+                ..Default::default()
+            },
+            async {
+                let account = venue.account_snapshot("btc_jpy").await.unwrap();
+                // Budget forces one placement before cancellation and another after it.
+                place_wanna_orders_concurrent(
+                    vec![order(90.into()), order(80.into())],
+                    account.open_orders,
+                    0.into(),
+                    90.into(),
+                    "btc_jpy".into(),
+                    venue.clone(),
+                )
+                .await;
+                let account = venue.account_snapshot("btc_jpy").await.unwrap();
+                assert_eq!(account.open_orders.len(), 2);
+                place_wanna_orders(
+                    [order(70.into())].into_iter().collect(),
+                    account.open_orders,
+                    "btc_jpy".into(),
+                    venue.clone(),
+                )
+                .await;
+            },
+        )
+        .await;
+        recorder.finish().unwrap();
+        let bytes = memory.0.lock().unwrap().clone();
+        let records = read_records(&bytes[..]).unwrap();
+        let operations: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind.starts_with("operation_"))
+            .collect();
+        assert_eq!(operations.len(), 14); // 2 snapshots, 3 placements, 2 cancellations; start and finish.
+        for record in operations {
+            assert_eq!(record.market_event_id, Some(77));
+            assert_eq!(record.event_time_ms, Some(123));
+            if record.kind == "operation_finished" {
+                assert_eq!(record.data["success"], true);
+            }
+        }
+        let operation_ids: std::collections::BTreeSet<_> = records
+            .iter()
+            .filter(|r| r.kind == "operation_started")
+            .map(|r| r.operation_id.unwrap())
+            .collect();
+        assert_eq!(operation_ids.len(), 7);
+        for record in records
+            .iter()
+            .filter(|r| r.kind == "paper_event" && r.operation_id.is_some())
+        {
+            assert_eq!(record.market_event_id, Some(77));
+            assert!(operation_ids.contains(&record.operation_id.unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn paper_clones_and_shared_handles_use_engine_recorder() {
+        use crate::{
+            order_domain::{DesiredLimitOrder, OrderSide},
+            paper_execution::PaperTradingVenue,
+            trading_venue::TradingVenue,
+        };
+        let memory = Memory::default();
+        let recorder = ExecutionRecorder::new("shared", json!({}), JsonlSink(memory.clone()));
+        let a = PaperTradingVenue::new(recorded_paper(recorder.clone()));
+        let b = a.clone();
+        let c = PaperTradingVenue::from_shared(a.engine());
+        for venue in [&a, &b, &c] {
+            assert!(venue.recorder().is_some());
+            venue
+                .place_order(
+                    DesiredLimitOrder::limit(
+                        "btc_jpy".into(),
+                        OrderSide::Buy,
+                        1.into(),
+                        100.into(),
+                    )
+                    .into(),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            a.account_snapshot("btc_jpy")
+                .await
+                .unwrap()
+                .open_orders
+                .len(),
+            3
+        );
+        recorder.finish().unwrap();
+        let bytes = memory.0.lock().unwrap().clone();
+        let records = read_records(&bytes[..]).unwrap();
+        assert!(records.iter().all(|r| r.run_id == "shared"));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.kind == "paper_initial_state")
+                .count(),
+            1
+        );
+        let accepted: Vec<_> = records.iter().filter(|r| r.kind == "paper_event").collect();
+        assert_eq!(accepted.len(), 3);
+        for event in accepted {
+            let id = event.operation_id.unwrap();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| r.operation_id == Some(id) && r.kind.starts_with("operation_"))
+                    .count(),
+                2
+            );
+        }
     }
     struct Broken;
     impl EventSink for Broken {

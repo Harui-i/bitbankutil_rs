@@ -11,10 +11,10 @@ HTTP通信の結果、paper tradingの約定や残高の変化などが含まれ
 ## 記録を始める
 
 記録するには、まず保存先を指定して `ExecutionRecorder` を作ります。
-次に、取引操作に使う `BitbankTradingVenue` または `PaperTradingVenue` の
-`with_recorder` メソッドに、そのレコーダーを渡します。
-以後、そのオブジェクトを通じて行った操作が記録されます。
+live tradingでは、取引操作に使う `BitbankTradingVenue` の `with_recorder` に、
+そのレコーダーを渡します。以後、そのオブジェクトを通じて行った操作が記録されます。
 `with_recorder` を呼ばなければ、記録用のファイルは作られず、通常どおり取引操作だけを行います。
+paper tradingでは、エンジンを作るときにレコーダーを渡します。設定方法は後述します。
 
 次の例は、live tradingの口座情報を取得し、その要求と結果を `execution.jsonl` に保存します。
 `JsonlSink` は、1行に1件のJSONを書き出す保存先です。
@@ -59,8 +59,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 この例では、取引操作を記録する `venue` と、最後に `finish()` を呼ぶコードが、
 1つのレコーダーを共有しています。
 
-paper tradingでは、作成した `PaperTradingVenue` に `with_recorder(recorder.clone())` を呼びます。
-この時点の残高・未約定注文・約定モデルの設定も保存されるため、取引操作を始める前に設定してください。
+paper tradingでは、`PaperExecutionEngine::new(config, balances, Some(recorder.clone()))` のように、
+第3引数にレコーダーを渡してエンジンを作ります。記録しない場合は `None` を渡してください。
+そのエンジンを `PaperTradingVenue::new(engine)` に渡して、取引操作に利用します。
+エンジン作成時に初期残高・約定モデルの設定を保存し、その後の注文や残高の変化も記録します。
+
+paper tradingの記録先は、エンジンの初期化時に決まり、後から変更するAPIはありません。
+`PaperTradingVenue` をクローンした場合も、`from_shared()` で同じエンジンを使う場合も、
+操作の要求・結果と注文・残高の変化は、すべてエンジンに設定したレコーダーへ記録されます。
+別の実行として記録したい場合は、新しいレコーダーとエンジンを作成してください。
+
 live tradingでは、`BitbankTradingVenue::with_recorder` が内部のAPIクライアントにもレコーダーを設定するので、
 HTTP通信を記録するために別途設定する必要はありません。
 
@@ -122,6 +130,7 @@ cargo run --example record_execution -- /tmp/execution.jsonl
 イベント時刻や操作・市場イベントとの関連を設定できます。
 別のタスクを生成して処理を引き継ぐ場合は、`current_context()` で取得した値を、
 生成先のタスクでも `scope` に渡してください。
+注文管理関数が内部で生成する発注・取消タスクには、ライブラリが自動的にコンテキストを引き継ぎます。
 
 ## 書き出しと保存失敗の扱い
 
