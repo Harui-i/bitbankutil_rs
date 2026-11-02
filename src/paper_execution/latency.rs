@@ -616,6 +616,13 @@ impl TradingVenue for PaperTradingVenue {
     fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
         self.engine.lock().unwrap().recorder.clone()
     }
+    fn has_pending_operations(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        !s.operations.is_empty()
+            || s.events
+                .values()
+                .any(|v| matches!(v.event, Internal::Publish { .. }))
+    }
     fn paper_settlement_status(&self) -> Option<PaperSettlementStatus> {
         let s = self.state.lock().unwrap();
         let mut status = self.engine.lock().unwrap().settlement_status();

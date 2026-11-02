@@ -198,6 +198,11 @@ paperランタイムは再接続後に届く市場情報を同じ戦略へ渡し
 
 ## 終了・切断と記録
 
+口座照会は `settlement_observation()` でwatermark、現在の未確定性、異常理由の参照だけを取得します。
+キュー履歴の長さによらず割当なしで取得でき、採取metadataへ保存するときだけ異常理由を
+settlement issues、model issuesの順にコピーします。過去の未確定照会の累積は現在の採取値には含めません。
+ランナーの保留判定は `TradingVenue::has_pending_operations()` を使い、キューや操作詳細を複製しません。
+
 `settlement_status()`（venueの共通APIでは `paper_settlement_status()`）は境界、仮定した遅延上限、
 保留中の取引・取消件数、未確定フラグ `unsettled`、異常理由 `issues` を返します。
 現在の操作・評価時刻まで境界が到達していない末尾も未確定です。終了時に必ず結果と一緒に保存し、
@@ -291,3 +296,12 @@ APIの項目は [REST API仕様](https://github.com/bitbankinc/bitbank-api-docs/
 
 長期backtestでのqueueの保持量、診断API、履歴整理の条件と合成benchmarkは
 [長期backtestのqueue履歴](queue-history.md)を参照してください。
+
+### 照会のキュー履歴コストの検証
+
+`cargo test --locked --test settlement_cost -- --nocapture` で、1価格レベルの外部数量増加を
+10 / 1,000 / 10,000回与え、履歴を保持したまま各処理を100回計測できます。
+割当数・要求bytes・経過時間を出力し、軽量metadataとpending判定が割当なしであること、
+記録なしの口座照会全体の割当数・bytesが履歴量によらないことを検証します。
+比較対象は従来の採取経路が使っていた詳細診断です。詳細診断の完全なsegment数も確認します。
+時間は実行環境に依存するため合否の基準には使いません。

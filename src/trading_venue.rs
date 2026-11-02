@@ -91,6 +91,12 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
         Ok(())
     }
 
+    /// 未応答の操作または未通知の状態更新があるか。詳細診断を構築せず判定する。
+    /// 内部イベントを扱うvenueは、その保留状態に合わせて実装する。
+    fn has_pending_operations(&self) -> bool {
+        false
+    }
+
     /// paper/backtestの確定状態。終了時にも保存し、未確定評価を識別する。
     fn paper_settlement_status(&self) -> Option<crate::paper_execution::PaperSettlementStatus> {
         None

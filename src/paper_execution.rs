@@ -198,6 +198,17 @@ pub struct PaperSettlementStatus {
     pub issues: Vec<String>,
 }
 
+/// 口座照会の採取に必要な確定状態。キューや保留操作の詳細を複製しない。
+/// issuesはエンジンを借用し、採取値として保存する場合だけコピーする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaperSettlementObservation<'a> {
+    pub watermark_ms: Option<i64>,
+    /// 現在の採取値の未確定性。過去の未確定照会の累積は含めない。
+    pub unsettled: bool,
+    pub issues: &'a [String],
+    pub model_issues: &'a [String],
+}
+
 /// メモリ上に保持する最近のpaperイベントの最大件数。
 pub const PAPER_EVENT_HISTORY_LIMIT: usize = 1024;
 
@@ -679,12 +690,24 @@ impl PaperExecutionEngine {
         self.record_settlement();
     }
 
-    /// 終了時にも取得・保存する。未確定残高を確定済み損益へ混ぜない。
     /// キュー本体を複製せず、保持量を取得する。数量を持つlevelと生存注文を走査する。
     pub fn queue_diagnostics(&self) -> PaperQueueDiagnostics {
         self.queue_model.diagnostics()
     }
 
+    /// 現在の口座照会用の確定状態を、割当やキューの走査なしで取得する。
+    /// 過去の未確定照会も含めた評価全体の診断には [`Self::settlement_status`] を使う。
+    pub fn settlement_observation(&self) -> PaperSettlementObservation<'_> {
+        PaperSettlementObservation {
+            watermark_ms: self.watermark_ms,
+            unsettled: self.current_unsettled(),
+            issues: &self.settlement_issues,
+            model_issues: &self.queue_model.issues,
+        }
+    }
+
+    /// 全キューの根拠を複製する詳細診断。終了時にも取得・保存する。
+    /// 未確定残高を確定済み損益へ混ぜない。通常の照会には [`Self::settlement_observation`] を使う。
     pub fn settlement_status(&self) -> PaperSettlementStatus {
         PaperSettlementStatus {
             execution_model: "observed_book_fifo_v1",

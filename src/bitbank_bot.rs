@@ -185,12 +185,12 @@ where
             select! {
                 biased;
                 _ = &mut shutdown_rx, if !stopping => { stopping = true; event_rx.close(); }
-                maybe_event = event_rx.recv(), if !runner.handler_pending() || runner.venue().paper_settlement_status().is_some_and(|s|s.pending_operations>0) => {
+                maybe_event = event_rx.recv(), if !runner.handler_pending() || runner.venue().has_pending_operations() => {
                     let Some(event) = maybe_event else {
                         // 将来の市場入力がなければwatermark待ちを完了できない。
                         // 送信済み操作はvenueに残し、shutdownを無期限に待たせない。
                         if runner.handler_pending() {
-                            if runner.venue().paper_settlement_status().is_some_and(|s|s.pending_operations>0) {
+                            if runner.venue().has_pending_operations() {
                                 runner.venue().mark_market_incomplete("shutdown with pending strategy operation");
                                 runner.stop_pending_handler();
                             } else if let Err(err)=runner.drive_direct(false).await {
@@ -1187,12 +1187,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                 self.finish_handler(result)?;
                 continue;
             }
-            if self.venue.next_internal_time().is_some()
-                || self
-                    .venue
-                    .paper_settlement_status()
-                    .is_some_and(|s| s.pending_operations > 0)
-            {
+            if self.venue.next_internal_time().is_some() || self.venue.has_pending_operations() {
                 return Ok(());
             }
             self.wake.notified().await;
