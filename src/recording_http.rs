@@ -1,4 +1,7 @@
-use crate::{bitbank_structs::BitbankApiResponse, execution_recording::ExecutionRecorder};
+use crate::{
+    bitbank_structs::BitbankApiResponse,
+    execution_recording::{ExecutionRecorder, Measurement, current_context, scope},
+};
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankOption, BitbankOptions},
     generic_api_client::http::*,
@@ -56,6 +59,27 @@ impl Transport {
         query: Option<&Q>,
         body: Option<B>,
     ) -> Result<BitbankApiResponse, RequestError<&'static str, BitbankHandleError>> {
+        let mut context = current_context();
+        if let Some(r) = &self.recorder {
+            if context.operation_id.is_none() {
+                context.operation_id = Some(r.next_id());
+            }
+        }
+        scope(
+            context,
+            self.request_inner(options, method, path, query, body),
+        )
+        .await
+    }
+
+    async fn request_inner<Q: Serialize + ?Sized, B: Serialize>(
+        &self,
+        options: &BitbankOptions,
+        method: Method,
+        path: &str,
+        query: Option<&Q>,
+        body: Option<B>,
+    ) -> Result<BitbankApiResponse, RequestError<&'static str, BitbankHandleError>> {
         let handler = <BitbankOption as HttpOption<'_, BitbankApiResponse, &B>>::request_handler(
             options.clone(),
         );
@@ -67,16 +91,50 @@ impl Transport {
             code: Mutex::new(None),
         };
         let request_id = self.recorder.as_ref().map(|r| r.next_id());
+        let request = self.recorder.as_ref().map(|_| {
+            let value = body
+                .as_ref()
+                .and_then(|v| serde_json::to_value(v).ok())
+                .or_else(|| query.and_then(|v| serde_json::to_value(v).ok()));
+            safe_request(path, value.as_ref().unwrap_or(&Value::Null))
+        });
+        let total = Measurement::start();
+        if let Some(r) = &self.recorder {
+            r.record(
+                "http_request_started",
+                json!({
+                    "request_id": request_id, "method": method.as_str(), "endpoint": path,
+                    "request": request, "started_at_unix_us": total.started_at_unix_us(),
+                }),
+            );
+        }
         for attempt in 1..=config.max_try {
             *observed.status.lock().unwrap() = None;
             *observed.code.lock().unwrap() = None;
+            let measurement = Measurement::start();
             if let Some(r) = &self.recorder {
-                r.record("http_started",json!({"request_id":request_id,"attempt":attempt,"method":method.as_str(),"endpoint":path}));
+                r.record(
+                    "http_started",
+                    json!({
+                        "request_id": request_id, "attempt": attempt,
+                        "method": method.as_str(), "endpoint": path, "request": request,
+                        "started_at_unix_us": measurement.started_at_unix_us(),
+                    }),
+                );
             }
             let result = self
                 .http
                 .request(method.clone(), path, query, body.as_ref(), &observed)
                 .await;
+            let timing = measurement.finish();
+            let timeout = match &result {
+                Err(RequestError::SendRequest(e) | RequestError::ReceiveResponse(e)) => {
+                    e.is_timeout()
+                }
+                _ => false,
+            };
+            let will_retry =
+                matches!(result, Err(RequestError::SendRequest(_))) && attempt < config.max_try;
             let stage = match &result {
                 Ok(_) => "success",
                 Err(RequestError::SendRequest(_)) => "send",
@@ -85,11 +143,31 @@ impl Transport {
                 Err(RequestError::ResponseHandleError(_)) => "response",
             };
             if let Some(r) = &self.recorder {
-                r.record("http_finished",json!({"request_id":request_id,"attempt":attempt,"method":method.as_str(),"endpoint":path,"success":result.is_ok(),"stage":stage,"http_status":*observed.status.lock().unwrap(),"exchange_code":*observed.code.lock().unwrap(),"sent":stage!="build", "result": result.as_ref().ok().map(|response| safe_result(path, &response.data))}));
+                r.record("http_finished", json!({
+                    "request_id": request_id, "attempt": attempt,
+                    "method": method.as_str(), "endpoint": path,
+                    "success": result.is_ok(), "stage": stage,
+                    "http_status": *observed.status.lock().unwrap(),
+                    "exchange_code": *observed.code.lock().unwrap(),
+                    "send_attempted": stage != "build", "timeout": timeout,
+                    "will_retry": will_retry, "timing": timing,
+                    "result": result.as_ref().ok().map(|response| safe_result(path, &response.data)),
+                }));
             }
-            if matches!(result, Err(RequestError::SendRequest(_))) && attempt < config.max_try {
+            if will_retry {
                 tokio::time::sleep(config.retry_cooldown).await;
             } else {
+                let timing = total.finish();
+                if let Some(r) = &self.recorder {
+                    r.record(
+                        "http_request_finished",
+                        json!({
+                            "request_id": request_id, "method": method.as_str(), "endpoint": path,
+                            "success": result.is_ok(), "attempts": attempt, "timing": timing,
+                            "timeout": timeout, "stage": stage,
+                        }),
+                    );
+                }
                 return result;
             }
         }
@@ -118,6 +196,7 @@ fn safe_result(path: &str, data: &Value) -> Value {
         "price",
         "average_price",
         "ordered_at",
+        "canceled_at",
         "status",
     ];
     match path {
@@ -129,5 +208,65 @@ fn safe_result(path: &str, data: &Value) -> Value {
         }
         "/user/spot/order" | "/user/spot/cancel_order" => fields(data, &order_keys),
         _ => Value::Null,
+    }
+}
+
+// 認証前の引数も丸ごと保存せず、注文操作に必要なフィールドだけを選ぶ。
+fn safe_request(path: &str, value: &Value) -> Value {
+    let keys: &[&str] = match path {
+        "/user/spot/order"
+        | "/user/spot/cancel_order"
+        | "/user/spot/cancel_orders"
+        | "/user/spot/active_orders" => &[
+            "pair",
+            "order_id",
+            "order_ids",
+            "amount",
+            "price",
+            "side",
+            "type",
+            "post_only",
+            "trigger_price",
+        ],
+        _ => &[],
+    };
+    let mut result = serde_json::Map::new();
+    for key in keys {
+        if let Some(v) = value.get(*key) {
+            result.insert((*key).into(), v.clone());
+        }
+    }
+    Value::Object(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exchange_times_stay_missing_or_null_and_only_allowlisted_fields_survive() {
+        let result = safe_result(
+            "/user/spot/cancel_orders",
+            &json!({"orders":[
+                {"order_id":1,"ordered_at":100,"canceled_at":null,"status":"FULLY_FILLED","secret":"sentinel"},
+                {"order_id":2,"status":"CANCELED_UNFILLED"}
+            ]}),
+        );
+        let first = &result["orders"][0];
+        assert_eq!(first["ordered_at"], 100);
+        assert!(first.get("canceled_at").unwrap().is_null());
+        assert_eq!(first["status"], "FULLY_FILLED");
+        let second = &result["orders"][1];
+        assert!(second.get("ordered_at").is_none());
+        assert!(second.get("canceled_at").is_none());
+        assert!(!result.to_string().contains("sentinel"));
+        let request = safe_request(
+            "/user/spot/cancel_order",
+            &json!({
+                "order_id":1,"pair":"btc_jpy","ACCESS-KEY":"sentinel","signature":"sentinel"
+            }),
+        );
+        assert_eq!(request, json!({"order_id":1,"pair":"btc_jpy"}));
+        assert!(safe_result("/user/subscribe", &json!({"token":"sentinel"})).is_null());
     }
 }
