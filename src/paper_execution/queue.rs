@@ -2,6 +2,7 @@
 use super::*;
 use crate::{depth::Depth, market_event::MarketDepthSnapshot};
 use rust_decimal::prelude::FromPrimitive;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaperModelUnavailable {
@@ -43,19 +44,43 @@ struct Book {
     asks: BTreeMap<Decimal, Decimal>,
 }
 
+type LevelKey = (OrderSide, Decimal);
+
 #[derive(Debug)]
 struct Level {
-    side: OrderSide,
-    price: Decimal,
     displayed: Decimal,
     segments: Vec<PaperQueueSegment>,
+}
+
+/// キュー本体をコピーせず取得できる保持量。空の価格根拠は retained_levels に含む。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PaperQueueDiagnostics {
+    /// 生存自注文を持つ価格数。
+    pub active_levels: usize,
+    /// 空価格の最終表示数量を含む、再受付の根拠を保持する価格数。
+    pub retained_levels: usize,
+    /// 正の外部数量または自注文segmentを持つ価格数。
+    pub queue_levels: usize,
+    /// 現在保持するsegment数。
+    pub segments: usize,
+    /// 生存自注文数。
+    pub live_orders: usize,
+    /// 消化済み外部数量と終了自注文のsegment除去累計。
+    pub removed_segments: u64,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct QueueModel {
     book: Option<Book>,
     observed_mode: Option<String>,
-    levels: Vec<Level>,
+    // 数量/自注文を持つ価格だけを約定検索する。
+    levels: BTreeMap<LevelKey, Level>,
+    // 空の価格にも最終表示数量を残す。再受付で消化済み数量を復活させない。
+    empty_levels: BTreeMap<LevelKey, Decimal>,
+    // 直前表示が正の価格。次の板から消えた価格も一度だけ更新する。
+    displayed_levels: BTreeSet<LevelKey>,
+    order_levels: BTreeMap<OrderId, LevelKey>,
+    removed_segments: u64,
     pub issues: Vec<String>,
 }
 
@@ -69,9 +94,9 @@ impl QueueModel {
     pub fn state(&self) -> Vec<PaperQueueLevel> {
         self.levels
             .iter()
-            .map(|l| PaperQueueLevel {
-                side: l.side,
-                price: l.price,
+            .map(|(&(side, price), l)| PaperQueueLevel {
+                side,
+                price,
                 segments: l.segments.clone(),
             })
             .collect()
@@ -142,23 +167,54 @@ impl QueueModel {
             self.issue("incomplete or invalid observed book");
             return;
         };
-        for level in &mut self.levels {
-            let displayed = match level.side {
+        // 過去の全価格ではなく、新板の表示価格と前回表示が正だった価格だけを更新。
+        let keys: BTreeSet<_> = self
+            .displayed_levels
+            .iter()
+            .copied()
+            .chain(book.bids.keys().map(|&p| (OrderSide::Buy, p)))
+            .chain(book.asks.keys().map(|&p| (OrderSide::Sell, p)))
+            .collect();
+        for key @ (side, price) in keys {
+            let displayed = match side {
                 OrderSide::Buy => &book.bids,
                 OrderSide::Sell => &book.asks,
             }
-            .get(&level.price)
+            .get(&price)
             .copied()
             .unwrap_or_default();
-            // 取消/減少から先頭数量は減らさない。増加分は既存注文の後ろへ置く。
-            if displayed > level.displayed {
-                level.segments.push(PaperQueueSegment {
-                    effective_after_ms: exchange_now.max(depth.last_timestamp()),
-                    external_amount: displayed - level.displayed,
-                    order_id: None,
-                });
+            if let Some(old) = self.empty_levels.get(&key).copied() {
+                if displayed > old {
+                    self.empty_levels.remove(&key);
+                    self.levels.insert(
+                        key,
+                        Level {
+                            displayed: old,
+                            segments: Vec::new(),
+                        },
+                    );
+                } else {
+                    *self.empty_levels.get_mut(&key).unwrap() = displayed;
+                }
             }
-            level.displayed = displayed;
+            if let Some(level) = self.levels.get_mut(&key) {
+                // 取消/減少から先頭数量は減らさない。増加分は既存注文の後ろへ置く。
+                if displayed > level.displayed {
+                    level.segments.push(PaperQueueSegment {
+                        effective_after_ms: exchange_now.max(depth.last_timestamp()),
+                        external_amount: displayed - level.displayed,
+                        order_id: None,
+                    });
+                }
+                level.displayed = displayed;
+            }
+            if self.levels.contains_key(&key) || self.empty_levels.contains_key(&key) {
+                if displayed > Decimal::ZERO {
+                    self.displayed_levels.insert(key);
+                } else {
+                    self.displayed_levels.remove(&key);
+                }
+            }
         }
         self.book = Some(book);
     }
@@ -214,25 +270,24 @@ impl QueueModel {
         .get(&order.price)
         .copied()
         .unwrap_or_default();
-        let index = self
-            .levels
-            .iter()
-            .position(|l| l.side == order.side && l.price == order.price);
-        let level = if let Some(i) = index {
-            &mut self.levels[i]
-        } else {
-            self.levels.push(Level {
-                side: order.side,
-                price: order.price,
-                displayed,
-                segments: vec![PaperQueueSegment {
+        let key = (order.side, order.price);
+        let previous = self.empty_levels.remove(&key);
+        let level = self.levels.entry(key).or_insert_with(|| Level {
+            displayed: previous.unwrap_or(displayed),
+            segments: if previous.is_some() || displayed == Decimal::ZERO {
+                Vec::new()
+            } else {
+                vec![PaperQueueSegment {
                     effective_after_ms: at,
                     external_amount: displayed,
                     order_id: None,
-                }],
-            });
-            self.levels.last_mut().unwrap()
-        };
+                }]
+            },
+        });
+        self.order_levels.insert(id, key);
+        if displayed > Decimal::ZERO {
+            self.displayed_levels.insert(key);
+        }
         level.segments.push(PaperQueueSegment {
             effective_after_ms: at,
             external_amount: Decimal::ZERO,
@@ -240,11 +295,28 @@ impl QueueModel {
         });
     }
     pub fn remove(&mut self, id: OrderId) {
-        for level in &mut self.levels {
+        if let Some(key) = self.order_levels.remove(&id) {
+            let level = self.levels.get_mut(&key).expect("indexed order level");
             level.segments.retain(|s| s.order_id != Some(id));
+            self.removed_segments += 1;
+            self.retire_empty(key);
         }
-        // 自注文がなくても消化済み外部数量の履歴は残す。
-        // 古い観測板から再初期化すると、watermarkを先に進めた経路だけ外部数量が復活する。
+    }
+    fn retire_empty(&mut self, key: LevelKey) {
+        if self.levels.get(&key).is_some_and(|l| l.segments.is_empty()) {
+            let level = self.levels.remove(&key).unwrap();
+            self.empty_levels.insert(key, level.displayed);
+        }
+    }
+    pub fn diagnostics(&self) -> PaperQueueDiagnostics {
+        PaperQueueDiagnostics {
+            active_levels: self.order_levels.values().collect::<BTreeSet<_>>().len(),
+            retained_levels: self.levels.len() + self.empty_levels.len(),
+            queue_levels: self.levels.len(),
+            segments: self.levels.values().map(|l| l.segments.len()).sum(),
+            live_orders: self.order_levels.len(),
+            removed_segments: self.removed_segments,
+        }
     }
     pub fn allocations(
         &mut self,
@@ -262,26 +334,33 @@ impl QueueModel {
                         && cancel_at.get(id).is_none_or(|t| trade.executed_at < *t)
                 })
         };
-        let mut indices = self
-            .levels
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| match (trade.side, l.side) {
-                (OrderSide::Buy, OrderSide::Sell) => trade.price >= l.price,
-                (OrderSide::Sell, OrderSide::Buy) => trade.price <= l.price,
-                _ => false,
-            })
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>();
-        indices.sort_by(|&a, &b| match trade.side {
-            OrderSide::Buy => self.levels[a].price.cmp(&self.levels[b].price),
-            OrderSide::Sell => self.levels[b].price.cmp(&self.levels[a].price),
-        });
         let mut remaining = trade.amount;
         let mut fills = Vec::new();
-        for index in indices {
-            let level = &mut self.levels[index];
-            let through = trade.price != level.price;
+        let mut emptied = Vec::new();
+        // side/price順の範囲検索。Buy側は高価格、Sell側は低価格が優先。
+        let (ascending, descending) = match trade.side {
+            OrderSide::Buy => {
+                (
+                    Some(self.levels.range_mut(
+                        (OrderSide::Sell, Decimal::MIN)..=(OrderSide::Sell, trade.price),
+                    )),
+                    None,
+                )
+            }
+            OrderSide::Sell => (
+                None,
+                Some(
+                    self.levels
+                        .range_mut((OrderSide::Buy, trade.price)..=(OrderSide::Buy, Decimal::MAX)),
+                ),
+            ),
+        };
+        for (&key, level) in ascending
+            .into_iter()
+            .flatten()
+            .chain(descending.into_iter().flatten().rev())
+        {
+            let through = trade.price != key.1;
             // 旧自注文の後ろの外部数量も、その成立時刻に存在したなら消化する。
             // 将来の自注文だけを飛ばし、確定を遅らせても列を同じ状態へ進める。
             for segment in &mut level.segments {
@@ -309,7 +388,172 @@ impl QueueModel {
                     }
                 }
             }
+            let before = level.segments.len();
+            level
+                .segments
+                .retain(|s| s.order_id.is_some() || s.external_amount > Decimal::ZERO);
+            self.removed_segments += (before - level.segments.len()) as u64;
+            if level.segments.is_empty() {
+                emptied.push(key);
+            }
+        }
+        for key in emptied {
+            self.retire_empty(key);
         }
         fills
+    }
+}
+
+#[cfg(test)]
+#[path = "queue/legacy.rs"]
+mod legacy;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book(t: i64, quantity: f64) -> MarketDepthSnapshot {
+        MarketDepthSnapshot::new(
+            [(110.into(), quantity), (120.into(), 1.0)].into(),
+            [(90.into(), 1.0), (100.into(), quantity)].into(),
+            t,
+        )
+    }
+    fn normalized(state: Vec<PaperQueueLevel>) -> serde_json::Value {
+        let mut state = state
+            .into_iter()
+            .filter_map(|mut l| {
+                l.segments
+                    .retain(|s| s.order_id.is_some() || s.external_amount > Decimal::ZERO);
+                (!l.segments.is_empty()).then_some(l)
+            })
+            .collect::<Vec<_>>();
+        state.sort_by_key(|l| (l.side, l.price));
+        serde_json::to_value(state).unwrap()
+    }
+    #[test]
+    fn differential_against_023_queue() {
+        // 受信順と成立順を混ぜ、同ms/過去時刻の資格も直接比較する。
+        for seed in 1..=12u64 {
+            let mut random = seed;
+            let mut new = QueueModel::default();
+            let mut old = legacy::QueueModel::default();
+            let mut orders = BTreeMap::<OrderId, OpenOrder>::new();
+            let mut cancel = BTreeMap::new();
+            let mut ids = Vec::new();
+            for t in 1..=1200 {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                match random % 5 {
+                    0 | 1 => {
+                        let b = book(t, (random % 7 + 1) as f64);
+                        new.observe_book(&b, t + 5, t + 2);
+                        old.observe_book(&b, t + 5, t + 2);
+                    }
+                    2 if new.book.is_some() => {
+                        let side = if random & 8 == 0 {
+                            OrderSide::Buy
+                        } else {
+                            OrderSide::Sell
+                        };
+                        let offset = ((random >> 8) % 6) as i64;
+                        let price = if side == OrderSide::Buy {
+                            100 - offset
+                        } else {
+                            110 + offset
+                        };
+                        let order = DesiredLimitOrder::limit(
+                            "btc_jpy".into(),
+                            side,
+                            1.into(),
+                            price.into(),
+                        );
+                        assert_eq!(new.admission(&order, true), old.admission(&order, true));
+                        let id = OrderId(t as u64);
+                        new.accept(&order, id, t);
+                        old.accept(&order, id, t);
+                        orders.insert(
+                            id,
+                            OpenOrder {
+                                order_id: id,
+                                pair: order.pair.clone(),
+                                side,
+                                order_type: crate::order_domain::OrderType::Limit,
+                                remaining_amount: 1.into(),
+                                price: Some(order.price),
+                                post_only: Some(true),
+                            },
+                        );
+                        if random & 32 != 0 {
+                            cancel.insert(id, t + 10);
+                        }
+                        ids.push(id);
+                    }
+                    3 => {
+                        if let Some(id) = ids.pop() {
+                            new.remove(id);
+                            old.remove(id);
+                            orders.remove(&id);
+                            cancel.remove(&id);
+                        }
+                    }
+                    _ => {
+                        let trade = MarketTrade {
+                            transaction_id: t,
+                            executed_at: t - (random % 9) as i64,
+                            side: if random & 8 == 0 {
+                                OrderSide::Buy
+                            } else {
+                                OrderSide::Sell
+                            },
+                            price: (if random & 16 == 0 { 100 } else { 110 }).into(),
+                            amount: (random % 11 + 1).into(),
+                        };
+                        let fills = new.allocations(&trade, &orders, &cancel);
+                        assert_eq!(fills, old.allocations(&trade, &orders, &cancel));
+                        for (id, amount) in fills {
+                            let order = orders.get_mut(&id).unwrap();
+                            order.remaining_amount -= amount;
+                            if order.remaining_amount == Decimal::ZERO {
+                                orders.remove(&id);
+                                new.remove(id);
+                                old.remove(id);
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    normalized(new.state()),
+                    normalized(old.state()),
+                    "seed={seed}, step={t}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exhausted_history_keeps_only_price_evidence() {
+        let mut q = QueueModel::default();
+        for t in 1..=2000 {
+            let b = book(t * 3, if t % 2 == 0 { 1.0 } else { 2.0 });
+            q.observe_book(&b, t * 3, t * 3);
+            let o =
+                DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 1.into(), 100.into());
+            q.accept(&o, OrderId(t as u64), t * 3);
+            q.remove(OrderId(t as u64));
+            q.allocations(
+                &MarketTrade {
+                    transaction_id: t,
+                    executed_at: t * 3 + 1,
+                    side: OrderSide::Sell,
+                    price: 100.into(),
+                    amount: 100.into(),
+                },
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            );
+            assert!(q.state().is_empty());
+            assert_eq!(q.diagnostics().segments, 0);
+            assert_eq!(q.diagnostics().retained_levels, 1);
+        }
+        assert!(q.diagnostics().removed_segments >= 3000);
     }
 }

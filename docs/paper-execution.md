@@ -294,6 +294,9 @@ APIの項目は [REST API仕様](https://github.com/bitbankinc/bitbank-api-docs/
 約定数量・代金・手数料・評価損益・共通の約定後価格列での値動きを比較します。
 これは合成時系列による回帰検証です。実履歴での性能やpaper tradingの発生頻度の実測ではありません。
 
+長期backtestでのqueueの保持量、診断API、履歴整理の条件と合成benchmarkは
+[長期backtestのqueue履歴](queue-history.md)を参照してください。
+
 ### 照会のキュー履歴コストの検証
 
 `cargo test --locked --test settlement_cost -- --nocapture` で、1価格レベルの外部数量増加を

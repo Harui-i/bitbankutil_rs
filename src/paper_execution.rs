@@ -174,7 +174,9 @@ pub struct PaperSettlementStatus {
     pub execution_model: &'static str,
     pub book: Option<PaperBookEvidence>,
     pub book_age_ms: Option<i64>,
+    /// 数量または自注文を持つ価格のみ。side/price順。空価格の根拠は診断件数で確認する。
     pub queue: Vec<PaperQueueLevel>,
+    pub queue_diagnostics: PaperQueueDiagnostics,
     /// 根拠不足・未対応の評価履歴。新しい板が届いても消さない。
     pub model_issues: Vec<String>,
     pub observed_market_mode: Option<String>,
@@ -688,6 +690,11 @@ impl PaperExecutionEngine {
         self.record_settlement();
     }
 
+    /// キュー本体を複製せず、保持量を取得する。数量を持つlevelと生存注文を走査する。
+    pub fn queue_diagnostics(&self) -> PaperQueueDiagnostics {
+        self.queue_model.diagnostics()
+    }
+
     /// 現在の口座照会用の確定状態を、割当やキューの走査なしで取得する。
     /// 過去の未確定照会も含めた評価全体の診断には [`Self::settlement_status`] を使う。
     pub fn settlement_observation(&self) -> PaperSettlementObservation<'_> {
@@ -710,6 +717,7 @@ impl PaperExecutionEngine {
                 .evidence()
                 .and_then(|b| self.exchange_now_ms().ok()?.checked_sub(b.exchange_at_ms)),
             queue: self.queue_model.state(),
+            queue_diagnostics: self.queue_diagnostics(),
             model_issues: self.queue_model.issues.clone(),
             observed_market_mode: self.queue_model.observed_mode(),
             normal_mode_assumed: self.config.assume_normal_mode
@@ -886,7 +894,10 @@ impl PaperExecutionEngine {
 mod latency;
 pub use latency::{PaperLatencyConfig, PaperOperationLatency, PaperTradingVenue};
 mod queue;
-pub use queue::{PaperBookEvidence, PaperModelUnavailable, PaperQueueLevel, PaperQueueSegment};
+pub use queue::{
+    PaperBookEvidence, PaperModelUnavailable, PaperQueueDiagnostics, PaperQueueLevel,
+    PaperQueueSegment,
+};
 
 fn parse_jpy_pair(pair: &str) -> Result<(String, String), PaperExecutionError> {
     let Some(base) = pair.strip_suffix("_jpy") else {

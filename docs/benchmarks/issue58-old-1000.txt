@@ -1,0 +1,8 @@
+phase,ms,allocations,allocated_bytes,live_heap_bytes,peak_heap_bytes
+build,67.425,67008,13378560,388158,389582
+observe_book_200,1.358,1200,310400,388158,389582
+accept_remove_200,1.146,2,200,388325,388365
+allocations_200,3.802,2000,4872000,388325,404525
+state_200,8.023,200600,41643200,388325,596541
+diagnostics=PaperQueueDiagnostics { active_levels: 1, retained_levels: 1002, queue_levels: 1002, segments: 4003, live_orders: 1, removed_segments: 0 }
+VmHWM:	    3196 kB
