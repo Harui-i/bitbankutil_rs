@@ -145,7 +145,7 @@ async fn demo(
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn deterministic_orders_fills_fees_and_balance() {
+    async fn deterministic_queue_prevents_fills_behind_displayed_volume() {
         let mut results = Vec::new();
         for n in 0..2 {
             let path =
@@ -153,7 +153,9 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             let account = demo(path.to_string_lossy().into_owned()).await.unwrap();
             assert!(account.open_orders.is_empty());
-            assert_eq!(account.balances[0].free_amount, Decimal::new(75, 2));
+            // 最終注文99.5の前には表示数量2があり、公開約定0.75では自分まで届かない。
+            assert_eq!(account.balances[0].free_amount, Decimal::ZERO);
+            assert_eq!(account.balances[1].free_amount, Decimal::from(1000));
             let records =
                 read_records(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).unwrap();
             let events: Vec<_> = records
@@ -161,7 +163,13 @@ mod tests {
                 .filter(|r| r.kind == "paper_event")
                 .map(|r| r.data.clone())
                 .collect();
-            assert!(events.len() >= 5);
+            assert_eq!(events.len(), 6);
+            assert!(
+                events
+                    .iter()
+                    .all(|v| v["event"].get("OrderFilled").is_none())
+            );
+            assert!(records.iter().any(|r| r.kind == "paper_queue_trade"));
             assert!(
                 records
                     .iter()

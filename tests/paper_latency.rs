@@ -16,6 +16,11 @@ fn engine(
     delta: i64,
     recorder: Option<ExecutionRecorder>,
 ) -> PaperExecutionEngine {
+    let initial_local_ms = match &clock {
+        PaperClock::Replay { now_ms } => *now_ms,
+        PaperClock::Realtime => bitbankutil_rs::execution_recording::timestamp_ms() as i64,
+    };
+    let exchange_ms = initial_local_ms.checked_add(delta).unwrap();
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
     config.time_model = PaperTimeModel::FixedOffset {
         exchange_minus_local_ms: delta,
@@ -35,6 +40,7 @@ fn engine(
             .collect(),
         recorder,
     )
+    .map(|engine| seeded_engine(engine, exchange_ms))
     .unwrap()
 }
 fn sell(price: i64) -> DesiredLimitOrder {
@@ -1019,4 +1025,17 @@ async fn failed_derived_market_validation_restores_queued_external_input() {
         Err(BotRunError::Venue(_))
     ));
     assert_eq!(runner.pending_delivery_count(), 1);
+}
+
+// 時刻・資金の回帰fixture。注文価格をspread内に置き、先行数量を0にする。
+fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExecutionEngine {
+    engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
+        pair: "btc_jpy".into(),
+        depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
+            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            exchange_ms,
+        ),
+    });
+    engine
 }

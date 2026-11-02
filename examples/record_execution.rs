@@ -46,6 +46,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .unwrap(),
     );
+    // 合成fixtureの可視板。注文価格100はspread内で、先行数量は0。
+    venue
+        .on_market_event(&MarketEvent::DepthUpdated {
+            pair: "btc_jpy".into(),
+            depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
+                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                0,
+            ),
+        })
+        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     let order = DesiredLimitOrder::limit(
         "btc_jpy".into(),
         OrderSide::Buy,

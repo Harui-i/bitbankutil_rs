@@ -50,6 +50,8 @@ pub struct PaperExecutionConfig {
     pub next_order_id: OrderId,
     /// ローカル時計から取引所時計への写像。実行中は固定する。
     pub time_model: PaperTimeModel,
+    /// mode未観測時だけNormal(NONE)を仮定する。観測済みmodeは常に優先。
+    pub assume_normal_mode: bool,
 }
 
 impl PaperExecutionConfig {
@@ -60,6 +62,7 @@ impl PaperExecutionConfig {
             pair,
             next_order_id: OrderId(1),
             time_model: PaperTimeModel::default(),
+            assume_normal_mode: true,
         })
     }
 }
@@ -123,6 +126,8 @@ pub enum PaperEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaperRejectReason {
+    PostOnlyWouldTakeLiquidity,
+    ExecutionModelUnavailable(PaperModelUnavailable),
     PairMismatch {
         expected: String,
         actual: String,
@@ -141,6 +146,8 @@ pub enum PaperRejectReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PaperExecutionError {
+    PostOnlyWouldTakeLiquidity,
+    ExecutionModelUnavailable(PaperModelUnavailable),
     InvalidClock,
     InvalidWatermark,
     InvalidTradeStream,
@@ -164,6 +171,14 @@ pub enum PaperExecutionError {
 /// 確定境界と未確定状態。issuesがある評価は正常な損益として扱わない。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PaperSettlementStatus {
+    pub execution_model: &'static str,
+    pub book: Option<PaperBookEvidence>,
+    pub book_age_ms: Option<i64>,
+    pub queue: Vec<PaperQueueLevel>,
+    /// 根拠不足・未対応の評価履歴。新しい板が届いても消さない。
+    pub model_issues: Vec<String>,
+    pub observed_market_mode: Option<String>,
+    pub normal_mode_assumed: bool,
     /// 結果の比較・識別用に、記録の有無によらず設定を残す。
     pub time_model: PaperTimeModel,
     /// 取引所UTC Unix ms。
@@ -210,6 +225,7 @@ pub struct PaperExecutionEngine {
     max_trade_delay_ms: Option<i64>,
     settlement_issues: Vec<String>,
     uncertain_query_observations: usize,
+    queue_model: queue::QueueModel,
     base_asset: String,
     quote_asset: String,
     balances: BTreeMap<String, BalanceSnapshot>,
@@ -260,6 +276,7 @@ impl PaperExecutionEngine {
             max_trade_delay_ms: None,
             settlement_issues: Vec::new(),
             uncertain_query_observations: 0,
+            queue_model: queue::QueueModel::default(),
             base_asset,
             quote_asset,
             balances,
@@ -272,7 +289,7 @@ impl PaperExecutionEngine {
             recorder.record(
                 "paper_initial_state",
                 serde_json::json!({
-                    "config": engine.config(), "clock": engine.clock, "model": "limit_price_trade_volume_v4_fixed_offset",
+                    "config": engine.config(), "clock": engine.clock, "model": "observed_book_fifo_v1",
                     "balances": engine.balances(), "open_orders": engine.open_orders()
                 }),
             );
@@ -327,6 +344,57 @@ impl PaperExecutionEngine {
         }
         // 変換失敗で資金を拘束せず、資金不足で操作時刻下限を進めない。
         let exchange_now = self.exchange_now_ms()?;
+        let evidence = match self
+            .queue_model
+            .admission(&order, self.config.assume_normal_mode)
+        {
+            Ok(evidence) => evidence,
+            Err(reason) => {
+                if let PaperRejectReason::ExecutionModelUnavailable(ref unavailable) = reason {
+                    self.queue_model
+                        .issue(&format!("admission unavailable: {unavailable:?}"));
+                }
+                if let Some(recorder) = &self.recorder {
+                    recorder.record("paper_queue_rejection", serde_json::json!({"order":order,"reason":reason,"exchange_ms":exchange_now,"book":self.queue_model.evidence(),"observed_market_mode":self.queue_model.observed_mode()}));
+                }
+                self.record_event(PaperEvent::OrderRejected {
+                    order,
+                    reason: reason.clone(),
+                });
+                return Err(reason.into());
+            }
+        };
+        let effective = self
+            .time_floor
+            .max(exchange_now)
+            .max(self.watermark_ms.unwrap_or(i64::MIN));
+        if self.open_orders.values().any(|existing| {
+            existing.side != order.side
+                && existing.remaining_amount > Decimal::ZERO
+                && self
+                    .cancel_at
+                    .get(&existing.order_id)
+                    .is_none_or(|t| effective < *t)
+                && existing.price.is_some_and(|p| match order.side {
+                    OrderSide::Buy => order.price >= p,
+                    OrderSide::Sell => order.price <= p,
+                })
+        }) {
+            let reason = if order.post_only == Some(true) {
+                PaperRejectReason::PostOnlyWouldTakeLiquidity
+            } else {
+                self.queue_model
+                    .issue("admission unavailable: own crossing order requires taker");
+                PaperRejectReason::ExecutionModelUnavailable(
+                    PaperModelUnavailable::UnsupportedTaker,
+                )
+            };
+            self.record_event(PaperEvent::OrderRejected {
+                order,
+                reason: reason.clone(),
+            });
+            return Err(reason.into());
+        }
         let lock_result = self.lock_funds_for_order(&order);
         if let Err(err) = lock_result {
             self.record_event(PaperEvent::OrderRejected {
@@ -340,9 +408,15 @@ impl PaperExecutionEngine {
         let order_id = self.config.next_order_id;
         self.effective_after.insert(order_id, self.time_floor);
         self.config.next_order_id = OrderId(self.config.next_order_id.0 + 1);
-
-        // 受理した指値注文はすべて板に残るmaker注文として扱う。
-        // post-onlyでない注文も保持するが、板を横切るtaker約定とtaker手数料は再現しない。
+        self.queue_model.accept(&order, order_id, self.time_floor);
+        if let Some(recorder) = &self.recorder {
+            recorder.record("paper_queue_admission", serde_json::json!({
+                "order_id":order_id,"model":"observed_book_fifo_v1","book":evidence,
+                "activation_exchange_ms":exchange_now,"activation_local_ms":self.config.time_model.local_to_exchange_ms(0).ok().and_then(|d|exchange_now.checked_sub(d)),"effective_after_exchange_ms":self.time_floor,
+                "book_age_ms":exchange_now.checked_sub(evidence.exchange_at_ms),
+                "normal_mode_assumed":self.config.assume_normal_mode && self.queue_model.observed_mode().is_none(),"observed_market_mode":self.queue_model.observed_mode(),"queue":self.queue_model.state(),
+            }));
+        }
         self.open_orders.insert(
             order_id,
             OpenOrder {
@@ -447,6 +521,20 @@ impl PaperExecutionEngine {
             && pair == &self.config.pair
         {
             self.time_floor = self.time_floor.max(depth.last_timestamp());
+            let local_ms = match self.clock {
+                PaperClock::Replay { now_ms } => now_ms,
+                PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
+            };
+            self.queue_model
+                .observe_book(depth, local_ms, received_exchange_ms);
+            if let Some(recorder) = &self.recorder {
+                recorder.record("paper_queue_book", serde_json::json!({"model":"observed_book_fifo_v1","book":self.queue_model.evidence(),"queue":self.queue_model.state(),"issues":self.queue_model.issues}));
+            }
+        }
+        if let MarketEvent::CircuitBreakInfo { pair, info } = event
+            && pair == &self.config.pair
+        {
+            self.queue_model.observe_mode(&info.mode);
         }
         if let MarketEvent::Transactions { pair, transactions } = event
             && pair == &self.config.pair
@@ -517,15 +605,18 @@ impl PaperExecutionEngine {
             .is_some_and(|(key, _)| key.0 <= through_ms)
         {
             let (_, trade) = self.buffered_trades.pop_first().unwrap();
-            let mut remaining = trade.amount;
-            for order_id in self.fill_order_ids_for_trade(&trade) {
-                if remaining <= Decimal::ZERO {
-                    break;
-                }
+            let allocations =
+                self.queue_model
+                    .allocations(&trade, &self.open_orders, &self.cancel_at);
+            if let Some(recorder) = &self.recorder {
+                recorder.record("paper_queue_trade", serde_json::json!({"trade":trade,"allocations":allocations,"queue":self.queue_model.state(),"reason":"same_price_fifo_or_price_through_public_volume_cap"}));
+            }
+            for (order_id, amount) in allocations {
                 let order = self.open_orders.remove(&order_id).unwrap();
-                let amount = order.remaining_amount.min(remaining);
                 let event = self.fill_open_order(order, trade.clone(), amount);
-                remaining -= amount;
+                if !self.open_orders.contains_key(&order_id) {
+                    self.queue_model.remove(order_id);
+                }
                 self.record_event(event.clone());
                 events.push(event);
             }
@@ -551,6 +642,7 @@ impl PaperExecutionEngine {
             self.cancel_at.remove(&id);
             self.effective_after.remove(&id);
             if let Some(order) = self.open_orders.remove(&id) {
+                self.queue_model.remove(id);
                 self.unlock_funds_for_open_order(&order);
                 let event = PaperEvent::OrderCancelled {
                     order_id: id,
@@ -588,6 +680,17 @@ impl PaperExecutionEngine {
     /// 終了時にも取得・保存する。未確定残高を確定済み損益へ混ぜない。
     pub fn settlement_status(&self) -> PaperSettlementStatus {
         PaperSettlementStatus {
+            execution_model: "observed_book_fifo_v1",
+            book: self.queue_model.evidence(),
+            book_age_ms: self
+                .queue_model
+                .evidence()
+                .and_then(|b| self.exchange_now_ms().ok()?.checked_sub(b.exchange_at_ms)),
+            queue: self.queue_model.state(),
+            model_issues: self.queue_model.issues.clone(),
+            observed_market_mode: self.queue_model.observed_mode(),
+            normal_mode_assumed: self.config.assume_normal_mode
+                && self.queue_model.observed_mode().is_none(),
             time_model: self.config.time_model,
             watermark_ms: self.watermark_ms,
             max_trade_delay_ms: self.max_trade_delay_ms,
@@ -606,6 +709,7 @@ impl PaperExecutionEngine {
     fn current_unsettled(&self) -> bool {
         let now = self.exchange_now_ms();
         !self.settlement_issues.is_empty()
+            || !self.queue_model.issues.is_empty()
             || !self.buffered_trades.is_empty()
             || !self.cancel_at.is_empty()
             || self
@@ -688,39 +792,6 @@ impl PaperExecutionEngine {
         move_locked_to_free(&mut self.balances, &asset, amount);
     }
 
-    fn fill_order_ids_for_trade(&self, trade: &MarketTrade) -> Vec<OrderId> {
-        let mut fill_candidates = self
-            .open_orders
-            .values()
-            .filter(|order| {
-                order.remaining_amount > Decimal::ZERO
-                    && trade.executed_at > self.effective_after[&order.order_id]
-                    && self
-                        .cancel_at
-                        .get(&order.order_id)
-                        .is_none_or(|t| trade.executed_at < *t)
-                    && order_matches_trade(order, trade)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        fill_candidates.sort_by(|a, b| match a.side {
-            OrderSide::Buy => b
-                .price
-                .cmp(&a.price)
-                .then_with(|| a.order_id.cmp(&b.order_id)),
-            OrderSide::Sell => a
-                .price
-                .cmp(&b.price)
-                .then_with(|| a.order_id.cmp(&b.order_id)),
-        });
-
-        fill_candidates
-            .into_iter()
-            .map(|order| order.order_id)
-            .collect()
-    }
-
     fn fill_open_order(
         &mut self,
         mut open_order: OpenOrder,
@@ -791,6 +862,8 @@ impl PaperExecutionEngine {
 
 mod latency;
 pub use latency::{PaperLatencyConfig, PaperOperationLatency, PaperTradingVenue};
+mod queue;
+pub use queue::{PaperBookEvidence, PaperModelUnavailable, PaperQueueLevel, PaperQueueSegment};
 
 fn parse_jpy_pair(pair: &str) -> Result<(String, String), PaperExecutionError> {
     let Some(base) = pair.strip_suffix("_jpy") else {
@@ -801,18 +874,6 @@ fn parse_jpy_pair(pair: &str) -> Result<(String, String), PaperExecutionError> {
     }
 
     Ok((base.to_owned(), "jpy".to_owned()))
-}
-
-fn order_matches_trade(order: &OpenOrder, trade: &MarketTrade) -> bool {
-    let Some(price) = order.price else {
-        return false;
-    };
-
-    match (trade.side, order.side) {
-        (OrderSide::Buy, OrderSide::Sell) => trade.price >= price,
-        (OrderSide::Sell, OrderSide::Buy) => trade.price <= price,
-        _ => false,
-    }
 }
 
 fn locked_amount_for_open_order(order: &OpenOrder, maker_fee_rate_quote: Decimal) -> Decimal {
@@ -865,6 +926,10 @@ fn add_free(balances: &mut BTreeMap<String, BalanceSnapshot>, asset: &str, amoun
 impl From<PaperRejectReason> for PaperExecutionError {
     fn from(value: PaperRejectReason) -> Self {
         match value {
+            PaperRejectReason::PostOnlyWouldTakeLiquidity => Self::PostOnlyWouldTakeLiquidity,
+            PaperRejectReason::ExecutionModelUnavailable(reason) => {
+                Self::ExecutionModelUnavailable(reason)
+            }
             PaperRejectReason::PairMismatch { expected, actual } => {
                 Self::PairMismatch { expected, actual }
             }
@@ -899,13 +964,26 @@ mod tests {
     }
 
     fn engine_with_balances(btc_free: Decimal, jpy_free: Decimal) -> PaperExecutionEngine {
-        PaperExecutionEngine::new(
+        let mut engine = PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
             crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![balance("btc", btc_free), balance("jpy", jpy_free)],
             None,
         )
-        .unwrap()
+        .unwrap();
+        seed_book(&mut engine);
+        engine
+    }
+
+    fn seed_book(engine: &mut PaperExecutionEngine) {
+        engine.apply_market_event(&MarketEvent::DepthUpdated {
+            pair: engine.config.pair.clone(),
+            depth: crate::market_event::MarketDepthSnapshot::new(
+                [(Decimal::from(1_000_000_000u64), 1.0)].into(),
+                [(Decimal::new(1, 8), 1.0)].into(),
+                0,
+            ),
+        });
     }
 
     #[test]
@@ -1200,6 +1278,7 @@ mod tests {
                 fee_schedule: PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO),
                 next_order_id: OrderId(1),
                 time_model: PaperTimeModel::default(),
+                assume_normal_mode: true,
             },
             crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![
@@ -1209,6 +1288,7 @@ mod tests {
             None,
         )
         .unwrap();
+        seed_book(&mut engine);
         engine
             .place_order(order(
                 OrderSide::Buy,
@@ -1300,6 +1380,7 @@ mod tests {
             None,
         )
         .unwrap();
+        seed_book(&mut engine);
         engine
             .place_order(DesiredLimitOrder::limit(
                 "eth_jpy".to_owned(),
@@ -1343,6 +1424,7 @@ mod tests {
                 Decimal::new(4_900_000, 0),
             ))
             .unwrap();
+        seed_book(&mut engine);
         engine
             .place_order(order(
                 OrderSide::Buy,
@@ -1350,6 +1432,7 @@ mod tests {
                 Decimal::new(5_000_000, 0),
             ))
             .unwrap();
+        seed_book(&mut engine);
         engine
             .place_order(order(
                 OrderSide::Buy,

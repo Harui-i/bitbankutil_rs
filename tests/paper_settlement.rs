@@ -30,6 +30,7 @@ fn engine(base: i64, quote: i64, fee: Decimal) -> PaperExecutionEngine {
             .collect(),
         None,
     )
+    .map(|engine| seeded_engine(engine, 1000))
     .unwrap()
 }
 fn order(side: OrderSide, amount: Decimal) -> DesiredLimitOrder {
@@ -259,7 +260,11 @@ fn unknown_tail_book_time_gap_and_watermark_violation_are_not_final_profit() {
     e.cancel_orders("btc_jpy", vec![OrderId(1)]);
     e.apply_market_event(&MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
-        depth: MarketDepthSnapshot::new(Default::default(), Default::default(), 9000),
+        depth: MarketDepthSnapshot::new(
+            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            9000,
+        ),
     });
     assert_eq!(e.settlement_status().pending_cancellations, 1);
     assert!(e.settlement_status().unsettled);
@@ -541,6 +546,7 @@ async fn configured_settlement_updates_account_before_strategy_and_records_uncon
         initial.balances(),
         Some(recorder.clone()),
     )
+    .map(|engine| seeded_engine(engine, 1000))
     .unwrap()
     .with_max_trade_delay_ms(300)
     .unwrap();
@@ -636,7 +642,11 @@ async fn paper_runtime_delivers_market_after_known_disconnect_without_releasing_
     sender
         .send(BotEvent::Market(MarketEvent::DepthUpdated {
             pair: "btc_jpy".into(),
-            depth: MarketDepthSnapshot::new(Default::default(), Default::default(), 1300),
+            depth: MarketDepthSnapshot::new(
+                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                1300,
+            ),
         }))
         .await
         .unwrap();
@@ -673,4 +683,17 @@ async fn paper_runtime_delivers_market_after_known_disconnect_without_releasing_
         event,
         PaperEvent::OrderFilled { .. } | PaperEvent::OrderCancelled { .. }
     )));
+}
+
+// 時刻・資金の回帰fixture。注文価格をspread内に置き、先行数量を0にする。
+fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExecutionEngine {
+    engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
+        pair: "btc_jpy".into(),
+        depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
+            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            exchange_ms,
+        ),
+    });
+    engine
 }

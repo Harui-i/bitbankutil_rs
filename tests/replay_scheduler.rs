@@ -198,6 +198,7 @@ fn venue(delta: i64, recorder: Option<ExecutionRecorder>) -> PaperTradingVenue {
             ],
             recorder,
         )
+        .map(|engine| seeded_engine(engine, delta))
         .unwrap(),
     )
 }
@@ -607,4 +608,20 @@ async fn schedule_limits_and_closed_contexts_are_enforced() {
     runtime.shutdown().await.unwrap();
     let ctx = saved.lock().unwrap().take().unwrap();
     assert_eq!(ctx.schedule_after(0, ()), Err(ScheduleError::NotReplay));
+}
+
+// 合成の時刻/資金fixture用。注文をspread内に置き、先行数量を0にする。
+fn seeded_engine(
+    mut engine: bitbankutil_rs::paper_execution::PaperExecutionEngine,
+    exchange_ms: i64,
+) -> bitbankutil_rs::paper_execution::PaperExecutionEngine {
+    engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
+        pair: "btc_jpy".into(),
+        depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
+            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            exchange_ms,
+        ),
+    });
+    engine
 }

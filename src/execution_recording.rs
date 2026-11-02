@@ -243,6 +243,22 @@ pub(crate) async fn operation<T: Serialize>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    // 合成の時刻/資金fixture用。注文をspread内に置き、先行数量を0にする。
+    fn seeded_engine(
+        mut engine: crate::paper_execution::PaperExecutionEngine,
+        exchange_ms: i64,
+    ) -> crate::paper_execution::PaperExecutionEngine {
+        engine.apply_market_event(&crate::market_event::MarketEvent::DepthUpdated {
+            pair: "btc_jpy".into(),
+            depth: crate::market_event::MarketDepthSnapshot::new(
+                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                exchange_ms,
+            ),
+        });
+        engine
+    }
+
     use super::*;
     #[derive(Clone, Default)]
     pub(crate) struct Memory(pub Arc<Mutex<Vec<u8>>>);
@@ -324,6 +340,7 @@ pub(crate) mod tests {
             ],
             Some(r.clone()),
         )
+        .map(|engine| seeded_engine(engine, 0))
         .unwrap();
         let v = PaperTradingVenue::new(engine);
         let order =
@@ -428,6 +445,7 @@ pub(crate) mod tests {
             balances,
             Some(recorder),
         )
+        .map(|engine| seeded_engine(engine, 0))
         .unwrap()
     }
 
@@ -597,6 +615,7 @@ pub(crate) mod tests {
                     ],
                     None,
                 )
+                .map(|engine| seeded_engine(engine, 0))
                 .unwrap()
             };
             for index in 0..(PAPER_EVENT_HISTORY_LIMIT + 50) {
