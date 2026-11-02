@@ -416,6 +416,70 @@ async fn failure_cancel_disconnect_and_bad_input_stop_reservations() {
     }
 }
 #[tokio::test]
+async fn cancellation_in_last_reservation_stops_before_input_or_end_time() {
+    struct CancelLast {
+        cancel: Arc<AtomicBool>,
+        seen: Seen,
+    }
+    impl BotStrategy<PaperTradingVenue> for CancelLast {
+        type CustomEvent = Event;
+        type Error = String;
+        async fn handle_event(
+            &mut self,
+            event: BotEvent<Event>,
+            ctx: &BotContext<Event, PaperTradingVenue>,
+        ) -> Result<(), String> {
+            match event {
+                BotEvent::Custom(Event::Input(1)) => {
+                    ctx.schedule_at(1100, Event::Timer(10)).unwrap();
+                }
+                BotEvent::Custom(Event::Timer(10)) => {
+                    self.cancel.store(true, Ordering::Relaxed);
+                    self.seen.lock().unwrap().push((ctx.now_ms(), 10, 1));
+                }
+                _ => panic!("input after cancellation must not be delivered"),
+            }
+            Ok(())
+        }
+    }
+    for at_eof in [false, true] {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Seen::default();
+        let mut runner = BotRunner::new(
+            CancelLast {
+                cancel: cancel.clone(),
+                seen: seen.clone(),
+            },
+            venue(0, None),
+        );
+        let mut input = inputs();
+        if at_eof {
+            input.truncate(2);
+        }
+        let report = run_replay_with_options(
+            &mut runner,
+            input,
+            ReplayOptions {
+                recovery: false,
+                end_time_ms: Some(2000),
+            },
+            &cancel,
+            custom,
+        )
+        .await;
+        assert_eq!(report.end_reason, ReplayEndReason::Interrupted);
+        assert!(report.interrupted);
+        assert!(report.incomplete);
+        assert!(report.error.is_none());
+        assert_eq!(report.final_time_ms, Some(1100));
+        assert_eq!(report.records, 2);
+        assert!(report.pending_scheduled.is_empty());
+        assert_eq!(*seen.lock().unwrap(), [(1100, 10, 1)]);
+        assert!(report.settlement.unwrap().unsettled);
+    }
+}
+
+#[tokio::test]
 async fn empty_input_boundary_and_invalid_clock_conversion() {
     let (mut runner, _) = runner(0, None);
     let report = run_replay_with_options(

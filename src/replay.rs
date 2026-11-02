@@ -515,6 +515,8 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
                 break;
             }
         }
+        // 最後の予約で中断された場合も、次入力へ進む前に観測する。
+        report.interrupted |= cancel.load(std::sync::atomic::Ordering::Relaxed);
         if report.interrupted || report.error.is_some() {
             break;
         }
@@ -607,6 +609,7 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
                     break;
                 }
             }
+            report.interrupted |= cancel.load(std::sync::atomic::Ordering::Relaxed);
             if report.error.is_none() && !report.interrupted {
                 if let Err(e) = runner.advance_time(end) {
                     report.error = Some(format!("{e:?}"));
