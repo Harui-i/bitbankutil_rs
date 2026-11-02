@@ -72,7 +72,7 @@ impl PaperTradingVenue {
         record(
             &self.engine.lock().unwrap(),
             "paper_query_requested",
-            info.clone(),
+            || info.clone(),
         );
         s.operations.insert(id, info);
         let enqueued = s.enqueue(
@@ -136,7 +136,7 @@ impl PaperTradingVenue {
         record(
             &self.engine.lock().unwrap(),
             "paper_query_completed",
-            serde_json::json!({"local_ms":completed,"snapshot":result}),
+            || serde_json::json!({"local_ms":completed,"snapshot":result}),
         );
         Ok(result)
     }
@@ -196,13 +196,11 @@ pub(super) fn process(
                     })
                 }
             })();
-            record(
-                engine,
-                "paper_query_sampled",
+            record(engine, "paper_query_sampled", || {
                 serde_json::json!({"id":id,
                 "local_ms":executed,"success":result.is_ok(),
-                "observation":result.as_ref().ok().map(|p|&p.observation)}),
-            );
+                "observation":result.as_ref().ok().map(|p|&p.observation)})
+            });
             if let Some(info) = state.operations.get_mut(&id) {
                 info["phase"] = serde_json::json!("awaiting_response");
                 info["sampled_at_ms"] = serde_json::json!(executed);
@@ -245,13 +243,11 @@ pub(super) fn process(
                     engine.record_settlement();
                 }
             }
-            record(
-                engine,
-                "paper_query_response",
+            record(engine, "paper_query_response", || {
                 serde_json::json!({"id":id,
                 "local_ms":executed,"success":result.is_ok(),
-                "observation":result.as_ref().ok().map(|p|&p.observation)}),
-            );
+                "observation":result.as_ref().ok().map(|p|&p.observation)})
+            });
             state.operations.remove(&id);
             let _ = reply.send(result);
         }

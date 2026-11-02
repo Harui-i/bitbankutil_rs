@@ -84,6 +84,9 @@ pub(super) struct QueueModel {
     pub issues: Vec<String>,
 }
 
+#[cfg(test)]
+thread_local! { pub(super) static STATE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
 impl QueueModel {
     pub fn observed_mode(&self) -> Option<String> {
         self.observed_mode.clone()
@@ -92,6 +95,8 @@ impl QueueModel {
         self.book.as_ref().map(|b| b.evidence.clone())
     }
     pub fn state(&self) -> Vec<PaperQueueLevel> {
+        #[cfg(test)]
+        STATE_CALLS.with(|n| n.set(n.get() + 1));
         self.levels
             .iter()
             .map(|(&(side, price), l)| PaperQueueLevel {

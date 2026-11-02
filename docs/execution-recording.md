@@ -77,6 +77,106 @@ HTTP通信を記録するために別途設定する必要はありません。
 `BitbankPrivateApiClient` または `BitbankPublicApiClient` の `with_recorder` にレコーダーを渡すと、
 HTTP通信を記録できます。
 
+## 記録量を選ぶ
+
+`ExecutionRecorder::new` は `RecordingProfile::Financial` を使います。
+`with_profile` では次の範囲を選べます。設定は実行中に変更できません。
+
+| profile | 保存する内容 |
+| --- | --- |
+| `Disabled` | 保存もflushも行わない。通常はエンジンに `None` を渡すだけでよい |
+| `Financial` | 初期・終了口座、全注文・取消・約定・手数料・拒否・エラー、操作と照会の時刻・ID・watermark・未確定理由。キュー本体と `paper_queue_book/trade` は省略 |
+| `Diagnostic { queue }` | Financialの情報に板・約定のモデル根拠と、選択したキュー診断を追加 |
+
+Financialの `paper_event` は各イベントを適用した直後の残高・拘束資金・未約定注文を持ちます。
+取消受付の `OrderCancelPending` と資金解放の `OrderCancelled` を区別し、約定の手数料を照合できます。
+profileの選択は仮想時計や約定判定に影響しません。
+
+```rust
+use bitbankutil_rs::execution_recording::{ExecutionRecorder, RecordingProfile, QueueRecording, JsonlSink};
+let recorder = ExecutionRecorder::with_profile(
+    "diagnostic-run", serde_json::json!({"strategy":"example"}),
+    RecordingProfile::Diagnostic {
+        queue: QueueRecording::Delta { snapshot_every: 100.try_into().unwrap() },
+    },
+    JsonlSink(std::io::sink()), // ファイル保存にはJsonlSink::open(path)?を使う
+);
+recorder.finish().unwrap();
+```
+
+キュー診断は `paper_queue_diagnostic` に分離します。選べる方式は次のとおりです。
+
+| queue | 内容とコスト |
+| --- | --- |
+| `Full` | 観測ごとに全価格・segmentを保存する |
+| `Periodic { every }` | 最初と指定観測回数ごとの全件snapshot。省略した観測ではqueueを複製しない |
+| `Delta { snapshot_every }` | 最初と指定周期のsnapshot、その間は直前状態との配列splice差分 |
+| `Counters` | 保持価格数・segment数・注文数などのcounterだけ。queueを複製しない |
+
+周期は板更新、約定割当、paperイベント、確定状態の記録で呼ぶ診断観測の回数です。
+同じ状態の観測も数え、ミリ秒単位の周期ではありません。最初の観測を1とし、1、1+周期、…でsnapshotを保存します。
+差分方式も比較のため全キューを複製・JSON化します。主に出力bytesを減らす方式であり、
+割当や構築時間も減らしたい場合はPeriodicまたはCountersを選んでください。
+counterも保持中の価格とsegmentを走査するため、定数時間ではありません。
+
+`PaperExecutionEngine::record_queue_snapshot()` で、必要な時点の全件snapshotを明示的に保存できます。
+Financialでもこの要求は保存し、Disabledでは構築しません。
+`TradingVenue::record_paper_settlement()` は終了時の口座・未確定理由・保留操作を保存し、
+DiagnosticのFull/Periodic/Deltaでは周期にかかわらず末尾snapshotも保存します。bot終了時は自動的に呼びます。
+エンジンを直接使う場合は `engine.record_settlement()` と、必要なら `engine.record_queue_snapshot()`、
+venueを直接使う場合は `venue.record_paper_settlement()` を呼んでから `recorder.finish()` を呼んでください。
+`finish()` だけではエンジンの状態を採取しません。
+
+`run_started.data.metadata` は呼び出し元のメタデータ、`data.recording` はprofileと周期設定です。
+`queue_evidence` と `omitted_events` に省略内容も残します。Financialやcounter、周期の間の状態を
+完全なキュー証拠と解釈しないでください。全件snapshotも公開板から作ったモデルの列であり、
+取引所の真のキュー順位やエンジン全体の再開用checkpointではありません。
+形式3ではこのメタデータ構造と診断の分離を導入し、`paper_settlement` と `replay_outcome` の監査状態からqueue本体を除きました。
+明示取得する `settlement_status()` / `paper_settlement_status()` は引き続き全キューを返す詳細診断です。
+
+独自イベントには `record_lazy(kind, || serde_json::json!(...))` を使うと、filterと保存失敗の確認後にだけpayloadを構築します。
+`record(kind, value)` ではRustの引数評価により呼び出し前にvalueを構築します。
+lazy closureはレコーダーのロック中に実行するため、その中から同じレコーダーを呼んではいけません。
+
+### 差分の復元と欠損の検知
+
+診断の `data` は `format_version: 1`、`stream_id`、1始まりの診断 `sequence`、`observation` を持ちます。
+`paper_initial_state.queue_stream_id` がエンジンと対応します。差分には直前診断の `base_sequence` と
+`splice { start, delete, insert }` があり、side/price順の価格配列の指定範囲を置き換えます。
+基点snapshotから順に適用してください。Periodicの省略した観測にはレコードも診断sequenceも割り当てません。
+
+`QueueReconstruction::default()` を `(run_id, stream_id)` ごとに作り、各レコードの `data` を `apply()` に渡すと
+`levels` に全価格配列を復元します。形式違い、基点なし、欠損、逆順、stream混在、不正範囲はエラーです。
+Countersは復元対象ではありません。壊れた入力で復元状態は更新されません。
+`read_records()` はJSONLの解析だけを行います。全体の `ExecutionRecord.sequence` の連続性、
+`run_finished` の存在、保管時のファイル完全性も確認してください。末尾の切り落としは次のレコードがなければ
+差分sequenceだけでは検知できません。意図したfilterや周期の省略は `dropped_records` に含めません。
+
+### 合成長期入力での測定
+
+`cargo bench --bench recording -- <mode> 10000 128` で比較できます。
+modeは `disabled`（recorderなし）、`financial`、`full`、`periodic`、`delta`、`counters` です。
+各modeを独立したプロセスで実行します。既定値は2,000更新・片側128価格です。
+板の同価格数量を交互に変え、1つの注文を維持し、更新ごとにwatermarkを進めます。
+入力生成後からエンジン初期化・全更新・終了記録までを計測し、allocatorで割当回数・累計bytesを数えます。
+sinkは `serde_json::to_vec` の時間とJSONL相当bytesを測り、ディスクI/Oは含めません。
+`total_ms` はpayloadの構築・clone・差分計算も含み、`serialize_ms` は最終レコードのJSON符号化だけです。
+
+10,000更新、片側128価格、周期100、releaseビルドでの単発測定例（MBは10^6 bytes）:
+
+| mode | 合計ms | serialize ms | 割当回数 | 累計割当MB | JSONL MB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| disabled | 418 | 0 | 630,104 | 415.9 | 0 |
+| financial | 454 | 7.9 | 1,410,406 | 497.7 | 9.8 |
+| full | 47,464 | 2,305.2 | 502,818,902 | 83,087.2 | 3,312.3 |
+| periodic | 955 | 35.3 | 6,714,990 | 1,359.0 | 47.2 |
+| delta | 18,248 | 1,157.0 | 317,560,960 | 49,672.0 | 877.2 |
+| counters | 481 | 17.3 | 2,030,506 | 569.5 | 21.6 |
+
+累計割当は解放分も含み、最大メモリ使用量ではありません。環境・入力に依存する測定で、速度の保証ではありません。
+この入力は未消化の外部segmentが増えるため全件診断が特に重くなります。
+差分も変更した価格のsegment配列全体を保存するため、長い同価格列にはPeriodic/Countersの方が小さくなります。
+
 ## 保存した記録を読む
 
 `read_records(BufReader::new(File::open(path)?))` で、JSONLファイルを
@@ -91,7 +191,7 @@ cargo run --example record_execution -- /tmp/execution.jsonl
 このサンプルでは、部分約定・手数料・取消・操作の失敗・最終残高を確認し、
 操作の種類ごとに成功・失敗の件数を表示します。
 
-各レコードは、形式バージョン2の `ExecutionRecord` として保存されます。
+各レコードは、形式バージョン3の `ExecutionRecord` として保存されます。
 `run_id` は実行の識別子、`sequence` はその実行内での記録順序、
 `kind` は記録の種類、`data` は記録内容です。
 実行IDは、利用者が実行ごとに異なる値を指定してください。
@@ -248,7 +348,7 @@ UTCはOSの時計補正で逆行し得ますが、`elapsed_us` はUTC差分を�
 ## 収集環境・時計同期のメタデータ
 
 後から市場受信記録と照合できるよう、`ExecutionRecorder::new` のメタデータに
-実行・ホスト・収集セッションの識別情報を指定します。たとえば次のJSONを `run_started` に残せます。
+実行・ホスト・収集セッションの識別情報を指定します。たとえば次のJSONを `run_started.data.metadata` に残せます。
 これは利用者が用意する任意の項目であり、自動収集や時計設定の変更は行いません。
 
 ```json

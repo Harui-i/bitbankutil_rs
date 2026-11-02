@@ -198,9 +198,16 @@ pub struct PaperSettlementStatus {
     pub issues: Vec<String>,
 }
 
+impl PaperSettlementStatus {
+    /// 記録用の終了状態。queue本体は専用診断列に分離する。
+    pub fn recording_summary(&self) -> serde_json::Value {
+        serde_json::json!({"execution_model":self.execution_model,"book":self.book,"book_age_ms":self.book_age_ms,"model_issues":self.model_issues,"observed_market_mode":self.observed_market_mode,"normal_mode_assumed":self.normal_mode_assumed,"time_model":self.time_model,"watermark_ms":self.watermark_ms,"max_trade_delay_ms":self.max_trade_delay_ms,"buffered_trades":self.buffered_trades,"pending_cancellations":self.pending_cancellations,"pending_operations":self.pending_operations,"latency_model":self.latency_model,"pending_operation_details":self.pending_operation_details,"uncertain_query_observations":self.uncertain_query_observations,"unsettled":self.unsettled,"issues":self.issues})
+    }
+}
+
 /// 口座照会の採取に必要な確定状態。キューや保留操作の詳細を複製しない。
 /// issuesはエンジンを借用し、採取値として保存する場合だけコピーする。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PaperSettlementObservation<'a> {
     pub watermark_ms: Option<i64>,
     /// 現在の採取値の未確定性。過去の未確定照会の累積は含めない。
@@ -245,6 +252,7 @@ pub struct PaperExecutionEngine {
     open_orders: BTreeMap<OrderId, OpenOrder>,
     event_history: VecDeque<PaperEvent>,
     discarded_events: u64,
+    queue_recording_id: u64,
     recorder: Option<crate::execution_recording::ExecutionRecorder>,
 }
 
@@ -296,17 +304,20 @@ impl PaperExecutionEngine {
             open_orders: BTreeMap::new(),
             event_history: VecDeque::new(),
             discarded_events: 0,
+            queue_recording_id: recorder.as_ref().map_or(0, |r| r.next_id()),
             recorder,
         };
         if let Some(recorder) = &engine.recorder {
-            recorder.record(
+            recorder.record_lazy(
                 "paper_initial_state",
-                serde_json::json!({
+                || serde_json::json!({
                     "config": engine.config(), "clock": engine.clock, "model": "observed_book_fifo_v1",
+                    "queue_stream_id":engine.queue_recording_id,
                     "balances": engine.balances(), "open_orders": engine.open_orders()
                 }),
             );
         }
+        engine.record_queue(false);
         Ok(engine)
     }
 
@@ -368,7 +379,7 @@ impl PaperExecutionEngine {
                         .issue(&format!("admission unavailable: {unavailable:?}"));
                 }
                 if let Some(recorder) = &self.recorder {
-                    recorder.record("paper_queue_rejection", serde_json::json!({"order":order,"reason":reason,"exchange_ms":exchange_now,"book":self.queue_model.evidence(),"observed_market_mode":self.queue_model.observed_mode()}));
+                    recorder.record_lazy("paper_queue_rejection", || serde_json::json!({"order":order,"reason":reason,"exchange_ms":exchange_now,"book":self.queue_model.evidence(),"observed_market_mode":self.queue_model.observed_mode()}));
                 }
                 self.record_event(PaperEvent::OrderRejected {
                     order,
@@ -423,11 +434,11 @@ impl PaperExecutionEngine {
         self.config.next_order_id = OrderId(self.config.next_order_id.0 + 1);
         self.queue_model.accept(&order, order_id, self.time_floor);
         if let Some(recorder) = &self.recorder {
-            recorder.record("paper_queue_admission", serde_json::json!({
+            recorder.record_lazy("paper_queue_admission", || serde_json::json!({
                 "order_id":order_id,"model":"observed_book_fifo_v1","book":evidence,
                 "activation_exchange_ms":exchange_now,"activation_local_ms":self.config.time_model.local_to_exchange_ms(0).ok().and_then(|d|exchange_now.checked_sub(d)),"effective_after_exchange_ms":self.time_floor,
                 "book_age_ms":exchange_now.checked_sub(evidence.exchange_at_ms),
-                "normal_mode_assumed":self.config.assume_normal_mode && self.queue_model.observed_mode().is_none(),"observed_market_mode":self.queue_model.observed_mode(),"queue":self.queue_model.state(),
+                "normal_mode_assumed":self.config.assume_normal_mode && self.queue_model.observed_mode().is_none(),"observed_market_mode":self.queue_model.observed_mode(),
             }));
         }
         self.open_orders.insert(
@@ -540,8 +551,9 @@ impl PaperExecutionEngine {
             };
             self.queue_model
                 .observe_book(depth, local_ms, received_exchange_ms);
+            self.record_queue(false);
             if let Some(recorder) = &self.recorder {
-                recorder.record("paper_queue_book", serde_json::json!({"model":"observed_book_fifo_v1","book":self.queue_model.evidence(),"queue":self.queue_model.state(),"issues":self.queue_model.issues}));
+                recorder.record_lazy("paper_queue_book", || serde_json::json!({"model":"observed_book_fifo_v1","book":self.queue_model.evidence(),"issues":self.queue_model.issues}));
             }
         }
         if let MarketEvent::CircuitBreakInfo { pair, info } = event
@@ -621,8 +633,9 @@ impl PaperExecutionEngine {
             let allocations =
                 self.queue_model
                     .allocations(&trade, &self.open_orders, &self.cancel_at);
+            self.record_queue(false);
             if let Some(recorder) = &self.recorder {
-                recorder.record("paper_queue_trade", serde_json::json!({"trade":trade,"allocations":allocations,"queue":self.queue_model.state(),"reason":"same_price_fifo_or_price_through_public_volume_cap"}));
+                recorder.record_lazy("paper_queue_trade", || serde_json::json!({"trade":trade,"allocations":allocations,"reason":"same_price_fifo_or_price_through_public_volume_cap"}));
             }
             for (order_id, amount) in allocations {
                 let order = self.open_orders.remove(&order_id).unwrap();
@@ -676,9 +689,9 @@ impl PaperExecutionEngine {
         }
         self.max_trade_delay_ms = Some(delay);
         if let Some(r) = &self.recorder {
-            r.record(
+            r.record_lazy(
                 "paper_delay_assumption",
-                serde_json::json!({"max_trade_delay_ms": delay}),
+                || serde_json::json!({"max_trade_delay_ms": delay}),
             );
         }
         Ok(self)
@@ -748,12 +761,50 @@ impl PaperExecutionEngine {
                 .is_none_or(|w| now.map_or(true, |now| w < now.max(self.time_floor)))
     }
 
-    fn record_settlement(&self) {
+    /// 現在の全キューを明示的に保存する。Disabledでは構築も保存もしない。
+    pub fn record_queue_snapshot(&self) {
+        self.record_queue(true);
+    }
+
+    fn record_queue(&self, force: bool) {
         if let Some(r) = &self.recorder {
-            r.record(
-                "paper_settlement",
-                serde_json::json!(self.settlement_status()),
+            r.queue_record(
+                self.queue_recording_id,
+                force,
+                || {
+                    self.queue_model
+                        .state()
+                        .iter()
+                        .map(|level| serde_json::to_value(level).expect("queue serialization"))
+                        .collect()
+                },
+                || serde_json::json!(self.queue_diagnostics()),
             );
+        }
+    }
+
+    fn settlement_record_data(&self) -> serde_json::Value {
+        serde_json::json!({"execution_model":"observed_book_fifo_v1",
+            "book":self.queue_model.evidence(),
+            "book_age_ms":self.queue_model.evidence().and_then(|b| self.exchange_now_ms().ok()?.checked_sub(b.exchange_at_ms)),
+            "model_issues":self.queue_model.issues,
+            "observed_market_mode":self.queue_model.observed_mode(),
+            "normal_mode_assumed":self.config.assume_normal_mode && self.queue_model.observed_mode().is_none(),
+            "time_model":self.config.time_model,"clock":self.clock,"watermark_ms":self.watermark_ms,
+            "max_trade_delay_ms":self.max_trade_delay_ms,
+            "buffered_trades":self.buffered_trades.len(),"pending_cancellations":self.cancel_at.len(),
+            "uncertain_query_observations":self.uncertain_query_observations,
+            "unsettled":self.current_unsettled() || self.uncertain_query_observations > 0,
+            "issues":self.settlement_issues,"balances":self.balances(),"open_orders":self.open_orders()})
+    }
+
+    /// 現在の口座・watermark・未確定理由をキュー本体の複製なしで保存する。
+    /// エンジンを直接利用した場合も終了時に呼ぶ。キュー診断は設定した周期に従う。
+    /// 終了時の全キューが必要なら [`Self::record_queue_snapshot`] も呼ぶ。
+    pub fn record_settlement(&self) {
+        self.record_queue(false);
+        if let Some(r) = &self.recorder {
+            r.record_lazy("paper_settlement", || self.settlement_record_data());
         }
     }
 
@@ -879,9 +930,10 @@ impl PaperExecutionEngine {
     }
 
     fn record_event(&mut self, event: PaperEvent) {
+        self.record_queue(false);
         log::info!("paper event: {:?}", event);
         if let Some(r) = &self.recorder {
-            r.record("paper_event",serde_json::json!({"event":event,"balances":self.balances(),"open_orders":self.open_orders()}));
+            r.record_lazy("paper_event",|| serde_json::json!({"event":event,"clock":self.clock,"watermark_ms":self.watermark_ms,"balances":self.balances(),"open_orders":self.open_orders()}));
         }
         if self.event_history.len() == PAPER_EVENT_HISTORY_LIMIT {
             self.event_history.pop_front();
@@ -986,6 +1038,45 @@ impl From<PaperRejectReason> for PaperExecutionError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_without_diagnostics_does_not_clone_queue() {
+        use crate::execution_recording::{ExecutionRecorder, JsonlSink, RecordingProfile};
+        for profile in [
+            None,
+            Some(RecordingProfile::Disabled),
+            Some(RecordingProfile::Financial),
+        ] {
+            let recorder = profile.map(|p| {
+                ExecutionRecorder::with_profile(
+                    "no-clone",
+                    serde_json::json!({}),
+                    p,
+                    JsonlSink(std::io::sink()),
+                )
+            });
+            let before = super::queue::STATE_CALLS.with(|n| n.get());
+            let mut engine = super::PaperExecutionEngine::new(
+                super::PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+                super::PaperClock::Replay { now_ms: 0 },
+                ["btc", "jpy"]
+                    .into_iter()
+                    .map(|asset| crate::order_domain::BalanceSnapshot {
+                        asset: asset.into(),
+                        free_amount: 0.into(),
+                        locked_amount: 0.into(),
+                        onhand_amount: 0.into(),
+                    })
+                    .collect(),
+                recorder,
+            )
+            .unwrap();
+            engine.mark_incomplete("test");
+            let venue = super::PaperTradingVenue::new(engine);
+            crate::trading_venue::TradingVenue::record_paper_settlement(&venue);
+            assert_eq!(super::queue::STATE_CALLS.with(|n| n.get()), before);
+        }
+    }
+
     use super::*;
 
     fn balance(asset: &str, free_amount: Decimal) -> BalanceSnapshot {

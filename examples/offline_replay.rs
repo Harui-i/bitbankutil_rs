@@ -133,7 +133,8 @@ async fn demo(
         .account_snapshot("btc_jpy")
         .await
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    recorder.record("replay_finished",json!({"error":report.error,"incomplete":report.incomplete,"interrupted":report.interrupted,"records":report.records,"final_account":final_account,"settlement":venue.paper_settlement_status()}));
+    venue.record_paper_settlement();
+    recorder.record_lazy("replay_finished",|| json!({"error":report.error,"incomplete":report.incomplete,"interrupted":report.interrupted,"records":report.records,"final_account":final_account}));
     recorder.finish()?;
     if let Some(error) = report.error {
         return Err(std::io::Error::other(error).into());
@@ -169,7 +170,7 @@ mod tests {
                     .iter()
                     .all(|v| v["event"].get("OrderFilled").is_none())
             );
-            assert!(records.iter().any(|r| r.kind == "paper_queue_trade"));
+            assert!(!records.iter().any(|r| r.kind == "paper_queue_diagnostic"));
             assert!(
                 records
                     .iter()

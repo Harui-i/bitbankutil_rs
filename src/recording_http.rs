@@ -100,27 +100,25 @@ impl Transport {
         });
         let total = Measurement::start();
         if let Some(r) = &self.recorder {
-            r.record(
-                "http_request_started",
+            r.record_lazy("http_request_started", || {
                 json!({
                     "request_id": request_id, "method": method.as_str(), "endpoint": path,
                     "request": request, "started_at_unix_us": total.started_at_unix_us(),
-                }),
-            );
+                })
+            });
         }
         for attempt in 1..=config.max_try {
             *observed.status.lock().unwrap() = None;
             *observed.code.lock().unwrap() = None;
             let measurement = Measurement::start();
             if let Some(r) = &self.recorder {
-                r.record(
-                    "http_started",
+                r.record_lazy("http_started", || {
                     json!({
                         "request_id": request_id, "attempt": attempt,
                         "method": method.as_str(), "endpoint": path, "request": request,
                         "started_at_unix_us": measurement.started_at_unix_us(),
-                    }),
-                );
+                    })
+                });
             }
             let result = self
                 .http
@@ -143,7 +141,7 @@ impl Transport {
                 Err(RequestError::ResponseHandleError(_)) => "response",
             };
             if let Some(r) = &self.recorder {
-                r.record("http_finished", json!({
+                r.record_lazy("http_finished", || json!({
                     "request_id": request_id, "attempt": attempt,
                     "method": method.as_str(), "endpoint": path,
                     "success": result.is_ok(), "stage": stage,
@@ -159,14 +157,13 @@ impl Transport {
             } else {
                 let timing = total.finish();
                 if let Some(r) = &self.recorder {
-                    r.record(
-                        "http_request_finished",
+                    r.record_lazy("http_request_finished", || {
                         json!({
                             "request_id": request_id, "method": method.as_str(), "endpoint": path,
                             "success": result.is_ok(), "attempts": attempt, "timing": timing,
                             "timeout": timeout, "stage": stage,
-                        }),
-                    );
+                        })
+                    });
                 }
                 return result;
             }

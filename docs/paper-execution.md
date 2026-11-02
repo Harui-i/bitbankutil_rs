@@ -279,7 +279,8 @@ Normal以外ではpost-only保証が無効になるため、当モデルは `Uns
 先行数量を減らしません。代金とmaker手数料は注文価格で計算し、既存の資金拘束・確定処理を使います。
 
 `settlement_status()` には `execution_model`、`book`、`queue`、`model_issues` を残します。
-記録では `paper_queue_admission` / `paper_queue_book` / `paper_queue_trade` に受付根拠と列の変化を残し、
+記録では `paper_queue_admission` に受付根拠を残します。Diagnostic profileは
+`paper_queue_book` / `paper_queue_trade` と専用の `paper_queue_diagnostic` にモデル根拠と列の変化を残し、
 レコーダーがなくても同じモデル・数量で処理します。公開約定watermarkは板チャネルの完了保証には使いません。
 
 このモデルはL2の表示数量による推定です。実際の注文単位の順位、非表示数量、市場インパクト、
@@ -305,3 +306,6 @@ APIの項目は [REST API仕様](https://github.com/bitbankinc/bitbank-api-docs/
 記録なしの口座照会全体の割当数・bytesが履歴量によらないことを検証します。
 比較対象は従来の採取経路が使っていた詳細診断です。詳細診断の完全なsegment数も確認します。
 時間は実行環境に依存するため合否の基準には使いません。
+
+通常のFinancial profileはキュー本体を保存しません。全件・周期snapshot・差分・counterの選択と復元方法は
+[実行記録](execution-recording.md#記録量を選ぶ)を参照してください。
