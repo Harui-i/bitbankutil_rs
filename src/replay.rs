@@ -333,9 +333,32 @@ pub struct ReplayGap {
     pub start: InputId,
     pub end: Option<InputId>,
 }
+/// EOFは評価範囲の自動延長を行わない。EndTimeは指定境界まで評価済み。
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayEndReason {
+    #[default]
+    Eof,
+    EndTime,
+    Disconnected,
+    Error,
+    Interrupted,
+}
+
+/// 終了時刻はローカル仮想時計のms単位。境界と同時刻のイベントを含む。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReplayOptions {
+    pub recovery: bool,
+    pub end_time_ms: Option<i64>,
+}
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct ReplayReport {
     pub settlement: Option<crate::paper_execution::PaperSettlementStatus>,
+    pub end_reason: ReplayEndReason,
+    pub input_exhausted: bool,
+    pub final_time_ms: Option<i64>,
+    pub pending_scheduled: Vec<crate::bitbank_bot::ScheduledEventInfo>,
     pub records: usize,
     pub incomplete: bool,
     pub interrupted: bool,
@@ -410,16 +433,51 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
     input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
     recovery: bool,
     cancel: &std::sync::atomic::AtomicBool,
+    custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
+) -> ReplayReport {
+    run_replay_with_options(
+        runner,
+        input,
+        ReplayOptions {
+            recovery,
+            end_time_ms: None,
+        },
+        cancel,
+        custom,
+    )
+    .await
+}
+
+/// 予約イベントと市場入力を交互に実行する。失敗・中断では予約を停止し、結果に残す。
+/// 同じms内は市場入力を元のマージ順で優先し、その後に予約を採番順で実行する。
+pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
+    runner: &mut BotRunner<S, V>,
+    input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
+    options: ReplayOptions,
+    cancel: &std::sync::atomic::AtomicBool,
     mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
 ) -> ReplayReport {
+    let recovery = options.recovery;
     let mut report = ReplayReport::default();
     let mut adapter = ReplayAdapter::default();
     let mut validation = ReplayValidation::default();
-    for item in input {
+    if options
+        .end_time_ms
+        .zip(runner.now_ms())
+        .is_some_and(|(end, now)| end < now)
+    {
+        report.error = Some("end time precedes runner clock".into());
+    }
+    let mut input = input.into_iter();
+    while report.error.is_none() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             report.interrupted = true;
             break;
         }
+        let Some(item) = input.next() else {
+            report.input_exhausted = true;
+            break;
+        };
         let (source, record) = match item {
             Ok(v) => v,
             Err(e) => {
@@ -431,8 +489,8 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
             session_id: record.session_id.clone(),
             sequence: record.sequence,
         };
-        report.last_input = Some(id.clone());
         if let Err(error) = validation.validate(source, &record) {
+            report.last_input = Some(id.clone());
             report.error = Some(format!("source {source} {id:?}: {error}"));
             break;
         }
@@ -443,6 +501,30 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
                 break;
             }
         };
+        let boundary = options.end_time_ms.map_or(time, |end| end.min(time));
+        while runner
+            .next_scheduled_time()
+            .is_some_and(|t| t < time && t <= boundary)
+        {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                report.interrupted = true;
+                break;
+            }
+            if let Err(e) = runner.process_next_scheduled(recovery).await {
+                report.error = Some(format!("{e:?}"));
+                break;
+            }
+        }
+        // 最後の予約で中断された場合も、次入力へ進む前に観測する。
+        report.interrupted |= cancel.load(std::sync::atomic::Ordering::Relaxed);
+        if report.interrupted || report.error.is_some() {
+            break;
+        }
+        if options.end_time_ms.is_some_and(|end| time > end) {
+            report.end_reason = ReplayEndReason::EndTime;
+            break;
+        }
+        report.last_input = Some(id.clone());
         if let Err(e) = runner.advance_time(time) {
             report.error = Some(format!("{e:?}"));
             break;
@@ -467,6 +549,7 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
                 end: None,
             });
             if !recovery {
+                report.end_reason = ReplayEndReason::Disconnected;
                 break;
             }
         }
@@ -509,6 +592,41 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
         }
         report.records += 1;
     }
+    // EOFだけでは最終入力を越えない。明示境界だけが市場のない区間を延長する。
+    if report.error.is_none()
+        && !report.interrupted
+        && report.end_reason != ReplayEndReason::Disconnected
+    {
+        let end = options.end_time_ms.or(runner.now_ms());
+        if let Some(end) = end {
+            while runner.next_scheduled_time().is_some_and(|t| t <= end) {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    report.interrupted = true;
+                    break;
+                }
+                if let Err(e) = runner.process_next_scheduled(recovery).await {
+                    report.error = Some(format!("{e:?}"));
+                    break;
+                }
+            }
+            report.interrupted |= cancel.load(std::sync::atomic::Ordering::Relaxed);
+            if report.error.is_none() && !report.interrupted {
+                if let Err(e) = runner.advance_time(end) {
+                    report.error = Some(format!("{e:?}"));
+                } else if options.end_time_ms.is_some() {
+                    report.end_reason = ReplayEndReason::EndTime;
+                }
+            }
+        }
+    }
+    if report.error.is_some() {
+        report.end_reason = ReplayEndReason::Error;
+    } else if report.interrupted {
+        report.end_reason = ReplayEndReason::Interrupted;
+    }
+    report.final_time_ms = runner.now_ms();
+    report.pending_scheduled = runner.pending_scheduled();
+    report.incomplete |= report.error.is_some() || report.interrupted;
     if report.error.is_some() || report.interrupted {
         runner
             .venue()
