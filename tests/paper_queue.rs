@@ -474,3 +474,48 @@ fn same_ms_trade_does_not_advance_queue_and_missing_pair_book_does_not_admit() {
         [(OrderId(1), 1.into())]
     );
 }
+
+#[test]
+fn external_quantity_behind_last_active_order_is_consumed_before_future_order() {
+    fn path(delayed: bool) -> Vec<(OrderId, Decimal)> {
+        let mut e = engine(0, false);
+        e.apply_market_event(&book(1000, 99, 10.0, 101, 1.0));
+        e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
+        e.advance_replay_time(1050).unwrap();
+        e.apply_market_event(&book(1050, 100, 5.0, 101, 1.0));
+        let event = MarketEvent::Transactions {
+            pair: "btc_jpy".into(),
+            transactions: vec![MarketTrade {
+                transaction_id: 1,
+                executed_at: 1100,
+                side: OrderSide::Sell,
+                price: 100.into(),
+                amount: 6.into(),
+            }],
+        };
+        if !delayed {
+            e.advance_replay_time(1110).unwrap();
+            e.apply_market_event(&event);
+            assert_eq!(
+                fills(e.advance_trade_watermark(1100).unwrap()),
+                [(OrderId(1), 1.into())]
+            );
+        }
+        e.advance_replay_time(1150).unwrap();
+        e.apply_market_event(&book(1150, 99, 10.0, 101, 1.0));
+        e.advance_replay_time(1200).unwrap();
+        e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
+        if delayed {
+            e.advance_replay_time(1250).unwrap();
+            e.apply_market_event(&event);
+            assert_eq!(
+                fills(e.advance_trade_watermark(1100).unwrap()),
+                [(OrderId(1), 1.into())]
+            );
+        }
+        fills(trade(&mut e, 0, 1300, OrderSide::Sell, 100, 1, 2))
+    }
+    let expected = vec![(OrderId(2), Decimal::ONE)];
+    assert_eq!(path(false), expected);
+    assert_eq!(path(true), expected);
+}

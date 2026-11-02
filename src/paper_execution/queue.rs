@@ -281,11 +281,10 @@ impl QueueModel {
         let mut fills = Vec::new();
         for index in indices {
             let level = &mut self.levels[index];
-            let Some(last_active) = level.segments.iter().rposition(|s| active(s).is_some()) else {
-                continue;
-            };
             let through = trade.price != level.price;
-            for segment in &mut level.segments[..=last_active] {
+            // 旧自注文の後ろの外部数量も、その成立時刻に存在したなら消化する。
+            // 将来の自注文だけを飛ばし、確定を遅らせても列を同じ状態へ進める。
+            for segment in &mut level.segments {
                 if remaining <= Decimal::ZERO && !through {
                     break;
                 }
