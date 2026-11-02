@@ -29,7 +29,7 @@ pub enum BotEvent<C = Infallible> {
 /// クローンしても別口座は作らず、同じ口座と注文を操作する。
 pub struct BotContext<C = Infallible, V = NoTradingVenue> {
     venue: V,
-    time: Option<i64>,
+    time: Option<std::sync::Arc<std::sync::atomic::AtomicI64>>,
     pending: std::sync::Arc<std::sync::Mutex<Pending<C>>>,
 }
 
@@ -38,7 +38,7 @@ impl<C, V: Clone> Clone for BotContext<C, V> {
     fn clone(&self) -> Self {
         Self {
             venue: self.venue.clone(),
-            time: self.time,
+            time: self.time.clone(),
             pending: self.pending.clone(),
         }
     }
@@ -47,6 +47,8 @@ impl<C, V: Clone> Clone for BotContext<C, V> {
 impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
     pub fn now_ms(&self) -> i64 {
         self.time
+            .as_ref()
+            .map(|t| t.load(std::sync::atomic::Ordering::SeqCst))
             .unwrap_or_else(|| crate::execution_recording::timestamp_ms() as i64)
     }
 
@@ -55,9 +57,10 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
     }
 
     /// ローカル仮想時刻にカスタムイベントを予約する。live経路・過去・閉じたcontextは拒否する。
-    /// 同時刻は予約採番順。実行はreplayランナーが行い、ハンドラーのawait中は時計を進めない。
+    /// 同時刻は予約採番順。実行はreplayランナーが行う。模擬API待機中は時計が進む。
     pub fn schedule_at(&self, local_ms: i64, event: C) -> Result<(), ScheduleError> {
-        let now = self.time.ok_or(ScheduleError::NotReplay)?;
+        self.time.as_ref().ok_or(ScheduleError::NotReplay)?;
+        let now = self.now_ms();
         if local_ms < now {
             return Err(ScheduleError::Past);
         }
@@ -75,7 +78,8 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
 
     /// ローカル仮想時刻からの非負の遅延で予約する。加算の範囲外は拒否する。
     pub fn schedule_after(&self, delay_ms: i64, event: C) -> Result<(), ScheduleError> {
-        let now = self.time.ok_or(ScheduleError::NotReplay)?;
+        self.time.as_ref().ok_or(ScheduleError::NotReplay)?;
+        let now = self.now_ms();
         if delay_ms < 0 {
             return Err(ScheduleError::Past);
         }
@@ -163,18 +167,41 @@ where
     let join_handle = tokio::spawn(async move {
         let mut runner = BotRunner::new(strategy, venue);
         let mut stopping = false;
+        let wake = runner.wake.clone();
         loop {
+            if let Err(err) = runner.poll_live() {
+                runner
+                    .venue()
+                    .mark_market_incomplete("bot processing failed");
+                runner.record_settlement();
+                return Err(format!("bot processing failed: {err:?}"));
+            }
             select! {
                 biased;
                 _ = &mut shutdown_rx, if !stopping => { stopping = true; event_rx.close(); }
-                maybe_event = event_rx.recv() => {
-                    let Some(event) = maybe_event else { break; };
-                    if let Err(err) = runner.process_live(event).await {
-                        runner.venue().mark_market_incomplete("bot processing failed");
+                maybe_event = event_rx.recv(), if !runner.handler_pending() || runner.venue().paper_settlement_status().is_some_and(|s|s.pending_operations>0) => {
+                    let Some(event) = maybe_event else {
+                        // 将来の市場入力がなければwatermark待ちを完了できない。
+                        // 送信済み操作はvenueに残し、shutdownを無期限に待たせない。
+                        if runner.handler_pending() {
+                            if runner.venue().paper_settlement_status().is_some_and(|s|s.pending_operations>0) {
+                                runner.venue().mark_market_incomplete("shutdown with pending strategy operation");
+                                runner.stop_pending_handler();
+                            } else if let Err(err)=runner.drive_direct(false).await {
+                                runner.venue().mark_market_incomplete("bot processing failed");
+                                runner.record_settlement();
+                                return Err(format!("bot processing failed: {err:?}"));
+                            }
+                        }
+                        break;
+                    };
+                    if let Err(err) = runner.ingest(None, event, true, None, false) {
+                        runner.venue().mark_market_incomplete("bot input failed");
                         runner.record_settlement();
-                        return Err(format!("bot processing failed: {err:?}"));
+                        return Err(format!("bot input failed: {err:?}"));
                     }
                 }
+                _ = wake.notified() => {}
             }
         }
         runner.record_settlement();
@@ -996,29 +1023,76 @@ pub enum BotRunError<E> {
     DerivedLimit,
     ScheduledLimit,
     ScheduleIdOverflow,
+    DeliveryLimit,
+    Stopped,
 }
 
-/// ネットワーク入力とオフライン入力を逐次処理するランナー。
-/// 直接入力では `process` に指定した時刻で市場イベント、戦略、派生イベントを順に処理する。
+/// 市場受信、venue内部期限、逐次の戦略配送を管理するランナー。
+/// 模擬操作を待つ間も市場はvenueへ登録するが、戦略ハンドラーは同時実行しない。
 /// 詳しい実行手順は `docs/offline-replay.md` を参照。
+struct QueuedEvent<C> {
+    event: BotEvent<C>,
+    input_id: Option<InputId>,
+    market_id: Option<u64>,
+    derived: bool,
+    recovery: bool,
+}
+
+struct ActiveHandler<S: BotStrategy<V>, V: TradingVenue> {
+    future: std::pin::Pin<Box<dyn std::future::Future<Output = (S, Result<(), S::Error>)> + Send>>,
+    pending: std::sync::Arc<std::sync::Mutex<Pending<S::CustomEvent>>>,
+    input_id: Option<InputId>,
+    market_id: Option<u64>,
+    recovery: bool,
+}
+
+struct RunnerWake(std::sync::Arc<tokio::sync::Notify>);
+impl std::task::Wake for RunnerWake {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.0.notify_one();
+    }
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.0.notify_one();
+    }
+}
+
 pub struct BotRunner<S: BotStrategy<V>, V: TradingVenue> {
-    strategy: S,
+    strategy: Option<S>,
+    active: Option<ActiveHandler<S, V>>,
+    delivery: std::collections::VecDeque<QueuedEvent<S::CustomEvent>>,
     venue: V,
     last_time: Option<i64>,
+    replay_clock: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+    derived_count: usize,
     pub derived_limit: usize,
+    /// 戦略待機中に配送を保留する入力の最大件数。
+    pub delivery_limit: usize,
     /// 未実行予約数と、同一時刻での内部実行数の上限。
     pub scheduled_limit: usize,
     scheduled: std::collections::BTreeMap<(i64, u64), ScheduledEvent<S::CustomEvent>>,
     next_scheduled_id: u64,
     scheduled_tick: Option<(i64, usize)>,
 }
+impl<S: BotStrategy<V>, V: TradingVenue> Drop for BotRunner<S, V> {
+    fn drop(&mut self) {
+        self.venue.set_replay_waker(None);
+        self.venue.set_replay_driver(false);
+    }
+}
 impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
     pub fn new(strategy: S, venue: V) -> Self {
         Self {
-            strategy,
+            strategy: Some(strategy),
+            active: None,
+            delivery: Default::default(),
             venue,
             last_time: None,
+            replay_clock: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            derived_count: 0,
             derived_limit: 10_000,
+            delivery_limit: 10_000,
             scheduled_limit: 10_000,
             scheduled: Default::default(),
             next_scheduled_id: 0,
@@ -1028,9 +1102,26 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
     pub fn venue(&self) -> &V {
         &self.venue
     }
-    /// 実行せず保留している予約を実行順に返す。
     pub fn pending_scheduled(&self) -> Vec<ScheduledEventInfo> {
         self.scheduled.values().map(|e| e.info.clone()).collect()
+    }
+    pub fn pending_delivery_count(&self) -> usize {
+        self.delivery.len()
+    }
+    /// 全追加経路で、退避・復元分を含む最終保留数を事前検証する。
+    fn ensure_delivery_capacity(&self, additional: usize) -> Result<(), BotRunError<S::Error>> {
+        if self
+            .delivery
+            .len()
+            .checked_add(additional)
+            .is_none_or(|len| len > self.delivery_limit)
+        {
+            return Err(BotRunError::DeliveryLimit);
+        }
+        Ok(())
+    }
+    pub fn handler_pending(&self) -> bool {
+        self.active.is_some()
     }
     pub fn now_ms(&self) -> Option<i64> {
         self.last_time
@@ -1038,14 +1129,74 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
     pub fn next_scheduled_time(&self) -> Option<i64> {
         self.scheduled.first_key_value().map(|(key, _)| key.0)
     }
-    /// 最も早い予約を1件処理する。外部入力との比較・終了境界は呼び出し元が管理する。
-    pub async fn process_next_scheduled(
+    pub fn next_internal_time(&self) -> Option<i64> {
+        self.next_scheduled_time()
+            .into_iter()
+            .chain(self.venue.next_internal_time())
+            .min()
+            .map(|t| self.last_time.map_or(t, |now| now.max(t)))
+    }
+    /// 現時刻で戦略をpollし、模擬注文待ちの場合だけ呼出元へ制御を戻す。
+    /// 通常のasync処理は従来どおり時刻を固定して完了を待つ。
+    pub async fn poll_replay(&mut self) -> Result<(), BotRunError<S::Error>> {
+        self.venue.set_replay_driver(true);
+        loop {
+            let waker = std::task::Waker::from(std::sync::Arc::new(RunnerWake(self.wake.clone())));
+            self.venue.set_replay_waker(Some(waker.clone()));
+            self.start_handler(true)?;
+            if self.active.is_none() {
+                return Ok(());
+            }
+            let polled = self.poll_active(&mut std::task::Context::from_waker(&waker));
+            if let std::task::Poll::Ready((strategy, result)) = polled {
+                self.strategy = Some(strategy);
+                self.finish_handler(result)?;
+                continue;
+            }
+            // JoinSet内で要求を登録するタスクにも一度実行機会を与える。
+            tokio::task::yield_now().await;
+            if let std::task::Poll::Ready((strategy, result)) =
+                self.poll_active(&mut std::task::Context::from_waker(&waker))
+            {
+                self.strategy = Some(strategy);
+                self.finish_handler(result)?;
+                continue;
+            }
+            if self.venue.next_internal_time().is_some()
+                || self
+                    .venue
+                    .paper_settlement_status()
+                    .is_some_and(|s| s.pending_operations > 0)
+            {
+                return Ok(());
+            }
+            self.wake.notified().await;
+        }
+    }
+    pub async fn process_next_internal(
         &mut self,
         recovery: bool,
     ) -> Result<(), BotRunError<S::Error>> {
+        let Some(time) = self.next_internal_time() else {
+            return Ok(());
+        };
+        self.advance_time(time)?;
+        // 同時刻はvenue内部処理、戦略予約の順。市場入力は呼出元で先に処理する。
+        self.venue
+            .process_internal_events(time)
+            .map_err(BotRunError::Venue)?;
+        if self.next_scheduled_time().is_some_and(|t| t <= time) {
+            self.enqueue_next_scheduled(recovery)?;
+        }
+        self.poll_replay().await
+    }
+    fn enqueue_next_scheduled(&mut self, recovery: bool) -> Result<(), BotRunError<S::Error>> {
         let Some((&(time, _), _)) = self.scheduled.first_key_value() else {
             return Ok(());
         };
+        // 容量不足なら予約を消費せず、終了結果で未実行として追跡できるようにする。
+        self.ensure_delivery_capacity(1)?;
+        let time = self.last_time.map_or(time, |now| now.max(time));
         let count = match self.scheduled_tick {
             Some((tick, count)) if tick == time => count,
             _ => 0,
@@ -1053,7 +1204,6 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         if count >= self.scheduled_limit {
             return Err(BotRunError::ScheduledLimit);
         }
-        self.advance_time(time)?;
         self.scheduled_tick = Some((time, count + 1));
         let (_, entry) = self.scheduled.pop_first().unwrap();
         if let Some(r) = self.venue.recorder() {
@@ -1062,13 +1212,25 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                 serde_json::json!({"event":entry.info,"executed_at_ms":time}),
             );
         }
-        self.process_inner(
-            Some(time),
-            entry.info.input_id,
-            BotEvent::Custom(entry.event),
+        self.delivery.push_back(QueuedEvent {
+            event: BotEvent::Custom(entry.event),
+            input_id: entry.info.input_id,
+            market_id: None,
+            derived: false,
             recovery,
-        )
-        .await
+        });
+        Ok(())
+    }
+    pub async fn process_next_scheduled(
+        &mut self,
+        recovery: bool,
+    ) -> Result<(), BotRunError<S::Error>> {
+        let Some(time) = self.next_scheduled_time() else {
+            return Ok(());
+        };
+        self.advance_time(self.last_time.map_or(time, |now| now.max(time)))?;
+        self.enqueue_next_scheduled(recovery)?;
+        self.drive_direct(true).await
     }
     fn record_settlement(&self) {
         if let Some(status) = self.venue.paper_settlement_status() {
@@ -1086,147 +1248,302 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             .advance_replay_time(time_ms)
             .map_err(BotRunError::Venue)?;
         self.last_time = Some(time_ms);
+        self.replay_clock
+            .store(time_ms, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    fn ingest(
+        &mut self,
+        input_id: Option<InputId>,
+        event: BotEvent<S::CustomEvent>,
+        recovery: bool,
+        inherited_market_id: Option<u64>,
+        derived: bool,
+    ) -> Result<(), BotRunError<S::Error>> {
+        self.ensure_delivery_capacity(1)?;
+        let recorder = self.venue.recorder();
+        let market_id = if matches!(event, BotEvent::Market(_)) {
+            recorder.as_ref().map(|r| r.next_id())
+        } else {
+            inherited_market_id
+        };
+        let received_at_ms = self
+            .last_time
+            .unwrap_or_else(|| crate::execution_recording::timestamp_ms() as i64);
+        let recording_context = crate::execution_recording::RecordingContext {
+            event_time_ms: Some(received_at_ms),
+            market_event_id: market_id,
+            input_id: input_id.clone(),
+            ..Default::default()
+        };
+        crate::execution_recording::sync_scope(recording_context, || {
+            if let BotEvent::Market(market) = &event {
+                if recovery {
+                    self.venue.on_market_event_recovering(market)
+                } else {
+                    self.venue.on_market_event(market)
+                }
+                .map_err(BotRunError::Venue)?;
+            }
+            if let Some(r) = recorder {
+                r.record("input_registered", serde_json::json!({"received_at_ms":received_at_ms,"input_id":input_id,"market_event_id":market_id}));
+            }
+            Ok::<(), BotRunError<S::Error>>(())
+        })?;
+        self.delivery.push_back(QueuedEvent {
+            event,
+            input_id,
+            market_id,
+            derived,
+            recovery,
+        });
+        Ok(())
+    }
+    /// 市場を現在の受信時刻で登録し、戦略が模擬操作待ちなら配送を保留する。
+    /// このメソッド自身は将来の期限へ時計を進めない。
+    pub async fn submit_replay(
+        &mut self,
+        time_ms: i64,
+        input_id: Option<InputId>,
+        event: BotEvent<S::CustomEvent>,
+        recovery: bool,
+    ) -> Result<(), BotRunError<S::Error>> {
+        self.advance_time(time_ms)?;
+        self.ingest(input_id, event, recovery, None, false)?;
+        self.poll_replay().await
+    }
+    /// 直接入力を処理する。待機する模擬操作の期限も駆動するため、途中の入力が
+    /// あり得る収録データにはsubmit_replayを使うrun_replayを選ぶ。
     pub async fn process(
         &mut self,
         time_ms: i64,
         input_id: Option<InputId>,
         event: BotEvent<S::CustomEvent>,
     ) -> Result<(), BotRunError<S::Error>> {
-        self.advance_time(time_ms)?;
-        self.process_inner(Some(time_ms), input_id, event, false)
-            .await
+        self.submit_replay(time_ms, input_id, event, false).await?;
+        self.drive_direct(true).await
     }
-    /// 欠損後も受信順に市場入力と戦略を処理する。
-    /// venueの執行保留は解除しない。入力変換・戦略などのエラーは引き続き返す。
     pub async fn process_recovering(
         &mut self,
         time_ms: i64,
         input_id: Option<InputId>,
         event: BotEvent<S::CustomEvent>,
     ) -> Result<(), BotRunError<S::Error>> {
-        self.advance_time(time_ms)?;
-        self.process_inner(Some(time_ms), input_id, event, true)
-            .await
+        self.submit_replay(time_ms, input_id, event, true).await?;
+        self.drive_direct(true).await
     }
-    async fn process_live(
-        &mut self,
-        event: BotEvent<S::CustomEvent>,
-    ) -> Result<(), BotRunError<S::Error>> {
-        // 接続の再確立はフィードが担当し、執行保留と戦略の生存は分ける。
-        self.process_inner(None, None, event, true).await
+    fn poll_live(&mut self) -> Result<(), BotRunError<S::Error>> {
+        self.venue.set_replay_driver(false);
+        let waker = std::task::Waker::from(std::sync::Arc::new(RunnerWake(self.wake.clone())));
+        self.venue.set_replay_waker(Some(waker.clone()));
+        loop {
+            self.start_handler(false)?;
+            if self.active.is_none() {
+                return Ok(());
+            }
+            match self.poll_active(&mut std::task::Context::from_waker(&waker)) {
+                std::task::Poll::Ready((strategy, result)) => {
+                    self.strategy = Some(strategy);
+                    self.finish_handler(result)?;
+                }
+                std::task::Poll::Pending => return Ok(()),
+            }
+        }
     }
-    async fn process_inner(
+    async fn drive_direct(&mut self, replay: bool) -> Result<(), BotRunError<S::Error>> {
+        struct ReleaseDriver<V: TradingVenue>(V);
+        impl<V: TradingVenue> Drop for ReleaseDriver<V> {
+            fn drop(&mut self) {
+                self.0.set_replay_driver(false);
+                self.0.set_replay_waker(None);
+            }
+        }
+        let _release = ReleaseDriver(self.venue.clone());
+        if replay {
+            self.poll_replay().await?;
+            while self.active.is_some() {
+                let Some(t) = self.venue.next_internal_time() else {
+                    break;
+                };
+                self.advance_time(t)?;
+                self.venue
+                    .process_internal_events(t)
+                    .map_err(BotRunError::Venue)?;
+                self.poll_replay().await?;
+            }
+            return Ok(());
+        }
+        loop {
+            self.start_handler(false)?;
+            if self.active.is_none() {
+                return Ok(());
+            }
+            let (strategy, result) = std::future::poll_fn(|cx| self.poll_active(cx)).await;
+            self.strategy = Some(strategy);
+            self.finish_handler(result)?;
+        }
+    }
+    fn poll_active(
         &mut self,
-        time: Option<i64>,
-        input_id: Option<InputId>,
-        event: BotEvent<S::CustomEvent>,
-        recovery: bool,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<(S, Result<(), S::Error>)> {
+        let active = self.active.as_mut().expect("active handler");
+        let context = crate::execution_recording::RecordingContext {
+            event_time_ms: Some(
+                self.last_time
+                    .unwrap_or_else(|| crate::execution_recording::timestamp_ms() as i64),
+            ),
+            market_event_id: active.market_id,
+            input_id: active.input_id.clone(),
+            replay_clock: self.last_time.map(|_| self.replay_clock.clone()),
+            ..Default::default()
+        };
+        crate::execution_recording::sync_scope(context, || active.future.as_mut().poll(cx))
+    }
+    fn start_handler(&mut self, replay: bool) -> Result<(), BotRunError<S::Error>> {
+        if self.active.is_some() {
+            return Ok(());
+        }
+        let Some(entry) = self.delivery.front() else {
+            return Ok(());
+        };
+        let next_count = if entry.derived {
+            self.derived_count
+                .checked_add(1)
+                .ok_or(BotRunError::DerivedLimit)?
+        } else {
+            1
+        };
+        if next_count > self.derived_limit.saturating_add(1) {
+            return Err(BotRunError::DerivedLimit);
+        }
+        if self.strategy.is_none() {
+            return Err(BotRunError::Stopped);
+        }
+        let entry = self.delivery.pop_front().unwrap();
+        self.derived_count = next_count;
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(Pending {
+            queue: Default::default(),
+            scheduled: Vec::new(),
+            schedule_limit: self.scheduled_limit.saturating_sub(self.scheduled.len()),
+            schedule_overflow: false,
+            open: true,
+            emitted: 0,
+            limit: self.derived_limit.saturating_sub(
+                self.derived_count.saturating_sub(1)
+                    + self.delivery.iter().filter(|e| e.derived).count(),
+            ),
+            overflow: false,
+        }));
+        let ctx = BotContext {
+            venue: self.venue.clone(),
+            time: replay.then(|| self.replay_clock.clone()),
+            pending: pending.clone(),
+        };
+        let mut strategy = self.strategy.take().ok_or(BotRunError::Stopped)?;
+        let recorder = self.venue.recorder();
+        let input_id = entry.input_id.clone();
+        let market_id = entry.market_id;
+        let close = ClosePending(pending.clone());
+        let future = Box::pin(async move {
+            let _close = close;
+            if let Some(r) = recorder {
+                let kind = if matches!(entry.event, BotEvent::Market(_)) {
+                    "market_event"
+                } else {
+                    "custom_event"
+                };
+                let event_type = match &entry.event {
+                    BotEvent::Market(MarketEvent::Ticker { .. }) => "ticker",
+                    BotEvent::Market(MarketEvent::Transactions { .. }) => "transactions",
+                    BotEvent::Market(MarketEvent::DepthUpdated { .. }) => "depth",
+                    BotEvent::Market(MarketEvent::CircuitBreakInfo { .. }) => "circuit_break_info",
+                    BotEvent::Custom(_) => "custom",
+                };
+                r.record(
+                    kind,
+                    serde_json::json!({"id":market_id,"input_id":input_id,"type":event_type}),
+                );
+            }
+            let result = strategy.handle_event(entry.event, &ctx).await;
+            (strategy, result)
+        });
+        self.active = Some(ActiveHandler {
+            future,
+            pending,
+            input_id: entry.input_id.clone(),
+            market_id,
+            recovery: entry.recovery,
+        });
+        Ok(())
+    }
+    fn finish_handler(
+        &mut self,
+        result: Result<(), S::Error>,
     ) -> Result<(), BotRunError<S::Error>> {
-        let mut queue = std::collections::VecDeque::from([(event, None)]);
-        let mut count = 0;
-        while let Some((event, inherited_market_id)) = queue.pop_front() {
-            if count > self.derived_limit {
+        let active = self.active.take().unwrap();
+        let (emitted, scheduled) = {
+            let mut p = active.pending.lock().unwrap();
+            p.open = false;
+            if p.schedule_overflow {
+                return Err(BotRunError::ScheduledLimit);
+            }
+            if p.overflow {
                 return Err(BotRunError::DerivedLimit);
             }
-            count += 1;
-            let pending = std::sync::Arc::new(std::sync::Mutex::new(Pending {
-                queue: std::collections::VecDeque::new(),
-                scheduled: Vec::new(),
-                schedule_limit: self.scheduled_limit.saturating_sub(self.scheduled.len()),
-                schedule_overflow: false,
-                open: true,
-                emitted: 0,
-                limit: self.derived_limit.saturating_sub(count - 1 + queue.len()),
-                overflow: false,
-            }));
-            let _close = ClosePending(pending.clone());
-            let ctx = BotContext {
-                venue: self.venue.clone(),
-                time,
-                pending: pending.clone(),
-            };
-            let recorder = self.venue.recorder();
-            let is_market = matches!(event, BotEvent::Market(_));
-            let recording_context = crate::execution_recording::RecordingContext {
-                event_time_ms: Some(ctx.now_ms()),
-                market_event_id: if is_market {
-                    recorder.as_ref().map(|r| r.next_id())
-                } else {
-                    inherited_market_id
-                },
-                input_id: input_id.clone(),
-                ..Default::default()
-            };
-            let market_id = recording_context.market_event_id;
-            let result = crate::execution_recording::scope(recording_context, async {
-                if let Some(r) = &recorder {
-                    r.record(
-                        if is_market {
-                            "market_event"
-                        } else {
-                            "custom_event"
-                        },
-                        serde_json::json!({"id":market_id,"input_id":input_id,"type":match &event {
-                            BotEvent::Market(MarketEvent::Ticker{..})=>"ticker",
-                            BotEvent::Market(MarketEvent::Transactions{..})=>"transactions",
-                            BotEvent::Market(MarketEvent::DepthUpdated{..})=>"depth",
-                            BotEvent::Market(MarketEvent::CircuitBreakInfo{..})=>"circuit_break_info",
-                            BotEvent::Custom(_)=>"custom",
-                        }}),
-                    );
-                }
-                if let BotEvent::Market(market) = &event {
-                    if recovery {
-                        self.venue.on_market_event_recovering(market)
-                    } else {
-                        self.venue.on_market_event(market)
-                    }
-                    .map_err(BotRunError::Venue)?;
-                }
-                self.strategy
-                    .handle_event(event, &ctx)
-                    .await
-                    .map_err(BotRunError::Strategy)
-            })
-            .await;
-            {
-                let mut p = pending.lock().unwrap();
-                p.open = false;
-                if p.schedule_overflow {
-                    return Err(BotRunError::ScheduledLimit);
-                }
-                if p.overflow {
-                    return Err(BotRunError::DerivedLimit);
-                }
-                queue.extend(p.queue.drain(..).map(|event| (event, market_id)));
-                if result.is_ok() {
-                    for (execute_at_ms, event) in p.scheduled.drain(..) {
-                        if self.scheduled.len() >= self.scheduled_limit {
-                            return Err(BotRunError::ScheduledLimit);
-                        }
-                        self.next_scheduled_id = self
-                            .next_scheduled_id
-                            .checked_add(1)
-                            .ok_or(BotRunError::ScheduleIdOverflow)?;
-                        let info = ScheduledEventInfo {
-                            id: self.next_scheduled_id,
-                            scheduled_at_ms: time.expect("scheduled only in replay"),
-                            execute_at_ms,
-                            input_id: input_id.clone(),
-                        };
-                        if let Some(r) = &recorder {
-                            r.record("scheduled_event_reserved", serde_json::json!(&info));
-                        }
-                        self.scheduled
-                            .insert((execute_at_ms, info.id), ScheduledEvent { info, event });
-                    }
-                }
+            (
+                p.queue.drain(..).collect::<Vec<_>>(),
+                p.scheduled.drain(..).collect::<Vec<_>>(),
+            )
+        };
+        result.map_err(BotRunError::Strategy)?;
+        // FIFO優先のため外部入力を退避する前に、復元後の全件数を検証する。
+        self.ensure_delivery_capacity(emitted.len())?;
+        // 派生イベントは待機中に受信した市場入力より先にFIFOで配送する。
+        let external_start = self
+            .delivery
+            .iter()
+            .position(|e| !e.derived)
+            .unwrap_or(self.delivery.len());
+        let queued = self.delivery.split_off(external_start);
+        let ingestion = emitted.into_iter().try_for_each(|event| {
+            self.ingest(
+                active.input_id.clone(),
+                event,
+                active.recovery,
+                active.market_id,
+                true,
+            )
+        });
+        self.delivery.extend(queued);
+        ingestion?;
+        for (execute_at_ms, event) in scheduled {
+            if self.scheduled.len() >= self.scheduled_limit {
+                return Err(BotRunError::ScheduledLimit);
             }
-            result?;
+            self.next_scheduled_id = self
+                .next_scheduled_id
+                .checked_add(1)
+                .ok_or(BotRunError::ScheduleIdOverflow)?;
+            let info = ScheduledEventInfo {
+                id: self.next_scheduled_id,
+                scheduled_at_ms: self.last_time.expect("replay schedule"),
+                execute_at_ms,
+                input_id: active.input_id.clone(),
+            };
+            if let Some(r) = self.venue.recorder() {
+                r.record("scheduled_event_reserved", serde_json::json!(&info));
+            }
+            self.scheduled
+                .insert((execute_at_ms, info.id), ScheduledEvent { info, event });
         }
         Ok(())
+    }
+    /// 評価終了時に戦略Futureを破棄する。送信済みvenue操作は取り消さない。
+    pub fn stop_pending_handler(&mut self) {
+        self.active.take();
+        self.venue.set_replay_waker(None);
+        self.venue.set_replay_driver(false);
     }
 }
 

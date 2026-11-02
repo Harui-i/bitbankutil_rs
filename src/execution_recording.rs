@@ -66,16 +66,26 @@ impl std::fmt::Debug for ExecutionRecorder {
         f.debug_struct("ExecutionRecorder").finish_non_exhaustive()
     }
 }
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RecordingContext {
     pub operation_id: Option<u64>,
     pub market_event_id: Option<u64>,
     pub event_time_ms: Option<i64>,
     pub input_id: Option<crate::bitbank_bot::InputId>,
+    /// 再生中の実行時計。ネストしたscopeも同じ時計を読み、開始時刻へ固定しない。
+    pub replay_clock: Option<Arc<std::sync::atomic::AtomicI64>>,
 }
 tokio::task_local! { static CONTEXT: RecordingContext; }
 pub fn current_context() -> RecordingContext {
-    CONTEXT.try_with(Clone::clone).unwrap_or_default()
+    let mut context = CONTEXT.try_with(Clone::clone).unwrap_or_default();
+    if let Some(clock) = &context.replay_clock {
+        context.event_time_ms = Some(clock.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    context
+}
+/// 同期した市場登録にも、入力の記録コンテキストを引き継ぐ。
+pub fn sync_scope<T>(context: RecordingContext, f: impl FnOnce() -> T) -> T {
+    CONTEXT.sync_scope(context, f)
 }
 pub async fn scope<T>(
     context: RecordingContext,

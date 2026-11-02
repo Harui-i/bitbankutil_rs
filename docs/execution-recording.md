@@ -131,6 +131,10 @@ cargo run --example record_execution -- /tmp/execution.jsonl
 
 時刻は用途別に分けています。`recorded_at_ms` は記録を書き出す処理を行った実時刻、
 `event_time_ms` は利用者が指定する実行環境上のイベント時刻です。
+再生ランナーの戦略・API操作では現在のローカル仮想時計を使い、API待機後の操作完了もその時点の時刻を記録します。
+`RecordingContext.replay_clock` はネストした操作・order_managerのscopeへ共有され、入力ID・操作IDを維持しながら
+`current_context()` / レコーダーが記録ごとに時刻を読み直します。開始時刻をFuture全体の時刻として固定しません。
+内部の有効化・応答イベントは実行時刻を明示し、元要求の時刻へ遡りません。
 取引所の約定時刻は、約定情報の中に別途保存します。
 paper / backtestの `event_time_ms` はローカル時計のままです。
 `paper_initial_state.config.time_model` と `paper_settlement.time_model` に固定時計モデルと
