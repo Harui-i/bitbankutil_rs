@@ -282,5 +282,7 @@ cargo run --example summarize_execution -- execution.jsonl
 件数、時刻のある件数、標本内の最小・中央値（偶数個では下側）・最大と、ミリ秒単位のヒストグラムを表示します。
 タイムアウトとその他の失敗は別行で表示し、開始だけ残った記録は結果不明として件数を示します。
 母集団のp95等は表示しません。標本数、収集期間・時間帯、障害や負荷、同期情報、記録失敗も確認して評価してください。
-`http_request_finished.success` は最終試行の結果なので、途中で失敗した試行も含めたい場合はattemptの行を使います。
+`http_request_finished` の `success`・`timeout`・`stage` は最終試行の結果です。
+途中でタイムアウトしても再試行で成功した要求は、requestの行ではsuccessとして集計します。
+途中で失敗した試行も含めたい場合はattemptの行を使います。
 `run_id` はファイル内で再利用しないでください。

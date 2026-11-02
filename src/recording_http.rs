@@ -164,6 +164,7 @@ impl Transport {
                         json!({
                             "request_id": request_id, "method": method.as_str(), "endpoint": path,
                             "success": result.is_ok(), "attempts": attempt, "timing": timing,
+                            "timeout": timeout, "stage": stage,
                         }),
                     );
                 }

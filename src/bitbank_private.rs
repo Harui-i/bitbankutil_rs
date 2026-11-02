@@ -649,8 +649,38 @@ mod recording_tests {
                 .find(|r| r.kind == "http_request_finished")
                 .unwrap();
             assert_eq!(total.data["attempts"], 2);
+            assert_eq!(total.data["success"], true);
+            assert_eq!(total.data["timeout"], false);
+            assert_eq!(total.data["stage"], "success");
             assert!(total.data["timing"]["elapsed_us"].as_u64().unwrap() >= 120_000);
         }
+    }
+
+    #[tokio::test]
+    async fn exhausted_timeouts_are_recorded_as_request_timeout() {
+        let (mut c, m, _, server) = client(vec![Some((200, "__timeout__")); 2], 2);
+        c.options.request_config.timeout = std::time::Duration::from_millis(30);
+        c.options.request_config.retry_cooldown = std::time::Duration::from_millis(120);
+        assert!(c.get_assets().await.is_err());
+        server.join().unwrap();
+        let records = read_records(&m.0.lock().unwrap()[..]).unwrap();
+        let calls: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind == "http_finished")
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].data["will_retry"], true);
+        assert_eq!(calls[1].data["will_retry"], false);
+        let total = records
+            .iter()
+            .find(|r| r.kind == "http_request_finished")
+            .unwrap();
+        assert_eq!(total.data["request_id"], calls[1].data["request_id"]);
+        assert_eq!(total.operation_id, calls[1].operation_id);
+        assert_eq!(total.data["attempts"], 2);
+        assert_eq!(total.data["success"], false);
+        assert_eq!(total.data["timeout"], true);
+        assert_eq!(total.data["stage"], "send");
     }
 
     #[tokio::test]
@@ -674,6 +704,13 @@ mod recording_tests {
         assert_eq!(calls[0].data["will_retry"], false);
         assert!(calls[0].data["http_status"].is_null());
         assert!(calls[0].data["result"].is_null());
+        let total = records
+            .iter()
+            .find(|r| r.kind == "http_request_finished")
+            .unwrap();
+        assert_eq!(total.data["success"], false);
+        assert_eq!(total.data["timeout"], false);
+        assert_eq!(total.data["stage"], "build");
     }
 
     #[tokio::test]
@@ -708,6 +745,20 @@ mod recording_tests {
         assert_eq!(calls[1].data["attempt"], 2);
         assert_eq!(calls[1].data["http_status"], 429);
         assert_eq!(calls[1].data["exchange_code"], 10009);
+        let totals: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind == "http_request_finished")
+            .collect();
+        assert_eq!(totals.len(), 3);
+        for (total, last_attempt) in totals.iter().zip([calls[1], calls[2], calls[3]]) {
+            assert_eq!(total.data["request_id"], last_attempt.data["request_id"]);
+            assert_eq!(total.data["success"], last_attempt.data["success"]);
+            assert_eq!(total.data["timeout"], false);
+            assert_eq!(total.data["stage"], last_attempt.data["stage"]);
+        }
+        assert_eq!(totals[0].data["stage"], "response");
+        assert_eq!(totals[1].data["stage"], "response");
+        assert_eq!(totals[2].data["stage"], "success");
         let text = String::from_utf8(m.0.lock().unwrap().clone()).unwrap();
         assert!(!text.contains("token-sentinel"));
         assert!(!text.contains("secret-value-sentinel"));
