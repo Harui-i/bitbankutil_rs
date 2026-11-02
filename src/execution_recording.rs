@@ -228,6 +228,7 @@ pub(crate) mod tests {
         config.fee_schedule.maker_fee_rate_quote = rust_decimal::Decimal::new(1, 3);
         let engine = PaperExecutionEngine::new(
             config,
+            crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![
                 BalanceSnapshot {
                     asset: "btc".into(),
@@ -313,6 +314,7 @@ pub(crate) mod tests {
         let still_trading = PaperTradingVenue::new(
             PaperExecutionEngine::new(
                 v.engine().lock().unwrap().config().clone(),
+                crate::paper_execution::PaperClock::Replay { now_ms: 0 },
                 account.balances.clone(),
                 Some(failed.clone()),
             )
@@ -341,6 +343,7 @@ pub(crate) mod tests {
             .collect();
         PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+            crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             balances,
             Some(recorder),
         )
@@ -496,6 +499,7 @@ pub(crate) mod tests {
                 use crate::{order_domain::BalanceSnapshot, paper_execution::*};
                 PaperExecutionEngine::new(
                     PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+                    crate::paper_execution::PaperClock::Replay { now_ms: 0 },
                     vec![
                         BalanceSnapshot {
                             asset: "btc".into(),

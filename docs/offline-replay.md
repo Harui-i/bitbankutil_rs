@@ -16,6 +16,13 @@
 任意のsleep、interval、実時計、独立タスクは仮想化しません。
 状態変更を伴う操作はハンドラー内で順番を固定しawaitしてください。
 
+paper trading用のエンジンをbacktestに使う場合、コンストラクターで
+`PaperClock::Replay { now_ms: 0 }` を明示します。初期時刻は最初の入力時刻以下にします。
+`BotRunner::advance_time` / `process` はvenueの再生時計も更新します。
+`run_replay` は、戦略に渡さない接続通知を含む各入力の受信時刻で時計を進めます。
+`PaperClock::Realtime` のvenueを再生へ渡すと `InvalidClock` エラーになります。
+注文有効開始時刻と取引所時刻の比較は [paper tradingの約定モデル](paper-execution.md) を参照してください。
+
 ## 市場データv1
 
 `ReplayInput::open(manifest_path)` はmanifestのsource一覧とJSONLファイルを逐次読み込みます。

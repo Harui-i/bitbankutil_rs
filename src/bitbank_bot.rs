@@ -671,6 +671,7 @@ mod tests {
         };
         let engine = PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+            crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![
                 BalanceSnapshot {
                     asset: "btc".into(),
@@ -958,6 +959,9 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         if self.last_time.is_some_and(|t| time_ms < t) {
             return Err(BotRunError::TimeReversed);
         }
+        self.venue
+            .advance_replay_time(time_ms)
+            .map_err(BotRunError::Venue)?;
         self.last_time = Some(time_ms);
         Ok(())
     }

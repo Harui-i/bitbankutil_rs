@@ -83,7 +83,13 @@ async fn demo(
         })
         .collect();
     let venue = PaperTradingVenue::new(
-        PaperExecutionEngine::new(config, balances, Some(recorder.clone())).unwrap(),
+        PaperExecutionEngine::new(
+            config,
+            bitbankutil_rs::paper_execution::PaperClock::Replay { now_ms: 0 },
+            balances,
+            Some(recorder.clone()),
+        )
+        .unwrap(),
     );
     let mut runner = BotRunner::new(Strategy { last: None }, venue.clone());
     let input =

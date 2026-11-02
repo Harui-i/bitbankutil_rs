@@ -38,7 +38,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
     let venue = PaperTradingVenue::new(
-        PaperExecutionEngine::new(config, balances, Some(recorder.clone())).unwrap(),
+        PaperExecutionEngine::new(
+            config,
+            bitbankutil_rs::paper_execution::PaperClock::Replay { now_ms: 0 },
+            balances,
+            Some(recorder.clone()),
+        )
+        .unwrap(),
     );
     let order = DesiredLimitOrder::limit(
         "btc_jpy".into(),

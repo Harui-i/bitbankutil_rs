@@ -59,8 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 この例では、取引操作を記録する `venue` と、最後に `finish()` を呼ぶコードが、
 1つのレコーダーを共有しています。
 
-paper tradingでは、`PaperExecutionEngine::new(config, balances, Some(recorder.clone()))` のように、
+paper tradingでは、`PaperExecutionEngine::new(config, PaperClock::Realtime, balances, Some(recorder.clone()))` のように、
 第3引数にレコーダーを渡してエンジンを作ります。記録しない場合は `None` を渡してください。
+backtestでは `PaperClock::Replay { now_ms: 0 }` を選択します。時計の契約は [paper tradingの約定モデル](paper-execution.md) を参照してください。
 そのエンジンを `PaperTradingVenue::new(engine)` に渡して、取引操作に利用します。
 エンジン作成時に初期残高・約定モデルの設定を保存し、その後の注文や残高の変化も記録します。
 
