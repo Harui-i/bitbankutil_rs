@@ -144,7 +144,7 @@ impl PaperTradingVenue {
 
 pub(super) fn process(
     state: &mut State,
-    engine: &PaperExecutionEngine,
+    engine: &mut PaperExecutionEngine,
     event: QueryEvent,
     executed: i64,
 ) -> Result<(), TradingVenueError> {
@@ -184,7 +184,7 @@ pub(super) fn process(
                             sampled_exchange_ms: exchange,
                             received_local_ms: None,
                             watermark_ms: status.watermark_ms,
-                            unsettled: status.unsettled,
+                            unsettled: engine.current_unsettled(),
                             issues: status.issues,
                         },
                     })
@@ -234,8 +234,9 @@ pub(super) fn process(
             if let Ok(part) = &mut result {
                 part.observation.received_local_ms = Some(executed);
                 if part.observation.unsettled {
-                    state.uncertain_query_observations =
-                        state.uncertain_query_observations.saturating_add(1);
+                    engine.uncertain_query_observations =
+                        engine.uncertain_query_observations.saturating_add(1);
+                    engine.record_settlement();
                 }
             }
             record(

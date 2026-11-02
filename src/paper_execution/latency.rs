@@ -94,7 +94,6 @@ pub(super) struct State {
     waker: Option<Waker>,
     worker_running: bool,
     managed_replay: bool,
-    uncertain_query_observations: usize,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -111,7 +110,6 @@ impl State {
             waker: None,
             worker_running: false,
             managed_replay: false,
-            uncertain_query_observations: 0,
             notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -519,7 +517,7 @@ impl TradingVenue for PaperTradingVenue {
                 context,
                 || -> Result<(), TradingVenueError> {
                     match event {
-                        Internal::Query(event) => query::process(&mut s, &e, event, executed)?,
+                        Internal::Query(event) => query::process(&mut s, &mut e, event, executed)?,
                         Internal::Place {
                             id,
                             order,
@@ -622,14 +620,13 @@ impl TradingVenue for PaperTradingVenue {
         let s = self.state.lock().unwrap();
         let mut status = self.engine.lock().unwrap().settlement_status();
         status.latency_model = s.latency;
-        status.uncertain_query_observations = s.uncertain_query_observations;
         status.pending_operation_details = s.operations.values().cloned().collect();
         status.pending_operations = s.operations.len()
             + s.events
                 .values()
                 .filter(|v| matches!(v.event, Internal::Publish { .. }))
                 .count();
-        status.unsettled |= status.pending_operations > 0 || s.uncertain_query_observations > 0;
+        status.unsettled |= status.pending_operations > 0;
         Some(status)
     }
     fn mark_market_incomplete(&self, reason: &str) {

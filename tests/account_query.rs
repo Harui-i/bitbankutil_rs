@@ -148,7 +148,16 @@ async fn individual_samples_are_frozen_and_old_query_cannot_overwrite_new_notifi
 
 #[tokio::test]
 async fn late_trade_does_not_rewrite_sample_and_uncertainty_survives_final_watermark() {
-    let v = venue(PaperClock::Replay { now_ms: 900 }, 0, None);
+    let records = Records::default();
+    let v = venue(
+        PaperClock::Replay { now_ms: 900 },
+        0,
+        Some(ExecutionRecorder::new(
+            "uncertain",
+            serde_json::json!({}),
+            records.clone(),
+        )),
+    );
     v.advance_replay_time(1000).unwrap();
     let mut query = Box::pin(v.account_snapshot("btc_jpy"));
     assert!(poll_once(query.as_mut()).await.is_pending());
@@ -169,6 +178,28 @@ async fn late_trade_does_not_rewrite_sample_and_uncertainty_survives_final_water
     assert!(status.unsettled);
     assert_eq!(status.uncertain_query_observations, 2);
     assert_eq!(status.pending_operations, 0);
+    let engine_status = v.engine().lock().unwrap().settlement_status();
+    assert_eq!(engine_status.uncertain_query_observations, 2);
+    assert!(engine_status.unsettled);
+    // 履歴は維持するが、後続の確定可能な採取まで未確定扱いにはしない。
+    let mut later = Box::pin(v.account_snapshot("btc_jpy"));
+    assert!(poll_once(later.as_mut()).await.is_pending());
+    v.process_internal_events(1170).unwrap();
+    let meta = later.await.unwrap().query.unwrap();
+    assert!(!meta.orders.unsettled && !meta.balances.unsettled);
+    assert_eq!(
+        v.paper_settlement_status()
+            .unwrap()
+            .uncertain_query_observations,
+        2
+    );
+    let records = records.0.lock().unwrap();
+    let last = records
+        .iter()
+        .rfind(|r| r.kind == "paper_settlement")
+        .unwrap();
+    assert_eq!(last.data["uncertain_query_observations"], 2);
+    assert_eq!(last.data["unsettled"], true);
 }
 
 type Seen = Arc<Mutex<Vec<(u8, i64, i64)>>>;
