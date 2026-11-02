@@ -102,6 +102,9 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
         None
     }
 
+    /// 終了時の監査状態を保存する。通常の口座情報と保留操作を含み、全キューの複製は不要。
+    fn record_paper_settlement(&self) {}
+
     /// 切断・入力欠損をvenueに伝える。再接続後も評価の異常は残す。
     fn mark_market_incomplete(&self, _reason: &str) {}
 

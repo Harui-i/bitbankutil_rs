@@ -52,7 +52,39 @@ pub struct RecordingStatus {
     pub dropped_records: u64,
     pub persistence_uncertain: bool,
 }
+/// 記録する情報の範囲。既定は資金・注文を監査できる軽量記録。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "profile", rename_all = "snake_case")]
+pub enum RecordingProfile {
+    Disabled,
+    #[default]
+    Financial,
+    Diagnostic {
+        queue: QueueRecording,
+    },
+}
+/// キュー診断の保存方法。周期は診断観測回数（最初は必ずsnapshot）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum QueueRecording {
+    Full,
+    Periodic {
+        every: std::num::NonZeroU64,
+    },
+    Delta {
+        snapshot_every: std::num::NonZeroU64,
+    },
+    Counters,
+}
+#[derive(Default)]
+struct QueueHistory {
+    observation: u64,
+    sequence: u64,
+    previous: Vec<Value>,
+}
 struct State {
+    profile: RecordingProfile,
+    queues: std::collections::BTreeMap<u64, QueueHistory>,
     run_id: String,
     sequence: u64,
     next_id: u64,
@@ -129,14 +161,27 @@ fn timestamp_us() -> u64 {
 }
 impl ExecutionRecorder {
     pub fn new(run_id: impl Into<String>, metadata: Value, sink: impl EventSink + 'static) -> Self {
+        Self::with_profile(run_id, metadata, RecordingProfile::default(), sink)
+    }
+    /// profileと省略対象をrun_startedへ保存する。Disabledはsinkにも書き込まない。
+    pub fn with_profile(
+        run_id: impl Into<String>,
+        metadata: Value,
+        profile: RecordingProfile,
+        sink: impl EventSink + 'static,
+    ) -> Self {
         let r = Self(Arc::new(Mutex::new(State {
+            profile,
+            queues: Default::default(),
             run_id: run_id.into(),
             sequence: 0,
             next_id: 0,
             sink: Box::new(sink),
             status: RecordingStatus::default(),
         })));
-        r.record("run_started", metadata);
+        r.record_lazy("run_started", || json!({"metadata":metadata,"recording":profile,
+            "queue_evidence":"only paper_queue_diagnostic contains queue snapshots/deltas; financial records omit queue internals",
+            "omitted_events": if matches!(profile, RecordingProfile::Financial) { vec!["paper_queue_book", "paper_queue_trade"] } else { vec![] }}));
         r
     }
     pub fn next_id(&self) -> u64 {
@@ -144,16 +189,123 @@ impl ExecutionRecorder {
         s.next_id += 1;
         s.next_id
     }
-    pub fn record(&self, kind: &str, data: Value) {
+    pub fn profile(&self) -> RecordingProfile {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).profile
+    }
+    pub fn enabled(&self, kind: &str) -> bool {
+        match self.profile() {
+            RecordingProfile::Disabled => false,
+            RecordingProfile::Financial => !matches!(
+                kind,
+                "paper_queue_book" | "paper_queue_trade" | "paper_queue_diagnostic"
+            ),
+            RecordingProfile::Diagnostic { .. } => true,
+        }
+    }
+    /// filterを通った場合だけpayloadを構築する。closure内で同じrecorderを呼ばないこと。
+    pub fn record_lazy(&self, kind: &str, data: impl FnOnce() -> Value) {
+        if !self.enabled(kind) {
+            return;
+        }
         let c = current_context();
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if s.status.error.is_some() {
+            s.sequence += 1;
+            s.status.dropped_records += 1;
+            return;
+        }
+        let data = data();
+        Self::append(&mut s, c, kind, data);
+    }
+    pub fn record(&self, kind: &str, data: Value) {
+        self.record_lazy(kind, || data);
+    }
+    /// 明示snapshot。通常の診断profileの周期を進めず、financialでも要求時は保存する。
+    /// stream_idは同じrecorderのnext_idで採番し、engineごとに分ける。
+    pub fn queue_snapshot(&self, stream_id: u64, queue: impl FnOnce() -> Vec<Value>) {
+        self.queue_record(stream_id, true, queue, || Value::Null);
+    }
+    /// profile/周期を判定してからqueueまたはcounterのclosureだけを実行する。
+    pub fn queue_record(
+        &self,
+        stream_id: u64,
+        force: bool,
+        queue: impl FnOnce() -> Vec<Value>,
+        counters: impl FnOnce() -> Value,
+    ) {
+        let c = current_context();
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mode = match s.profile {
+            RecordingProfile::Disabled => return,
+            RecordingProfile::Financial if !force => return,
+            RecordingProfile::Financial => QueueRecording::Full,
+            RecordingProfile::Diagnostic { queue } => queue,
+        };
+        let history = s.queues.entry(stream_id).or_default();
+        if !force {
+            history.observation += 1;
+        }
+        let snapshot = force
+            || match mode {
+                QueueRecording::Full => true,
+                QueueRecording::Periodic { every } => {
+                    (history.observation - 1).is_multiple_of(every.get())
+                }
+                QueueRecording::Delta { snapshot_every } => {
+                    history.sequence == 0
+                        || (history.observation - 1).is_multiple_of(snapshot_every.get())
+                }
+                QueueRecording::Counters => false,
+            };
+        if !force && matches!(mode, QueueRecording::Periodic { .. }) && !snapshot {
+            return;
+        }
+        if s.status.error.is_some() {
+            s.sequence += 1;
+            s.status.dropped_records += 1;
+            return;
+        }
+        let history = s.queues.get_mut(&stream_id).unwrap();
+        let base = history.sequence;
+        history.sequence += 1;
+        let mut data = json!({"format_version":1,"stream_id":stream_id,"sequence":history.sequence,"observation":history.observation});
+        if snapshot {
+            let current = queue();
+            data["snapshot"] = json!(current);
+            history.previous = if matches!(mode, QueueRecording::Delta { .. }) {
+                current
+            } else {
+                vec![]
+            };
+        } else if matches!(mode, QueueRecording::Counters) {
+            data["counters"] = counters();
+        } else {
+            let current = queue();
+            let prefix = current
+                .iter()
+                .zip(&history.previous)
+                .take_while(|(a, b)| a == b)
+                .count();
+            let suffix = current[prefix..]
+                .iter()
+                .rev()
+                .zip(history.previous[prefix..].iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            data["base_sequence"] = json!(base);
+            data["splice"] = json!({"start":prefix,"delete":history.previous.len()-prefix-suffix,"insert":current[prefix..current.len()-suffix]});
+            history.previous = current;
+        }
+        Self::append(&mut s, c, "paper_queue_diagnostic", data);
+    }
+    fn append(s: &mut State, c: RecordingContext, kind: &str, data: Value) {
         s.sequence += 1;
         if s.status.error.is_some() {
             s.status.dropped_records += 1;
             return;
         }
         let record = ExecutionRecord {
-            version: 2,
+            version: 3,
             run_id: s.run_id.clone(),
             sequence: s.sequence,
             recorded_at_ms: timestamp_ms(),
@@ -179,6 +331,9 @@ impl ExecutionRecorder {
     }
     pub fn flush(&self) -> io::Result<()> {
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(s.profile, RecordingProfile::Disabled) {
+            return Ok(());
+        }
         if s.status.error.is_none() {
             if let Err(e) = s.sink.flush() {
                 s.status.error = Some(e.to_string());
@@ -191,8 +346,60 @@ impl ExecutionRecorder {
         }
     }
     pub fn finish(&self) -> io::Result<()> {
-        self.record("run_finished", json!({}));
+        self.record_lazy("run_finished", || json!({}));
         self.flush()
+    }
+}
+/// snapshot/delta列を復元する。streamごとに作り、欠損・逆順・形式違いをエラーにする。
+#[derive(Debug, Default)]
+pub struct QueueReconstruction {
+    stream_id: Option<u64>,
+    sequence: u64,
+    pub levels: Vec<Value>,
+}
+impl QueueReconstruction {
+    pub fn apply(&mut self, data: &Value) -> io::Result<()> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid or missing queue diagnostic record",
+            )
+        };
+        let stream = data["stream_id"].as_u64().ok_or_else(invalid)?;
+        let sequence = data["sequence"].as_u64().ok_or_else(invalid)?;
+        if data["format_version"] != 1
+            || self.stream_id.is_some_and(|s| s != stream)
+            || Some(sequence) != self.sequence.checked_add(1)
+        {
+            return Err(invalid());
+        }
+        let mut levels = self.levels.clone();
+        if let Some(snapshot) = data["snapshot"].as_array() {
+            levels = snapshot.clone();
+        } else {
+            if self.sequence == 0 || data["base_sequence"].as_u64() != Some(self.sequence) {
+                return Err(invalid());
+            }
+            let splice = &data["splice"];
+            let start = splice["start"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(invalid)?;
+            let delete = splice["delete"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(invalid)?;
+            let end = start
+                .checked_add(delete)
+                .filter(|end| *end <= levels.len())
+                .ok_or_else(invalid)?;
+            let insert = splice["insert"].as_array().ok_or_else(invalid)?;
+            levels.splice(start..end, insert.iter().cloned());
+        }
+        self.levels = levels;
+        self.sequence = sequence;
+        self.stream_id = Some(stream);
+        Ok(())
     }
 }
 pub fn read_records(reader: impl BufRead) -> io::Result<Vec<ExecutionRecord>> {
@@ -207,19 +414,20 @@ pub(crate) async fn operation<T: Serialize>(
     request: Value,
     future: impl std::future::Future<Output = Result<T, crate::trading_venue::TradingVenueError>>,
 ) -> Result<T, crate::trading_venue::TradingVenueError> {
-    let Some(r) = recorder else {
+    let Some(r) = recorder.filter(|r| r.enabled("operation_started")) else {
         return future.await;
     };
     let mut c = current_context();
     c.operation_id = Some(r.next_id());
     scope(c, async {
         let measurement = Measurement::start();
-        r.record(
+        r.record_lazy(
             "operation_started",
-            json!({"operation":name,"request":request,"started_at_unix_us":measurement.started_at_unix_us()}),
+            || json!({"operation":name,"request":request,"started_at_unix_us":measurement.started_at_unix_us()}),
         );
         let result = future.await;
         let timing = measurement.finish();
+        r.record_lazy("operation_finished", || {
         let mut data = match &result {
             Ok(value) => json!({"operation": name, "success": true, "result": value}),
             Err(error) => {
@@ -235,7 +443,8 @@ pub(crate) async fn operation<T: Serialize>(
             }
         };
         data["timing"] = timing;
-        r.record("operation_finished", data);
+        data
+        });
         result
     })
     .await
@@ -657,6 +866,263 @@ pub(crate) mod tests {
             records.iter().filter(|r| r.kind == "paper_event").count(),
             PAPER_EVENT_HISTORY_LIMIT + 50
         );
+    }
+
+    #[test]
+    fn filters_and_periods_do_not_build_payloads() {
+        for profile in [RecordingProfile::Disabled, RecordingProfile::Financial] {
+            let r = ExecutionRecorder::with_profile("lazy", json!({}), profile, Broken);
+            r.record_lazy("paper_queue_book", || panic!("filtered JSON"));
+            r.queue_record(1, false, || panic!("queue clone"), || panic!("counters"));
+            if profile == RecordingProfile::Disabled {
+                r.queue_snapshot(1, || panic!("disabled explicit snapshot"));
+                r.finish().unwrap();
+            }
+        }
+        let m = Memory::default();
+        let r = ExecutionRecorder::with_profile(
+            "periodic",
+            json!({}),
+            RecordingProfile::Diagnostic {
+                queue: QueueRecording::Periodic {
+                    every: 3.try_into().unwrap(),
+                },
+            },
+            JsonlSink(m.clone()),
+        );
+        r.queue_record(1, false, Vec::new, || panic!("not counters"));
+        for _ in 0..2 {
+            r.queue_record(
+                1,
+                false,
+                || panic!("skipped snapshot"),
+                || panic!("not counters"),
+            );
+        }
+        r.queue_record(1, false, || vec![json!(4)], || panic!("not counters"));
+        let records = read_records(&m.0.lock().unwrap()[..]).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[2].data["observation"], 4);
+        let r = ExecutionRecorder::with_profile(
+            "counter",
+            json!({}),
+            RecordingProfile::Diagnostic {
+                queue: QueueRecording::Counters,
+            },
+            JsonlSink(Memory::default()),
+        );
+        r.queue_record(
+            1,
+            false,
+            || panic!("counter cloned queue"),
+            || json!({"levels": 2}),
+        );
+    }
+
+    #[test]
+    fn deltas_restore_insertions_deletions_and_detect_missing_records() {
+        let m = Memory::default();
+        let r = ExecutionRecorder::with_profile(
+            "delta",
+            json!({}),
+            RecordingProfile::Diagnostic {
+                queue: QueueRecording::Delta {
+                    snapshot_every: 4.try_into().unwrap(),
+                },
+            },
+            JsonlSink(m.clone()),
+        );
+        let states = [
+            vec![],
+            vec![json!(1), json!(2)],
+            vec![json!(1)],
+            vec![json!(3), json!(1)],
+            vec![],
+            vec![json!(9)],
+        ];
+        for state in &states {
+            r.queue_record(7, false, || state.clone(), || panic!("not counters"));
+        }
+        r.queue_snapshot(7, || states.last().unwrap().clone());
+        let records: Vec<_> = read_records(&m.0.lock().unwrap()[..])
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == "paper_queue_diagnostic")
+            .collect();
+        let mut reconstructed = QueueReconstruction::default();
+        for (record, expected) in records.iter().zip(states.iter().chain(states.last())) {
+            reconstructed.apply(&record.data).unwrap();
+            assert_eq!(&reconstructed.levels, expected);
+        }
+        assert!(records[4].data.get("snapshot").is_some());
+        let mut missing = QueueReconstruction::default();
+        missing.apply(&records[0].data).unwrap();
+        assert!(missing.apply(&records[2].data).is_err());
+        assert!(missing.apply(&records[0].data).is_err());
+        let mut wrong = records[1].data.clone();
+        wrong["base_sequence"] = json!(999);
+        assert!(missing.apply(&wrong).is_err());
+        wrong = records[1].data.clone();
+        wrong["format_version"] = json!(99);
+        assert!(missing.apply(&wrong).is_err());
+        assert!(
+            QueueReconstruction::default()
+                .apply(&records[1].data)
+                .is_err()
+        );
+        missing.apply(&records[1].data).unwrap(); // 失敗時は復元状態を変更しない
+    }
+
+    #[test]
+    fn failed_sink_skips_lazy_builders_and_reports_loss() {
+        let r = ExecutionRecorder::with_profile(
+            "fail",
+            json!({}),
+            RecordingProfile::Diagnostic {
+                queue: QueueRecording::Full,
+            },
+            Broken,
+        );
+        r.record_lazy("custom", || panic!("failed sink payload"));
+        r.queue_record(
+            1,
+            false,
+            || panic!("failed sink queue"),
+            || panic!("failed sink counter"),
+        );
+        assert_eq!(r.status().dropped_records, 3);
+        assert!(r.status().persistence_uncertain);
+        assert!(r.finish().is_err());
+    }
+
+    #[tokio::test]
+    async fn profiles_preserve_finances_events_clock_and_query_metadata() {
+        use crate::{
+            market_event::*, order_domain::*, paper_execution::*, trading_venue::TradingVenue,
+        };
+        let mut baseline = None;
+        for profile in [
+            None,
+            Some(RecordingProfile::Disabled),
+            Some(RecordingProfile::Financial),
+            Some(RecordingProfile::Diagnostic {
+                queue: QueueRecording::Full,
+            }),
+            Some(RecordingProfile::Diagnostic {
+                queue: QueueRecording::Periodic {
+                    every: 3.try_into().unwrap(),
+                },
+            }),
+            Some(RecordingProfile::Diagnostic {
+                queue: QueueRecording::Delta {
+                    snapshot_every: 4.try_into().unwrap(),
+                },
+            }),
+            Some(RecordingProfile::Diagnostic {
+                queue: QueueRecording::Counters,
+            }),
+        ] {
+            let m = Memory::default();
+            let recorder = profile.map(|p| {
+                ExecutionRecorder::with_profile("invariant", json!({}), p, JsonlSink(m.clone()))
+            });
+            let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
+            config.fee_schedule.maker_fee_rate_quote = rust_decimal::Decimal::new(1, 3);
+            let balances = [("btc", 0), ("jpy", 1000)]
+                .into_iter()
+                .map(|(asset, n)| BalanceSnapshot {
+                    asset: asset.into(),
+                    free_amount: n.into(),
+                    locked_amount: 0.into(),
+                    onhand_amount: n.into(),
+                })
+                .collect();
+            let v = PaperTradingVenue::new(seeded_engine(
+                PaperExecutionEngine::new(
+                    config,
+                    PaperClock::Replay { now_ms: 0 },
+                    balances,
+                    recorder.clone(),
+                )
+                .unwrap(),
+                0,
+            ));
+            let initial = v.account_snapshot("btc_jpy").await.unwrap();
+            let order =
+                DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 2.into(), 100.into());
+            let placed = v.place_order(order.clone().into()).await.unwrap();
+            let locked = v.account_snapshot("btc_jpy").await.unwrap();
+            v.on_market_event(&MarketEvent::Transactions {
+                pair: "btc_jpy".into(),
+                transactions: vec![MarketTrade {
+                    amount: 1.into(),
+                    price: 100.into(),
+                    executed_at: 123,
+                    side: OrderSide::Sell,
+                    transaction_id: 77,
+                }],
+            })
+            .unwrap();
+            v.advance_trade_watermark(123).unwrap();
+            let filled = v.account_snapshot("btc_jpy").await.unwrap();
+            v.cancel_orders("btc_jpy", vec![placed.order_id.unwrap()])
+                .await
+                .unwrap();
+            v.advance_trade_watermark(124).unwrap();
+            v.advance_replay_time(200).unwrap();
+            assert!(
+                v.place_order(
+                    DesiredLimitOrder {
+                        amount: 100.into(),
+                        ..order
+                    }
+                    .into()
+                )
+                .await
+                .is_err()
+            );
+            let final_account = v.account_snapshot("btc_jpy").await.unwrap();
+            let events = v.engine().lock().unwrap().drain_events();
+            let result = json!({"snapshots":[initial,locked,filled,final_account], "events":events,
+                "settlement":v.paper_settlement_status()});
+            if let Some(expected) = &baseline {
+                assert_eq!(&result, expected);
+            } else {
+                baseline = Some(result);
+            }
+            v.record_paper_settlement();
+            if let Some(r) = recorder {
+                r.finish().unwrap();
+                let records = read_records(&m.0.lock().unwrap()[..]).unwrap();
+                if profile == Some(RecordingProfile::Disabled) {
+                    assert!(records.is_empty());
+                    continue;
+                }
+                let audit: Vec<_> = records.iter().filter(|r| r.kind == "paper_event").collect();
+                assert_eq!(audit.len(), 5); // accepted, partial fill, cancel pending, cancelled, rejected
+                assert_eq!(
+                    audit[1].data["event"]["OrderFilled"]["fee_amount_quote"],
+                    "0.100"
+                );
+                assert_eq!(audit[0].data["balances"][1]["locked_amount"], "200.200");
+                assert_eq!(
+                    audit[3].data["balances"][1]["locked_amount"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<rust_decimal::Decimal>()
+                        .unwrap(),
+                    rust_decimal::Decimal::ZERO
+                );
+                assert_eq!(audit[3].data["balances"][1]["free_amount"], "899.900");
+                assert!(records.last().is_some_and(|r| r.kind == "run_finished"));
+                assert!(
+                    records
+                        .iter()
+                        .filter(|r| r.kind == "paper_settlement")
+                        .all(|r| r.data.get("queue").is_none())
+                );
+            }
+        }
     }
 
     struct Broken;

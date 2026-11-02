@@ -165,7 +165,7 @@ impl State {
             record(
                 engine,
                 "paper_local_state",
-                serde_json::json!({"operation_id":0,"local_ms":now,"account":self.local}),
+                || serde_json::json!({"operation_id":0,"local_ms":now,"account":self.local}),
             );
             Ok(())
         } else {
@@ -192,9 +192,9 @@ fn add(time: i64, delay: i64) -> Result<i64, TradingVenueError> {
     time.checked_add(delay)
         .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))
 }
-fn record(engine: &PaperExecutionEngine, kind: &str, data: serde_json::Value) {
+fn record(engine: &PaperExecutionEngine, kind: &str, data: impl FnOnce() -> serde_json::Value) {
     if let Some(r) = &engine.recorder {
-        r.record(kind, data);
+        r.record_lazy(kind, data);
     }
 }
 
@@ -215,12 +215,10 @@ impl PaperTradingVenue {
         latency.validate()?;
         let state = Arc::new(Mutex::new(State::new(&engine, latency)));
         engine.venue_state = Some(state.clone());
-        record(
-            &engine,
-            "paper_latency_model",
+        record(&engine, "paper_latency_model", || {
             serde_json::json!({"latency":latency,
-            "local_view":"ordered_notifications", "cancel_response":"acceptance_ack"}),
-        );
+            "local_view":"ordered_notifications", "cancel_response":"acceptance_ack"})
+        });
         Ok(Self {
             engine: Arc::new(Mutex::new(engine)),
             state,
@@ -398,7 +396,7 @@ impl PaperTradingVenue {
         record(
             &self.engine.lock().unwrap(),
             "paper_operation_requested",
-            info.clone(),
+            || info.clone(),
         );
         s.operations.insert(id, info);
         s.enqueue(
@@ -436,7 +434,7 @@ impl PaperTradingVenue {
         record(
             &self.engine.lock().unwrap(),
             "paper_operation_requested",
-            info.clone(),
+            || info.clone(),
         );
         s.operations.insert(id, info);
         s.enqueue(
@@ -530,13 +528,11 @@ impl TradingVenue for PaperTradingVenue {
                                 info["order_id"] = serde_json::json!(accepted_id);
                                 info["phase"] = serde_json::json!("awaiting_response");
                             }
-                            record(
-                                &e,
-                                "paper_operation_effective",
+                            record(&e, "paper_operation_effective", || {
                                 serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
                                     "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),
-                                    "order_id":accepted_id,"effective_exchange_ms":accepted_id.and_then(|id|e.effective_after.get(&id).copied()),"success":result.is_ok()}),
-                            );
+                                    "order_id":accepted_id,"effective_exchange_ms":accepted_id.and_then(|id|e.effective_after.get(&id).copied()),"success":result.is_ok()})
+                            });
                             let response_at =
                                 response_at.max(add(executed, s.latency.placement.response_ms)?);
                             if result.is_ok() {
@@ -562,12 +558,10 @@ impl TradingVenue for PaperTradingVenue {
                                 e.cancel_orders(&pair, orders);
                                 Ok(())
                             };
-                            record(
-                                &e,
-                                "paper_operation_effective",
+                            record(&e, "paper_operation_effective", || {
                                 serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
-                        "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),"success":result.is_ok()}),
-                            );
+                        "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),"success":result.is_ok()})
+                            });
                             let response_at =
                                 response_at.max(add(executed, s.latency.cancellation.response_ms)?);
                             if result.is_ok() {
@@ -579,18 +573,16 @@ impl TradingVenue for PaperTradingVenue {
                             record(
                                 &e,
                                 "paper_operation_response",
-                                serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,"success":result.is_ok()}),
+                                || serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,"success":result.is_ok()}),
                             );
                             s.operations.remove(&id);
                             let _ = reply.send(result);
                         }
                         Internal::CancelResponse { id, result, reply } => {
-                            record(
-                                &e,
-                                "paper_operation_response",
+                            record(&e, "paper_operation_response", || {
                                 serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
-                        "success":result.is_ok(),"meaning":"acceptance_ack","settlement_pending":!e.cancel_at.is_empty()}),
-                            );
+                        "success":result.is_ok(),"meaning":"acceptance_ack","settlement_pending":!e.cancel_at.is_empty()})
+                            });
                             s.operations.remove(&id);
                             let _ = reply.send(result);
                         }
@@ -599,7 +591,7 @@ impl TradingVenue for PaperTradingVenue {
                             record(
                                 &e,
                                 "paper_local_state",
-                                serde_json::json!({"operation_id":id,"local_ms":executed,"scheduled_local_ms":at,"account":s.local}),
+                                || serde_json::json!({"operation_id":id,"local_ms":executed,"scheduled_local_ms":at,"account":s.local}),
                             );
                         }
                     }
@@ -635,6 +627,35 @@ impl TradingVenue for PaperTradingVenue {
                 .count();
         status.unsettled |= status.pending_operations > 0;
         Some(status)
+    }
+    fn record_paper_settlement(&self) {
+        let s = self.state.lock().unwrap();
+        let engine = self.engine.lock().unwrap();
+        let force = engine.recorder.as_ref().is_some_and(|r| {
+            matches!(
+                r.profile(),
+                crate::execution_recording::RecordingProfile::Diagnostic {
+                    queue: crate::execution_recording::QueueRecording::Full
+                        | crate::execution_recording::QueueRecording::Periodic { .. }
+                        | crate::execution_recording::QueueRecording::Delta { .. }
+                }
+            )
+        });
+        engine.record_queue(force);
+        record(&engine, "paper_settlement", || {
+            let mut data = engine.settlement_record_data();
+            let pending = s.operations.len()
+                + s.events
+                    .values()
+                    .filter(|v| matches!(v.event, Internal::Publish { .. }))
+                    .count();
+            data["latency_model"] = serde_json::json!(s.latency);
+            data["pending_operations"] = serde_json::json!(pending);
+            data["pending_operation_details"] =
+                serde_json::json!(s.operations.values().collect::<Vec<_>>());
+            data["unsettled"] = serde_json::json!(data["unsettled"] == true || pending > 0);
+            data
+        });
     }
     fn mark_market_incomplete(&self, reason: &str) {
         self.engine.lock().unwrap().mark_incomplete(reason);

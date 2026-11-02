@@ -33,3 +33,7 @@ serde_ignored = "0.1.14"
 [[bench]]
 name = "queue_history"
 harness = false
+
+[[bench]]
+name = "recording"
+harness = false

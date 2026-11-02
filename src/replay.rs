@@ -637,7 +637,13 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
     report.settlement = runner.venue().paper_settlement_status();
     report.incomplete |= report.settlement.as_ref().is_some_and(|s| s.unsettled);
     if let Some(recorder) = runner.venue().recorder() {
-        recorder.record("replay_outcome", serde_json::json!(&report));
+        recorder.record_lazy("replay_outcome", || serde_json::json!({
+            "settlement":report.settlement.as_ref().map(|s| s.recording_summary()),
+            "end_reason":report.end_reason,"input_exhausted":report.input_exhausted,
+            "final_time_ms":report.final_time_ms,"pending_scheduled":report.pending_scheduled,
+            "pending_handler":report.pending_handler,"pending_deliveries":report.pending_deliveries,
+            "records":report.records,"incomplete":report.incomplete,"interrupted":report.interrupted,
+            "gaps":report.gaps,"last_input":report.last_input,"error":report.error}));
     }
     report
 }

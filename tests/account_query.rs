@@ -647,10 +647,36 @@ fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExe
 #[tokio::test]
 async fn lightweight_sampling_preserves_issues_and_recording_parity() {
     let mut expected = None;
-    for recording in [false, true] {
+    for profile in [
+        None,
+        Some(RecordingProfile::Disabled),
+        Some(RecordingProfile::Financial),
+        Some(RecordingProfile::Diagnostic {
+            queue: QueueRecording::Full,
+        }),
+        Some(RecordingProfile::Diagnostic {
+            queue: QueueRecording::Periodic {
+                every: 3.try_into().unwrap(),
+            },
+        }),
+        Some(RecordingProfile::Diagnostic {
+            queue: QueueRecording::Delta {
+                snapshot_every: 3.try_into().unwrap(),
+            },
+        }),
+        Some(RecordingProfile::Diagnostic {
+            queue: QueueRecording::Counters,
+        }),
+    ] {
         let records = Records::default();
-        let recorder = recording
-            .then(|| ExecutionRecorder::new("parity", serde_json::json!({}), records.clone()));
+        let recorder = profile.map(|profile| {
+            ExecutionRecorder::with_profile(
+                "parity",
+                serde_json::json!({}),
+                profile,
+                records.clone(),
+            )
+        });
         let v = venue(PaperClock::Replay { now_ms: 900 }, 0, recorder);
         v.advance_replay_time(1000).unwrap();
         v.on_market_event(&trade(950)).unwrap();

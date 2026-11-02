@@ -1227,9 +1227,9 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         self.scheduled_tick = Some((time, count + 1));
         let (_, entry) = self.scheduled.pop_first().unwrap();
         if let Some(r) = self.venue.recorder() {
-            r.record(
+            r.record_lazy(
                 "scheduled_event_executed",
-                serde_json::json!({"event":entry.info,"executed_at_ms":time}),
+                || serde_json::json!({"event":entry.info,"executed_at_ms":time}),
             );
         }
         self.delivery.push_back(QueuedEvent {
@@ -1254,12 +1254,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         self.drive_direct(true).await
     }
     fn record_settlement(&self) {
-        if let Some(status) = self.venue.paper_settlement_status() {
-            log::info!("paper settlement at shutdown: {status:?}");
-            if let Some(recorder) = self.venue.recorder() {
-                recorder.record("paper_settlement", serde_json::json!(status));
-            }
-        }
+        self.venue.record_paper_settlement();
     }
     pub fn advance_time(&mut self, time_ms: i64) -> Result<(), BotRunError<S::Error>> {
         if self.last_time.is_some_and(|t| time_ms < t) {
@@ -1307,7 +1302,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                 .map_err(BotRunError::Venue)?;
             }
             if let Some(r) = recorder {
-                r.record("input_registered", serde_json::json!({"received_at_ms":received_at_ms,"input_id":input_id,"market_event_id":market_id}));
+                r.record_lazy("input_registered", || serde_json::json!({"received_at_ms":received_at_ms,"input_id":input_id,"market_event_id":market_id}));
             }
             Ok::<(), BotRunError<S::Error>>(())
         })?;
@@ -1483,11 +1478,10 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                     BotEvent::Market(MarketEvent::CircuitBreakInfo { .. }) => "circuit_break_info",
                     BotEvent::Custom(_) => "custom",
                 };
-                r.record(
-                    kind,
+                r.record_lazy(kind, || {
                     serde_json::json!({"id":market_id,"input_id":input_id,"type":event_type,
-                        "received_at_ms":ctx.received_at_ms(),"processed_at_ms":ctx.now_ms()}),
-                );
+                        "received_at_ms":ctx.received_at_ms(),"processed_at_ms":ctx.now_ms()})
+                });
             }
             let result = strategy.handle_event(entry.event, &ctx).await;
             (strategy, result)
@@ -1556,7 +1550,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                 input_id: active.input_id.clone(),
             };
             if let Some(r) = self.venue.recorder() {
-                r.record("scheduled_event_reserved", serde_json::json!(&info));
+                r.record_lazy("scheduled_event_reserved", || serde_json::json!(&info));
             }
             self.scheduled
                 .insert((execute_at_ms, info.id), ScheduledEvent { info, event });
