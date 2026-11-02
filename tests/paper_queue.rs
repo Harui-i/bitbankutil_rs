@@ -587,3 +587,97 @@ fn idle_level_consumes_external_trades_and_preserves_fees_across_watermark_timin
     assert_eq!(immediate.0, [(OrderId(2), Decimal::ONE)]);
     assert_eq!(immediate.2, Decimal::new(2, 1));
 }
+
+// 0.2.3の同一シナリオから採取した注文・約定・手数料・残高・拒否理由との比較。
+#[test]
+fn history_execution_matches_023_trace() {
+    let expected: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../fixtures/queue_history_023.json")).unwrap();
+    for delta in [-250, 0, 250] {
+        for split in [false, true] {
+            for recording in [false, true] {
+                let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
+                config.time_model = PaperTimeModel::FixedOffset {
+                    exchange_minus_local_ms: delta,
+                };
+                config.fee_schedule = PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO);
+                let mut e = PaperExecutionEngine::new(
+                    config,
+                    PaperClock::Replay {
+                        now_ms: 1000 - delta,
+                    },
+                    engine(0, false).balances(),
+                    recording.then(|| {
+                        ExecutionRecorder::new(
+                            "parity",
+                            serde_json::json!({}),
+                            JsonlSink(std::io::sink()),
+                        )
+                    }),
+                )
+                .unwrap();
+                e.apply_market_event(&book(1000, 99, 3.0, 101, 4.0));
+                let mut rejected = vec![format!(
+                    "{:?}",
+                    e.place_order(order(OrderSide::Buy, 101, 1))
+                )];
+                e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
+                e.place_order(order(OrderSide::Buy, 98, 2)).unwrap();
+                e.place_order(order(OrderSide::Sell, 101, 2)).unwrap();
+                for (t, q) in [(1030, 8.0), (1050, 1.0), (1070, 6.0)] {
+                    e.advance_replay_time(t - delta).unwrap();
+                    e.apply_market_event(&book(t, 99, q, 101, 4.0));
+                }
+                e.advance_replay_time(1100 - delta).unwrap();
+                e.cancel_orders("btc_jpy", vec![OrderId(1)]);
+                e.place_order(order(OrderSide::Buy, 99, 2)).unwrap();
+                e.advance_replay_time(1200 - delta).unwrap();
+                let trades = [
+                    (1000, OrderSide::Sell, 99, 20),
+                    (1020, OrderSide::Sell, 99, 4),
+                    (1060, OrderSide::Sell, 99, 2),
+                    (1100, OrderSide::Sell, 99, 4),
+                    (1120, OrderSide::Sell, 98, 2),
+                    (1130, OrderSide::Buy, 102, 1),
+                    (1140, OrderSide::Buy, 101, 1),
+                ];
+                for (i, (t, side, price, amount)) in trades.into_iter().enumerate() {
+                    let event = MarketEvent::Transactions {
+                        pair: "btc_jpy".into(),
+                        transactions: vec![MarketTrade {
+                            transaction_id: i as i64 + 1,
+                            executed_at: t,
+                            side,
+                            price: price.into(),
+                            amount: amount.into(),
+                        }],
+                    };
+                    e.apply_market_event(&event);
+                    e.apply_market_event(&event); // 重複を二重消化しない。
+                    if split {
+                        e.advance_trade_watermark(t).unwrap();
+                    }
+                }
+                e.advance_trade_watermark(1150).unwrap();
+                // 空価格へ再受付。表示減少・再増加も経て、遅着済み数量を復活させない。
+                e.advance_replay_time(1250 - delta).unwrap();
+                e.apply_market_event(&book(1250, 99, 1.0, 101, 4.0));
+                e.place_order(order(OrderSide::Buy, 99, 2)).unwrap();
+                e.advance_replay_time(1270 - delta).unwrap();
+                e.apply_market_event(&book(1270, 99, 3.0, 101, 4.0));
+                trade(&mut e, delta, 1300, OrderSide::Sell, 99, 3, 100);
+                rejected.push(format!(
+                    "{:?}",
+                    e.place_order(order(OrderSide::Sell, 98, 1))
+                ));
+                let actual = serde_json::json!({
+                    "events":e.drain_events(),"orders":e.open_orders(),"balances":e.balances(),"rejections":rejected});
+                assert_eq!(
+                    actual,
+                    expected[usize::from(split)],
+                    "delta={delta}, split={split}, recording={recording}"
+                );
+            }
+        }
+    }
+}

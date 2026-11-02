@@ -1,0 +1,550 @@
+[
+  {
+    "balances": [
+      {
+        "asset": "btc",
+        "free_amount": "1005",
+        "locked_amount": "0",
+        "onhand_amount": "1005"
+      },
+      {
+        "asset": "jpy",
+        "free_amount": "999311.909",
+        "locked_amount": "196.196",
+        "onhand_amount": "999508.105"
+      }
+    ],
+    "events": [
+      {
+        "OrderRejected": {
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Buy"
+          },
+          "reason": "PostOnlyWouldTakeLiquidity"
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1000,
+          "order": {
+            "amount": "3",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 1
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1000,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "98",
+            "side": "Buy"
+          },
+          "order_id": 2
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1000,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Sell"
+          },
+          "order_id": 3
+        }
+      },
+      {
+        "OrderCancelPending": {
+          "effective_at_ms": 1100,
+          "order_id": 1
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1100,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 4
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "1",
+          "fee_amount_quote": "0.099",
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 1,
+          "price": "99",
+          "trade": {
+            "amount": "4",
+            "executed_at": 1020,
+            "price": "99",
+            "side": "Sell",
+            "transaction_id": 2
+          }
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "2",
+          "fee_amount_quote": "0.198",
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 1,
+          "price": "99",
+          "trade": {
+            "amount": "2",
+            "executed_at": 1060,
+            "price": "99",
+            "side": "Sell",
+            "transaction_id": 3
+          }
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "2",
+          "fee_amount_quote": "0.198",
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 4,
+          "price": "99",
+          "trade": {
+            "amount": "2",
+            "executed_at": 1120,
+            "price": "98",
+            "side": "Sell",
+            "transaction_id": 5
+          }
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "1",
+          "fee_amount_quote": "0.101",
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Sell"
+          },
+          "order_id": 3,
+          "price": "101",
+          "trade": {
+            "amount": "1",
+            "executed_at": 1130,
+            "price": "102",
+            "side": "Buy",
+            "transaction_id": 6
+          }
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "1",
+          "fee_amount_quote": "0.101",
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Sell"
+          },
+          "order_id": 3,
+          "price": "101",
+          "trade": {
+            "amount": "1",
+            "executed_at": 1140,
+            "price": "101",
+            "side": "Buy",
+            "transaction_id": 7
+          }
+        }
+      },
+      {
+        "OrderCancelled": {
+          "order": {
+            "order_id": 1,
+            "order_type": "Limit",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "remaining_amount": "0",
+            "side": "Buy"
+          },
+          "order_id": 1
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1250,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 5
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "2",
+          "fee_amount_quote": "0.198",
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 5,
+          "price": "99",
+          "trade": {
+            "amount": "3",
+            "executed_at": 1300,
+            "price": "99",
+            "side": "Sell",
+            "transaction_id": 100
+          }
+        }
+      },
+      {
+        "OrderRejected": {
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "98",
+            "side": "Sell"
+          },
+          "reason": "PostOnlyWouldTakeLiquidity"
+        }
+      }
+    ],
+    "orders": [
+      {
+        "order_id": 2,
+        "order_type": "Limit",
+        "pair": "btc_jpy",
+        "post_only": true,
+        "price": "98",
+        "remaining_amount": "2",
+        "side": "Buy"
+      }
+    ],
+    "rejections": [
+      "Err(PostOnlyWouldTakeLiquidity)",
+      "Err(PostOnlyWouldTakeLiquidity)"
+    ]
+  },
+  {
+    "balances": [
+      {
+        "asset": "btc",
+        "free_amount": "1005",
+        "locked_amount": "0",
+        "onhand_amount": "1005"
+      },
+      {
+        "asset": "jpy",
+        "free_amount": "999311.909",
+        "locked_amount": "196.196",
+        "onhand_amount": "999508.105"
+      }
+    ],
+    "events": [
+      {
+        "OrderRejected": {
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Buy"
+          },
+          "reason": "PostOnlyWouldTakeLiquidity"
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1000,
+          "order": {
+            "amount": "3",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 1
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1000,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "98",
+            "side": "Buy"
+          },
+          "order_id": 2
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1000,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Sell"
+          },
+          "order_id": 3
+        }
+      },
+      {
+        "OrderCancelPending": {
+          "effective_at_ms": 1100,
+          "order_id": 1
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1100,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 4
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "1",
+          "fee_amount_quote": "0.099",
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 1,
+          "price": "99",
+          "trade": {
+            "amount": "4",
+            "executed_at": 1020,
+            "price": "99",
+            "side": "Sell",
+            "transaction_id": 2
+          }
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "2",
+          "fee_amount_quote": "0.198",
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 1,
+          "price": "99",
+          "trade": {
+            "amount": "2",
+            "executed_at": 1060,
+            "price": "99",
+            "side": "Sell",
+            "transaction_id": 3
+          }
+        }
+      },
+      {
+        "OrderCancelled": {
+          "order": {
+            "order_id": 1,
+            "order_type": "Limit",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "remaining_amount": "0",
+            "side": "Buy"
+          },
+          "order_id": 1
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "2",
+          "fee_amount_quote": "0.198",
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 4,
+          "price": "99",
+          "trade": {
+            "amount": "2",
+            "executed_at": 1120,
+            "price": "98",
+            "side": "Sell",
+            "transaction_id": 5
+          }
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "1",
+          "fee_amount_quote": "0.101",
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Sell"
+          },
+          "order_id": 3,
+          "price": "101",
+          "trade": {
+            "amount": "1",
+            "executed_at": 1130,
+            "price": "102",
+            "side": "Buy",
+            "transaction_id": 6
+          }
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "1",
+          "fee_amount_quote": "0.101",
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "101",
+            "side": "Sell"
+          },
+          "order_id": 3,
+          "price": "101",
+          "trade": {
+            "amount": "1",
+            "executed_at": 1140,
+            "price": "101",
+            "side": "Buy",
+            "transaction_id": 7
+          }
+        }
+      },
+      {
+        "OrderAccepted": {
+          "effective_after_ms": 1250,
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 5
+        }
+      },
+      {
+        "OrderFilled": {
+          "amount": "2",
+          "fee_amount_quote": "0.198",
+          "order": {
+            "amount": "2",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "99",
+            "side": "Buy"
+          },
+          "order_id": 5,
+          "price": "99",
+          "trade": {
+            "amount": "3",
+            "executed_at": 1300,
+            "price": "99",
+            "side": "Sell",
+            "transaction_id": 100
+          }
+        }
+      },
+      {
+        "OrderRejected": {
+          "order": {
+            "amount": "1",
+            "pair": "btc_jpy",
+            "post_only": true,
+            "price": "98",
+            "side": "Sell"
+          },
+          "reason": "PostOnlyWouldTakeLiquidity"
+        }
+      }
+    ],
+    "orders": [
+      {
+        "order_id": 2,
+        "order_type": "Limit",
+        "pair": "btc_jpy",
+        "post_only": true,
+        "price": "98",
+        "remaining_amount": "2",
+        "side": "Buy"
+      }
+    ],
+    "rejections": [
+      "Err(PostOnlyWouldTakeLiquidity)",
+      "Err(PostOnlyWouldTakeLiquidity)"
+    ]
+  }
+]

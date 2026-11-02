@@ -288,3 +288,6 @@ APIの項目は [REST API仕様](https://github.com/bitbankinc/bitbank-api-docs/
 `tests/paper_settlement.rs` は固定の注文操作・開始残高に対し、通知遅延と順序だけを変え、
 約定数量・代金・手数料・評価損益・共通の約定後価格列での値動きを比較します。
 これは合成時系列による回帰検証です。実履歴での性能やpaper tradingの発生頻度の実測ではありません。
+
+長期backtestでのqueueの保持量、診断API、履歴整理の条件と合成benchmarkは
+[長期backtestのqueue履歴](queue-history.md)を参照してください。
