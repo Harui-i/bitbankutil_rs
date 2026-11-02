@@ -497,7 +497,12 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
             }
         };
         if let Some(event) = event {
-            if let Err(e) = runner.process(time, Some(id), event).await {
+            let result = if recovery {
+                runner.process_recovering(time, Some(id), event).await
+            } else {
+                runner.process(time, Some(id), event).await
+            };
+            if let Err(e) = result {
                 report.error = Some(format!("{e:?}"));
                 break;
             }

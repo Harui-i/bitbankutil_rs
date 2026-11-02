@@ -618,3 +618,59 @@ fn cancellation_cannot_rewrite_an_already_sealed_millisecond() {
     assert_eq!(balance(&e, "jpy").free_amount, Decimal::from(40));
     assert_eq!(balance(&e, "btc").free_amount, Decimal::new(6, 1));
 }
+
+#[tokio::test]
+async fn paper_runtime_delivers_market_after_known_disconnect_without_releasing_funds() {
+    use bitbankutil_rs::bitbank_bot::BitbankBotBuilder;
+    let mut e = engine(1, 0, Decimal::ZERO);
+    e.place_order(order(OrderSide::Sell, Decimal::ONE)).unwrap();
+    e.advance_replay_time(1200).unwrap();
+    e.cancel_orders("btc_jpy", vec![OrderId(1)]);
+    e.mark_incomplete("transport_closed");
+    let before = e.balances();
+    let venue = PaperTradingVenue::new(e);
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let runtime =
+        BitbankBotBuilder::new(ObserveBalances(observations.clone()), venue.clone()).spawn();
+    let sender = runtime.event_sender();
+    sender
+        .send(BotEvent::Market(MarketEvent::DepthUpdated {
+            pair: "btc_jpy".into(),
+            depth: MarketDepthSnapshot::new(Default::default(), Default::default(), 1300),
+        }))
+        .await
+        .unwrap();
+    sender
+        .send(BotEvent::Market(MarketEvent::Transactions {
+            pair: "btc_jpy".into(),
+            transactions: vec![trade(1, 1100, Decimal::ONE, OrderSide::Buy)],
+        }))
+        .await
+        .unwrap();
+    runtime.shutdown().await.unwrap();
+    assert_eq!(
+        *observations.lock().unwrap(),
+        [Decimal::ZERO, Decimal::ZERO]
+    );
+    assert_eq!(
+        venue.account_snapshot("btc_jpy").await.unwrap().balances,
+        before
+    );
+    assert!(
+        venue
+            .place_order(order(OrderSide::Sell, Decimal::ONE).into())
+            .await
+            .is_err()
+    );
+    assert!(venue.advance_trade_watermark(1400).is_err());
+    let shared = venue.engine();
+    let mut e = shared.lock().unwrap();
+    let status = e.settlement_status();
+    assert!(status.unsettled);
+    assert_eq!(status.issues, ["transport_closed"]);
+    assert_eq!(status.pending_cancellations, 1);
+    assert!(!e.drain_events().iter().any(|event| matches!(
+        event,
+        PaperEvent::OrderFilled { .. } | PaperEvent::OrderCancelled { .. }
+    )));
+}

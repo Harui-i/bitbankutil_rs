@@ -847,6 +847,15 @@ impl TradingVenue for PaperTradingVenue {
         }
         Ok(())
     }
+
+    fn on_market_event_recovering(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+        self.engine
+            .lock()
+            .map_err(|_| TradingVenueError::StatePoisoned)?
+            .apply_market_event(event);
+        // issuesは維持する。入力の継続は約定確定・資金解放・新規注文の再開ではない。
+        Ok(())
+    }
 }
 
 fn parse_jpy_pair(pair: &str) -> Result<(String, String), PaperExecutionError> {

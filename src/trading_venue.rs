@@ -80,6 +80,13 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
     fn on_market_event(&self, _event: &MarketEvent) -> Result<(), TradingVenueError> {
         Ok(())
     }
+
+    /// 欠損を記録しながら市場入力を継続するときの処理。
+    /// paper tradingでは執行の未確定状態だけを理由に配送を止めない。
+    /// 発注・確定の制限は解除せず、状態ロックなどの実行エラーは引き続き返す。
+    fn on_market_event_recovering(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+        self.on_market_event(event)
+    }
 }
 
 /// 市場データ閲覧専用。注文・口座操作は利用できない。
