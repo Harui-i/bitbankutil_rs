@@ -305,8 +305,13 @@ fn paper_venue(
             onhand_amount: jpy_initial,
         },
     ];
-    let engine =
-        PaperExecutionEngine::new(config, balances, None).map_err(|err| format!("{err:?}"))?;
+    let engine = PaperExecutionEngine::new(
+        config,
+        bitbankutil_rs::paper_execution::PaperClock::Realtime,
+        balances,
+        None,
+    )
+    .map_err(|err| format!("{err:?}"))?;
     Ok(PaperTradingVenue::new(engine))
 }
 

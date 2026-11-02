@@ -64,6 +64,7 @@ pub enum PaperEvent {
     OrderAccepted {
         order_id: OrderId,
         order: DesiredLimitOrder,
+        effective_after_ms: i64,
     },
     OrderRejected {
         order: DesiredLimitOrder,
@@ -103,6 +104,7 @@ pub enum PaperRejectReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PaperExecutionError {
+    InvalidClock,
     PairMismatch {
         expected: String,
         actual: String,
@@ -123,9 +125,23 @@ pub enum PaperExecutionError {
 /// メモリ上に保持する最近のpaperイベントの最大件数。
 pub const PAPER_EVENT_HISTORY_LIMIT: usize = 1024;
 
+/// 注文受付時刻の時計。時刻はローカルUTCのUnixミリ秒。
+/// `Replay` は呼び出し元が明示的に進め、実時計を参照しない。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum PaperClock {
+    Realtime,
+    Replay { now_ms: i64 },
+}
+
+/// 公開約定の数量を使ってmaker指値注文を執行するエンジン。
+/// 注文受付時計と観測済み板時刻の最大値より、厳密に新しい約定だけを適用する。
+/// 時刻・時計差の制約は `docs/paper-execution.md` を参照。
 #[derive(Debug, Clone)]
 pub struct PaperExecutionEngine {
     config: PaperExecutionConfig,
+    clock: PaperClock,
+    effective_after: BTreeMap<OrderId, i64>,
+    time_floor: i64,
     base_asset: String,
     quote_asset: String,
     balances: BTreeMap<String, BalanceSnapshot>,
@@ -136,8 +152,11 @@ pub struct PaperExecutionEngine {
 }
 
 impl PaperExecutionEngine {
+    /// 時計を明示して初期化する。paper tradingには `Realtime`、backtestには
+    /// `Replay` を指定する。再生時計の初期値は最初の入力時刻以下にする。
     pub fn new(
         config: PaperExecutionConfig,
+        clock: PaperClock,
         balances: Vec<BalanceSnapshot>,
         recorder: Option<crate::execution_recording::ExecutionRecorder>,
     ) -> Result<Self, PaperExecutionError> {
@@ -156,6 +175,9 @@ impl PaperExecutionEngine {
 
         let engine = Self {
             config,
+            clock,
+            effective_after: BTreeMap::new(),
+            time_floor: i64::MIN,
             base_asset,
             quote_asset,
             balances,
@@ -168,7 +190,7 @@ impl PaperExecutionEngine {
             recorder.record(
                 "paper_initial_state",
                 serde_json::json!({
-                    "config": engine.config(), "model": "limit_price_trade_volume_v1",
+                    "config": engine.config(), "clock": engine.clock, "model": "limit_price_trade_volume_v2",
                     "balances": engine.balances(), "open_orders": engine.open_orders()
                 }),
             );
@@ -176,6 +198,19 @@ impl PaperExecutionEngine {
         Ok(engine)
     }
 
+    /// 再生時計を単調に進める。実時計のエンジンや時刻の逆行はエラー。
+    pub fn advance_replay_time(&mut self, time_ms: i64) -> Result<(), PaperExecutionError> {
+        match &mut self.clock {
+            PaperClock::Replay { now_ms } if time_ms >= *now_ms => {
+                *now_ms = time_ms;
+                Ok(())
+            }
+            _ => Err(PaperExecutionError::InvalidClock),
+        }
+    }
+
+    /// 指値注文を受理し、受付時計と観測済み板時刻による有効開始時刻を保存する。
+    /// 同一ミリ秒の公開約定は対象外。部分約定でも有効開始時刻は変えない。
     pub fn place_order(
         &mut self,
         order: DesiredLimitOrder,
@@ -213,7 +248,13 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::from(err));
         }
 
+        let now_ms = match self.clock {
+            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
+            PaperClock::Replay { now_ms } => now_ms,
+        };
+        self.time_floor = self.time_floor.max(now_ms);
         let order_id = self.config.next_order_id;
+        self.effective_after.insert(order_id, self.time_floor);
         self.config.next_order_id = OrderId(self.config.next_order_id.0 + 1);
 
         // 受理した指値注文はすべて板に残るmaker注文として扱う。
@@ -233,6 +274,7 @@ impl PaperExecutionEngine {
         self.record_event(PaperEvent::OrderAccepted {
             order_id,
             order: order.clone(),
+            effective_after_ms: self.time_floor,
         });
 
         Ok(PlacedOrder {
@@ -251,6 +293,7 @@ impl PaperExecutionEngine {
                 continue;
             }
 
+            self.effective_after.remove(&order_id);
             self.unlock_funds_for_open_order(&open_order);
             self.record_event(PaperEvent::OrderCancelled {
                 order_id,
@@ -260,6 +303,11 @@ impl PaperExecutionEngine {
     }
 
     pub fn apply_market_event(&mut self, event: &MarketEvent) -> Vec<PaperEvent> {
+        if let MarketEvent::DepthUpdated { pair, depth } = event {
+            if pair == &self.config.pair {
+                self.time_floor = self.time_floor.max(depth.last_timestamp());
+            }
+        }
         let MarketEvent::Transactions { pair, transactions } = event else {
             return Vec::new();
         };
@@ -356,7 +404,10 @@ impl PaperExecutionEngine {
         let mut fill_candidates = self
             .open_orders
             .values()
-            .filter(|order| order_matches_trade(order, trade))
+            .filter(|order| {
+                trade.executed_at > self.effective_after[&order.order_id]
+                    && order_matches_trade(order, trade)
+            })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -417,6 +468,8 @@ impl PaperExecutionEngine {
             .expect("paper engine limit order must have price");
         if open_order.remaining_amount > Decimal::ZERO {
             self.open_orders.insert(order_id, open_order);
+        } else {
+            self.effective_after.remove(&order_id);
         }
 
         PaperEvent::OrderFilled {
@@ -464,6 +517,14 @@ impl PaperTradingVenue {
 }
 
 impl TradingVenue for PaperTradingVenue {
+    fn advance_replay_time(&self, time_ms: i64) -> Result<(), TradingVenueError> {
+        self.engine
+            .lock()
+            .map_err(|_| TradingVenueError::StatePoisoned)?
+            .advance_replay_time(time_ms)
+            .map_err(TradingVenueError::Paper)
+    }
+
     fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
         self.engine
             .lock()
@@ -662,6 +723,7 @@ mod tests {
     fn engine_with_balances(btc_free: Decimal, jpy_free: Decimal) -> PaperExecutionEngine {
         PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+            crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![balance("btc", btc_free), balance("jpy", jpy_free)],
             None,
         )
@@ -938,6 +1000,7 @@ mod tests {
                 fee_schedule: PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO),
                 next_order_id: OrderId(1),
             },
+            crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![
                 balance("btc", Decimal::ZERO),
                 balance("jpy", Decimal::new(1_000_000, 0)),
@@ -1027,6 +1090,7 @@ mod tests {
     fn maker_rebate_is_applied_to_quote_balance() {
         let mut engine = PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("eth_jpy").unwrap(),
+            crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![
                 balance("eth", Decimal::new(1, 0)),
                 balance("jpy", Decimal::ZERO),

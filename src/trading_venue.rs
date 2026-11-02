@@ -48,6 +48,11 @@ pub struct PlacedOrder {
 /// 注文操作と口座取得の共通インターフェース。
 /// Cloneした値も同じ口座・注文状態を共有すること。
 pub trait TradingVenue: Clone + Send + Sync + 'static {
+    /// オフライン入力の処理前に再生時計を更新する。
+    fn advance_replay_time(&self, _time_ms: i64) -> Result<(), TradingVenueError> {
+        Ok(())
+    }
+
     fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
         None
     }
