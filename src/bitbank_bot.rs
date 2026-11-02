@@ -1035,6 +1035,7 @@ struct QueuedEvent<C> {
     input_id: Option<InputId>,
     market_id: Option<u64>,
     derived: bool,
+    recovery: bool,
 }
 
 struct ActiveHandler<S: BotStrategy<V>, V: TradingVenue> {
@@ -1042,6 +1043,7 @@ struct ActiveHandler<S: BotStrategy<V>, V: TradingVenue> {
     pending: std::sync::Arc<std::sync::Mutex<Pending<S::CustomEvent>>>,
     input_id: Option<InputId>,
     market_id: Option<u64>,
+    recovery: bool,
 }
 
 struct RunnerWake(std::sync::Arc<tokio::sync::Notify>);
@@ -1176,7 +1178,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         }
         self.poll_replay().await
     }
-    fn enqueue_next_scheduled(&mut self, _recovery: bool) -> Result<(), BotRunError<S::Error>> {
+    fn enqueue_next_scheduled(&mut self, recovery: bool) -> Result<(), BotRunError<S::Error>> {
         let Some((&(time, _), _)) = self.scheduled.first_key_value() else {
             return Ok(());
         };
@@ -1201,6 +1203,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             input_id: entry.info.input_id,
             market_id: None,
             derived: false,
+            recovery,
         });
         Ok(())
     }
@@ -1280,6 +1283,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             input_id,
             market_id,
             derived,
+            recovery,
         });
         Ok(())
     }
@@ -1450,6 +1454,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             pending,
             input_id: entry.input_id.clone(),
             market_id,
+            recovery: entry.recovery,
         });
         Ok(())
     }
@@ -1481,7 +1486,13 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             .unwrap_or(self.delivery.len());
         let queued = self.delivery.split_off(external_start);
         for event in emitted {
-            self.ingest(active.input_id.clone(), event, true, active.market_id, true)?;
+            self.ingest(
+                active.input_id.clone(),
+                event,
+                active.recovery,
+                active.market_id,
+                true,
+            )?;
         }
         self.delivery.extend(queued);
         for (execute_at_ms, event) in scheduled {

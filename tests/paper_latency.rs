@@ -750,3 +750,95 @@ async fn delayed_order_manager_completion_records_current_time_inside_nested_sco
         assert!(end.event_time_ms.unwrap() > 1000);
     }
 }
+
+struct EmitInvalid {
+    delayed: bool,
+    scheduled: bool,
+    delivered: Arc<Mutex<usize>>,
+}
+impl BotStrategy<PaperTradingVenue> for EmitInvalid {
+    type CustomEvent = u8;
+    type Error = String;
+    async fn handle_event(
+        &mut self,
+        event: BotEvent<u8>,
+        ctx: &BotContext<u8, PaperTradingVenue>,
+    ) -> Result<(), String> {
+        if let BotEvent::Custom(n) = event {
+            if self.scheduled && n == 0 {
+                ctx.schedule_after(10, 1).unwrap();
+                return Ok(());
+            }
+            if self.delayed {
+                ctx.venue().place_order(sell(100).into()).await.unwrap();
+            }
+            ctx.emit(BotEvent::Market(MarketEvent::Transactions {
+                pair: "btc_jpy".into(),
+                transactions: vec![MarketTrade {
+                    transaction_id: 1,
+                    executed_at: 1001,
+                    side: OrderSide::Buy,
+                    price: 101.into(),
+                    amount: Decimal::ZERO,
+                }],
+            }))
+            .await
+            .unwrap();
+        } else {
+            *self.delivered.lock().unwrap() += 1;
+        }
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn derived_market_validation_inherits_strict_or_recovery_mode_after_waits_and_schedules() {
+    for recovery in [false, true] {
+        for (delayed, scheduled) in [(false, false), (true, false), (false, true)] {
+            let venue = PaperTradingVenue::with_latency(
+                engine(PaperClock::Replay { now_ms: 1000 }, 0, None),
+                PaperLatencyConfig {
+                    placement: PaperOperationLatency {
+                        entry_ms: 10,
+                        response_ms: 10,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let delivered = Arc::new(Mutex::new(0));
+            let mut runner = BotRunner::new(
+                EmitInvalid {
+                    delayed,
+                    scheduled,
+                    delivered: delivered.clone(),
+                },
+                venue.clone(),
+            );
+            let mut result = if recovery {
+                runner
+                    .process_recovering(1000, None, BotEvent::Custom(0))
+                    .await
+            } else {
+                runner.process(1000, None, BotEvent::Custom(0)).await
+            };
+            if scheduled {
+                result.unwrap();
+                result = runner.process_next_scheduled(recovery).await;
+            }
+            assert_eq!(
+                result.is_ok(),
+                recovery,
+                "delayed={delayed}, scheduled={scheduled}"
+            );
+            assert_eq!(*delivered.lock().unwrap(), usize::from(recovery));
+            assert!(
+                venue
+                    .paper_settlement_status()
+                    .unwrap()
+                    .issues
+                    .iter()
+                    .any(|s| s.contains("invalid trade 1"))
+            );
+        }
+    }
+}
