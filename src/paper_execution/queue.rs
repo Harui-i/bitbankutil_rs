@@ -243,8 +243,8 @@ impl QueueModel {
         for level in &mut self.levels {
             level.segments.retain(|s| s.order_id != Some(id));
         }
-        self.levels
-            .retain(|l| l.segments.iter().any(|s| s.order_id.is_some()));
+        // 自注文がなくても消化済み外部数量の履歴は残す。
+        // 古い観測板から再初期化すると、watermarkを先に進めた経路だけ外部数量が復活する。
     }
     pub fn allocations(
         &mut self,

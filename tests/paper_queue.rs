@@ -477,7 +477,7 @@ fn same_ms_trade_does_not_advance_queue_and_missing_pair_book_does_not_admit() {
 
 #[test]
 fn external_quantity_behind_last_active_order_is_consumed_before_future_order() {
-    fn path(delayed: bool) -> Vec<(OrderId, Decimal)> {
+    fn path(delayed: bool, depth_decrement: bool) -> Vec<(OrderId, Decimal)> {
         let mut e = engine(0, false);
         e.apply_market_event(&book(1000, 99, 10.0, 101, 1.0));
         e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
@@ -502,7 +502,9 @@ fn external_quantity_behind_last_active_order_is_consumed_before_future_order() 
             );
         }
         e.advance_replay_time(1150).unwrap();
-        e.apply_market_event(&book(1150, 99, 10.0, 101, 1.0));
+        if depth_decrement {
+            e.apply_market_event(&book(1150, 99, 10.0, 101, 1.0));
+        }
         e.advance_replay_time(1200).unwrap();
         e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
         if delayed {
@@ -516,6 +518,72 @@ fn external_quantity_behind_last_active_order_is_consumed_before_future_order() 
         fills(trade(&mut e, 0, 1300, OrderSide::Sell, 100, 1, 2))
     }
     let expected = vec![(OrderId(2), Decimal::ONE)];
-    assert_eq!(path(false), expected);
-    assert_eq!(path(true), expected);
+    for depth_decrement in [false, true] {
+        assert_eq!(path(false, depth_decrement), expected);
+        assert_eq!(path(true, depth_decrement), expected);
+    }
+}
+
+#[test]
+fn idle_level_consumes_external_trades_and_preserves_fees_across_watermark_timing() {
+    fn path(delayed: bool) -> (Vec<(OrderId, Decimal)>, Vec<BalanceSnapshot>, Decimal) {
+        let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
+        config.fee_schedule = PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO);
+        let mut e = PaperExecutionEngine::new(
+            config,
+            PaperClock::Replay { now_ms: 1000 },
+            engine(0, false).balances(),
+            None,
+        )
+        .unwrap();
+        e.apply_market_event(&book(1000, 99, 10.0, 101, 1.0));
+        e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
+        e.advance_replay_time(1050).unwrap();
+        e.apply_market_event(&book(1050, 100, 5.0, 101, 1.0));
+        let events =
+            [(1100, 1, 1), (1150, 5, 2)].map(|(time, amount, id)| MarketEvent::Transactions {
+                pair: "btc_jpy".into(),
+                transactions: vec![MarketTrade {
+                    transaction_id: id,
+                    executed_at: time,
+                    side: OrderSide::Sell,
+                    price: 100.into(),
+                    amount: amount.into(),
+                }],
+            });
+        if !delayed {
+            for (event, time) in events.iter().zip([1100, 1150]) {
+                e.advance_replay_time(time + 10).unwrap();
+                e.apply_market_event(event);
+                e.advance_trade_watermark(time).unwrap();
+                assert!(e.open_orders().is_empty());
+            }
+        }
+        e.advance_replay_time(1200).unwrap();
+        e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
+        if delayed {
+            e.advance_replay_time(1250).unwrap();
+            for event in &events {
+                e.apply_market_event(event);
+            }
+            e.advance_trade_watermark(1150).unwrap();
+        }
+        let final_fills = fills(trade(&mut e, 0, 1300, OrderSide::Sell, 100, 1, 3));
+        let fees = e
+            .drain_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                PaperEvent::OrderFilled {
+                    fee_amount_quote, ..
+                } => Some(fee_amount_quote),
+                _ => None,
+            })
+            .sum();
+        (final_fills, e.balances(), fees)
+    }
+    let immediate = path(false);
+    let delayed = path(true);
+    assert_eq!(immediate, delayed);
+    assert_eq!(immediate.0, [(OrderId(2), Decimal::ONE)]);
+    assert_eq!(immediate.2, Decimal::new(2, 1));
 }
