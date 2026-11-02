@@ -48,6 +48,22 @@ pub struct PlacedOrder {
 /// 注文操作と口座取得の共通インターフェース。
 /// Cloneした値も同じ口座・注文状態を共有すること。
 pub trait TradingVenue: Clone + Send + Sync + 'static {
+    /// 模擬venue内部イベントの次のローカル期限。
+    fn next_internal_time(&self) -> Option<i64> {
+        None
+    }
+    /// 指定したローカル時刻までの内部イベントを実行する。
+    fn process_internal_events(&self, _local_ms: i64) -> Result<(), TradingVenueError> {
+        Ok(())
+    }
+    /// 再生時計。実時計のvenueではNone。
+    fn current_time_ms(&self) -> Option<i64> {
+        None
+    }
+    /// 子タスクから内部予約が追加された際に再生ドライバーを起床する。
+    fn set_replay_waker(&self, _waker: Option<std::task::Waker>) {}
+    /// 起床通知の登録と、仮想期限をランナーが管理する期間を区別する。
+    fn set_replay_driver(&self, _active: bool) {}
     /// オフライン入力の処理前に再生時計を更新する。
     fn advance_replay_time(&self, _time_ms: i64) -> Result<(), TradingVenueError> {
         Ok(())

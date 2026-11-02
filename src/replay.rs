@@ -359,6 +359,8 @@ pub struct ReplayReport {
     pub input_exhausted: bool,
     pub final_time_ms: Option<i64>,
     pub pending_scheduled: Vec<crate::bitbank_bot::ScheduledEventInfo>,
+    pub pending_handler: bool,
+    pub pending_deliveries: usize,
     pub records: usize,
     pub incomplete: bool,
     pub interrupted: bool,
@@ -503,14 +505,14 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
         };
         let boundary = options.end_time_ms.map_or(time, |end| end.min(time));
         while runner
-            .next_scheduled_time()
+            .next_internal_time()
             .is_some_and(|t| t < time && t <= boundary)
         {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 report.interrupted = true;
                 break;
             }
-            if let Err(e) = runner.process_next_scheduled(recovery).await {
+            if let Err(e) = runner.process_next_internal(recovery).await {
                 report.error = Some(format!("{e:?}"));
                 break;
             }
@@ -580,11 +582,7 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
             }
         };
         if let Some(event) = event {
-            let result = if recovery {
-                runner.process_recovering(time, Some(id), event).await
-            } else {
-                runner.process(time, Some(id), event).await
-            };
+            let result = runner.submit_replay(time, Some(id), event, recovery).await;
             if let Err(e) = result {
                 report.error = Some(format!("{e:?}"));
                 break;
@@ -599,12 +597,12 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
     {
         let end = options.end_time_ms.or(runner.now_ms());
         if let Some(end) = end {
-            while runner.next_scheduled_time().is_some_and(|t| t <= end) {
+            while runner.next_internal_time().is_some_and(|t| t <= end) {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     report.interrupted = true;
                     break;
                 }
-                if let Err(e) = runner.process_next_scheduled(recovery).await {
+                if let Err(e) = runner.process_next_internal(recovery).await {
                     report.error = Some(format!("{e:?}"));
                     break;
                 }
@@ -626,6 +624,10 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
     }
     report.final_time_ms = runner.now_ms();
     report.pending_scheduled = runner.pending_scheduled();
+    report.pending_handler = runner.handler_pending();
+    report.pending_deliveries = runner.pending_delivery_count();
+    report.incomplete |= report.pending_handler || report.pending_deliveries > 0;
+    runner.stop_pending_handler();
     report.incomplete |= report.error.is_some() || report.interrupted;
     if report.error.is_some() || report.interrupted {
         runner

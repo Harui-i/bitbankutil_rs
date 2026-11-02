@@ -6,7 +6,35 @@ use crate::{
     trading_venue::{PlacedOrder, PlacementRequest, TradingVenue, TradingVenueError},
 };
 use rust_decimal::Decimal;
-use tokio::{task::JoinSet, time::Instant};
+use tokio::time::Instant;
+
+/// 操作を同じタスクで並行pollし、再生上の要求登録順を起床順に依存させない。
+struct OperationSet<T> {
+    tasks: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>>,
+}
+impl<T> OperationSet<T> {
+    fn new() -> Self {
+        Self { tasks: Vec::new() }
+    }
+    fn spawn(&mut self, future: impl std::future::Future<Output = T> + Send + 'static) {
+        self.tasks.push(Box::pin(future));
+    }
+    async fn join_next(&mut self) -> Option<Result<T, std::convert::Infallible>> {
+        std::future::poll_fn(|cx| {
+            if self.tasks.is_empty() {
+                return std::task::Poll::Ready(None);
+            }
+            for i in 0..self.tasks.len() {
+                if let std::task::Poll::Ready(result) = self.tasks[i].as_mut().poll(cx) {
+                    drop(self.tasks.remove(i));
+                    return std::task::Poll::Ready(Some(Ok(result)));
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct OrderPlan {
@@ -116,7 +144,7 @@ pub async fn place_wanna_orders(
     venue: impl TradingVenue,
 ) {
     let start = Instant::now();
-    let mut js = JoinSet::new();
+    let mut js = OperationSet::new();
     let OrderPlan {
         cancels,
         placements,
@@ -194,7 +222,7 @@ pub async fn place_wanna_orders_concurrent(
     }
 
     // first_placementsの注文を発注し、cancelsの注文をキャンセルするJoinSet
-    let mut first_js = JoinSet::new();
+    let mut first_js = OperationSet::new();
 
     // いくつかの注文をキャンセルする必要がある
     if !cancels.is_empty() {
@@ -236,7 +264,7 @@ pub async fn place_wanna_orders_concurrent(
     }
 
     if !second_placements.is_empty() {
-        let mut second_js = JoinSet::new();
+        let mut second_js = OperationSet::new();
 
         for sord in second_placements {
             let venue2 = venue.clone();

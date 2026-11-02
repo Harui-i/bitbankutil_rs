@@ -66,7 +66,7 @@ impl std::fmt::Debug for ExecutionRecorder {
         f.debug_struct("ExecutionRecorder").finish_non_exhaustive()
     }
 }
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RecordingContext {
     pub operation_id: Option<u64>,
     pub market_event_id: Option<u64>,
@@ -76,6 +76,10 @@ pub struct RecordingContext {
 tokio::task_local! { static CONTEXT: RecordingContext; }
 pub fn current_context() -> RecordingContext {
     CONTEXT.try_with(Clone::clone).unwrap_or_default()
+}
+/// 同期した市場登録にも、入力の記録コンテキストを引き継ぐ。
+pub fn sync_scope<T>(context: RecordingContext, f: impl FnOnce() -> T) -> T {
+    CONTEXT.sync_scope(context, f)
 }
 pub async fn scope<T>(
     context: RecordingContext,

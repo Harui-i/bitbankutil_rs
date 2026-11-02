@@ -171,6 +171,10 @@ pub struct PaperSettlementStatus {
     pub max_trade_delay_ms: Option<i64>,
     pub buffered_trades: usize,
     pub pending_cancellations: usize,
+    /// まだローカルへ応答・通知していない操作/状態更新の件数。
+    pub pending_operations: usize,
+    pub latency_model: PaperLatencyConfig,
+    pub pending_operation_details: Vec<serde_json::Value>,
     pub unsettled: bool,
     pub issues: Vec<String>,
 }
@@ -189,10 +193,11 @@ pub enum PaperClock {
 /// 公開約定の数量を使ってmaker指値注文を執行するエンジン。
 /// 受信済み公開約定をwatermarkで確定し、注文の有効期間内の約定だけを適用する。
 /// 時刻・時計差の制約は `docs/paper-execution.md` を参照。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PaperExecutionEngine {
     config: PaperExecutionConfig,
     clock: PaperClock,
+    venue_state: Option<Arc<Mutex<latency::State>>>,
     effective_after: BTreeMap<OrderId, i64>,
     // 有効期間・板による下限・watermarkはすべて取引所UTC Unix ms。
     time_floor: i64,
@@ -242,6 +247,7 @@ impl PaperExecutionEngine {
         let engine = Self {
             config,
             clock,
+            venue_state: None,
             effective_after: BTreeMap::new(),
             time_floor: i64::MIN,
             cancel_at: BTreeMap::new(),
@@ -584,6 +590,9 @@ impl PaperExecutionEngine {
             max_trade_delay_ms: self.max_trade_delay_ms,
             buffered_trades: self.buffered_trades.len(),
             pending_cancellations: self.cancel_at.len(),
+            pending_operations: 0,
+            latency_model: PaperLatencyConfig::default(),
+            pending_operation_details: Vec::new(),
             unsettled: !self.settlement_issues.is_empty()
                 || !self.buffered_trades.is_empty()
                 || !self.cancel_at.is_empty()
@@ -770,167 +779,8 @@ impl PaperExecutionEngine {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PaperTradingVenue {
-    engine: Arc<Mutex<PaperExecutionEngine>>,
-}
-
-impl PaperTradingVenue {
-    pub fn new(engine: PaperExecutionEngine) -> Self {
-        Self {
-            engine: Arc::new(Mutex::new(engine)),
-        }
-    }
-
-    pub fn from_shared(engine: Arc<Mutex<PaperExecutionEngine>>) -> Self {
-        Self { engine }
-    }
-
-    /// 受信完了を保証できた境界を確定し、約定・取消イベントを返す。
-    pub fn advance_trade_watermark(
-        &self,
-        through_ms: i64,
-    ) -> Result<Vec<PaperEvent>, TradingVenueError> {
-        self.engine
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?
-            .advance_trade_watermark(through_ms)
-            .map_err(TradingVenueError::Paper)
-    }
-
-    pub fn engine(&self) -> Arc<Mutex<PaperExecutionEngine>> {
-        self.engine.clone()
-    }
-}
-
-impl TradingVenue for PaperTradingVenue {
-    fn paper_settlement_status(&self) -> Option<PaperSettlementStatus> {
-        Some(
-            self.engine
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .settlement_status(),
-        )
-    }
-
-    fn mark_market_incomplete(&self, reason: &str) {
-        self.engine
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .mark_incomplete(reason);
-    }
-
-    fn advance_replay_time(&self, time_ms: i64) -> Result<(), TradingVenueError> {
-        self.engine
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?
-            .advance_replay_time(time_ms)
-            .map_err(TradingVenueError::Paper)
-    }
-
-    fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
-        self.engine
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .recorder
-            .clone()
-    }
-
-    fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
-        Box::pin(async move {
-            let recorder = self.recorder();
-            crate::execution_recording::operation(
-                recorder.as_ref(),
-                "account_snapshot",
-                serde_json::json!({"pair":pair}),
-                async move {
-                    let engine = self
-                        .engine
-                        .lock()
-                        .map_err(|_| TradingVenueError::StatePoisoned)?;
-                    if pair != engine.config().pair {
-                        return Err(TradingVenueError::Paper(
-                            PaperExecutionError::PairMismatch {
-                                expected: engine.config().pair.clone(),
-                                actual: pair.to_owned(),
-                            },
-                        ));
-                    }
-                    Ok(AccountSnapshot {
-                        open_orders: engine.open_orders(),
-                        balances: engine.balances(),
-                    })
-                },
-            )
-            .await
-        })
-    }
-
-    fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
-        Box::pin(async move {
-            let recorder = self.recorder();
-            crate::execution_recording::operation(
-                recorder.as_ref(),
-                "place_order",
-                serde_json::json!(&request),
-                async move {
-                    self.engine
-                        .lock()
-                        .map_err(|_| TradingVenueError::StatePoisoned)?
-                        .place_order(request.order)
-                        .map_err(TradingVenueError::Paper)
-                },
-            )
-            .await
-        })
-    }
-
-    fn cancel_orders<'a>(
-        &'a self,
-        pair: &'a str,
-        order_ids: Vec<OrderId>,
-    ) -> TradingVenueFuture<'a, ()> {
-        Box::pin(async move {
-            let recorder = self.recorder();
-            crate::execution_recording::operation(
-                recorder.as_ref(),
-                "cancel_orders",
-                serde_json::json!({"pair":pair,"order_ids":order_ids}),
-                async move {
-                    self.engine
-                        .lock()
-                        .map_err(|_| TradingVenueError::StatePoisoned)?
-                        .cancel_orders(pair, order_ids);
-                    Ok(())
-                },
-            )
-            .await
-        })
-    }
-
-    fn on_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
-        let mut engine = self
-            .engine
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?;
-        engine.apply_market_event(event);
-        if !engine.settlement_issues.is_empty() {
-            return Err(TradingVenueError::Paper(
-                PaperExecutionError::InvalidTradeStream,
-            ));
-        }
-        Ok(())
-    }
-
-    fn on_market_event_recovering(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
-        self.engine
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?
-            .apply_market_event(event);
-        // issuesは維持する。入力の継続は約定確定・資金解放・新規注文の再開ではない。
-        Ok(())
-    }
-}
+mod latency;
+pub use latency::{PaperLatencyConfig, PaperOperationLatency, PaperTradingVenue};
 
 fn parse_jpy_pair(pair: &str) -> Result<(String, String), PaperExecutionError> {
     let Some(base) = pair.strip_suffix("_jpy") else {
