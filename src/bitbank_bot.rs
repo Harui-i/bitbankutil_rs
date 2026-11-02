@@ -54,6 +54,35 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
         &self.venue
     }
 
+    /// ローカル仮想時刻にカスタムイベントを予約する。live経路・過去・閉じたcontextは拒否する。
+    /// 同時刻は予約採番順。実行はreplayランナーが行い、ハンドラーのawait中は時計を進めない。
+    pub fn schedule_at(&self, local_ms: i64, event: C) -> Result<(), ScheduleError> {
+        let now = self.time.ok_or(ScheduleError::NotReplay)?;
+        if local_ms < now {
+            return Err(ScheduleError::Past);
+        }
+        let mut p = self.pending.lock().unwrap();
+        if !p.open {
+            return Err(ScheduleError::Closed);
+        }
+        if p.scheduled.len() >= p.schedule_limit {
+            p.schedule_overflow = true;
+            return Err(ScheduleError::Limit);
+        }
+        p.scheduled.push((local_ms, event));
+        Ok(())
+    }
+
+    /// ローカル仮想時刻からの非負の遅延で予約する。加算の範囲外は拒否する。
+    pub fn schedule_after(&self, delay_ms: i64, event: C) -> Result<(), ScheduleError> {
+        let now = self.time.ok_or(ScheduleError::NotReplay)?;
+        if delay_ms < 0 {
+            return Err(ScheduleError::Past);
+        }
+        let at = now.checked_add(delay_ms).ok_or(ScheduleError::Overflow)?;
+        self.schedule_at(at, event)
+    }
+
     pub async fn emit(
         &self,
         event: BotEvent<C>,
@@ -936,12 +965,37 @@ pub struct InputId {
     pub sequence: u64,
 }
 
+/// 予約APIの入力・ライフサイクルエラー。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleError {
+    NotReplay,
+    Past,
+    Closed,
+    Overflow,
+    Limit,
+}
+
+/// 予約の識別子はレコーダーとは独立したランナー内の単調採番。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScheduledEventInfo {
+    pub id: u64,
+    pub scheduled_at_ms: i64,
+    pub execute_at_ms: i64,
+    pub input_id: Option<InputId>,
+}
+struct ScheduledEvent<C> {
+    info: ScheduledEventInfo,
+    event: C,
+}
+
 #[derive(Debug)]
 pub enum BotRunError<E> {
     TimeReversed,
     Venue(crate::trading_venue::TradingVenueError),
     Strategy(E),
     DerivedLimit,
+    ScheduledLimit,
+    ScheduleIdOverflow,
 }
 
 /// ネットワーク入力とオフライン入力を逐次処理するランナー。
@@ -952,6 +1006,11 @@ pub struct BotRunner<S: BotStrategy<V>, V: TradingVenue> {
     venue: V,
     last_time: Option<i64>,
     pub derived_limit: usize,
+    /// 未実行予約数と、同一時刻での内部実行数の上限。
+    pub scheduled_limit: usize,
+    scheduled: std::collections::BTreeMap<(i64, u64), ScheduledEvent<S::CustomEvent>>,
+    next_scheduled_id: u64,
+    scheduled_tick: Option<(i64, usize)>,
 }
 impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
     pub fn new(strategy: S, venue: V) -> Self {
@@ -960,10 +1019,56 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             venue,
             last_time: None,
             derived_limit: 10_000,
+            scheduled_limit: 10_000,
+            scheduled: Default::default(),
+            next_scheduled_id: 0,
+            scheduled_tick: None,
         }
     }
     pub fn venue(&self) -> &V {
         &self.venue
+    }
+    /// 実行せず保留している予約を実行順に返す。
+    pub fn pending_scheduled(&self) -> Vec<ScheduledEventInfo> {
+        self.scheduled.values().map(|e| e.info.clone()).collect()
+    }
+    pub fn now_ms(&self) -> Option<i64> {
+        self.last_time
+    }
+    pub fn next_scheduled_time(&self) -> Option<i64> {
+        self.scheduled.first_key_value().map(|(key, _)| key.0)
+    }
+    /// 最も早い予約を1件処理する。外部入力との比較・終了境界は呼び出し元が管理する。
+    pub async fn process_next_scheduled(
+        &mut self,
+        recovery: bool,
+    ) -> Result<(), BotRunError<S::Error>> {
+        let Some((&(time, _), _)) = self.scheduled.first_key_value() else {
+            return Ok(());
+        };
+        let count = match self.scheduled_tick {
+            Some((tick, count)) if tick == time => count,
+            _ => 0,
+        };
+        if count >= self.scheduled_limit {
+            return Err(BotRunError::ScheduledLimit);
+        }
+        self.advance_time(time)?;
+        self.scheduled_tick = Some((time, count + 1));
+        let (_, entry) = self.scheduled.pop_first().unwrap();
+        if let Some(r) = self.venue.recorder() {
+            r.record(
+                "scheduled_event_executed",
+                serde_json::json!({"event":entry.info,"executed_at_ms":time}),
+            );
+        }
+        self.process_inner(
+            Some(time),
+            entry.info.input_id,
+            BotEvent::Custom(entry.event),
+            recovery,
+        )
+        .await
     }
     fn record_settlement(&self) {
         if let Some(status) = self.venue.paper_settlement_status() {
@@ -1028,6 +1133,9 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             count += 1;
             let pending = std::sync::Arc::new(std::sync::Mutex::new(Pending {
                 queue: std::collections::VecDeque::new(),
+                scheduled: Vec::new(),
+                schedule_limit: self.scheduled_limit.saturating_sub(self.scheduled.len()),
+                schedule_overflow: false,
                 open: true,
                 emitted: 0,
                 limit: self.derived_limit.saturating_sub(count - 1 + queue.len()),
@@ -1086,10 +1194,35 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             {
                 let mut p = pending.lock().unwrap();
                 p.open = false;
+                if p.schedule_overflow {
+                    return Err(BotRunError::ScheduledLimit);
+                }
                 if p.overflow {
                     return Err(BotRunError::DerivedLimit);
                 }
                 queue.extend(p.queue.drain(..).map(|event| (event, market_id)));
+                if result.is_ok() {
+                    for (execute_at_ms, event) in p.scheduled.drain(..) {
+                        if self.scheduled.len() >= self.scheduled_limit {
+                            return Err(BotRunError::ScheduledLimit);
+                        }
+                        self.next_scheduled_id = self
+                            .next_scheduled_id
+                            .checked_add(1)
+                            .ok_or(BotRunError::ScheduleIdOverflow)?;
+                        let info = ScheduledEventInfo {
+                            id: self.next_scheduled_id,
+                            scheduled_at_ms: time.expect("scheduled only in replay"),
+                            execute_at_ms,
+                            input_id: input_id.clone(),
+                        };
+                        if let Some(r) = &recorder {
+                            r.record("scheduled_event_reserved", serde_json::json!(&info));
+                        }
+                        self.scheduled
+                            .insert((execute_at_ms, info.id), ScheduledEvent { info, event });
+                    }
+                }
             }
             result?;
         }
@@ -1098,6 +1231,9 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
 }
 
 struct Pending<C> {
+    scheduled: Vec<(i64, C)>,
+    schedule_limit: usize,
+    schedule_overflow: bool,
     queue: std::collections::VecDeque<BotEvent<C>>,
     open: bool,
     emitted: usize,
