@@ -643,3 +643,50 @@ fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExe
     });
     engine
 }
+
+#[tokio::test]
+async fn lightweight_sampling_preserves_issues_and_recording_parity() {
+    let mut expected = None;
+    for recording in [false, true] {
+        let records = Records::default();
+        let recorder = recording
+            .then(|| ExecutionRecorder::new("parity", serde_json::json!({}), records.clone()));
+        let v = venue(PaperClock::Replay { now_ms: 900 }, 0, recorder);
+        v.advance_replay_time(1000).unwrap();
+        v.on_market_event(&trade(950)).unwrap();
+        v.advance_trade_watermark(1000).unwrap();
+        v.mark_market_incomplete("settlement issue first");
+        v.engine()
+            .lock()
+            .unwrap()
+            .apply_market_event(&MarketEvent::DepthUpdated {
+                pair: "btc_jpy".into(),
+                depth: MarketDepthSnapshot::new(Default::default(), Default::default(), 1000),
+            });
+        let status = v.paper_settlement_status().unwrap();
+        assert!(!status.issues.is_empty() && !status.model_issues.is_empty());
+        let issues: Vec<_> = status
+            .issues
+            .into_iter()
+            .chain(status.model_issues)
+            .collect();
+        let mut query = Box::pin(v.account_snapshot("btc_jpy"));
+        assert!(poll_once(query.as_mut()).await.is_pending());
+        assert!(v.has_pending_operations());
+        assert!(v.paper_settlement_status().unwrap().pending_operations > 0);
+        v.process_internal_events(1080).unwrap();
+        let snapshot = query.await.unwrap();
+        for observation in [
+            &snapshot.query.as_ref().unwrap().orders,
+            &snapshot.query.as_ref().unwrap().balances,
+        ] {
+            assert_eq!(observation.issues, issues);
+            assert_eq!(observation.watermark_ms, status.watermark_ms);
+            assert!(observation.unsettled);
+        }
+        assert!(!v.has_pending_operations());
+        let events = v.engine().lock().unwrap().drain_events();
+        let result = (snapshot, events, v.paper_settlement_status().unwrap());
+        assert_eq!(expected.get_or_insert_with(|| result.clone()), &result);
+    }
+}

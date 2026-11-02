@@ -168,12 +168,19 @@ async fn overlap(delta: i64, recording: bool) -> (AccountSnapshot, Vec<PaperEven
         .unwrap();
     venue.advance_trade_watermark(1200).unwrap();
     // 確定は1250。通知は1270以降で、過去の1200には遡らない。
+    assert!(venue.has_pending_operations());
+    assert!(venue.paper_settlement_status().unwrap().pending_operations > 0);
     assert_eq!(
         balance(&venue.known_account_snapshot(), "jpy").onhand_amount,
         Decimal::ZERO
     );
     runner.process_next_internal(false).await.unwrap();
     assert_eq!(runner.now_ms(), Some(1270 - delta));
+    assert!(!venue.has_pending_operations());
+    assert_eq!(
+        venue.paper_settlement_status().unwrap().pending_operations,
+        0
+    );
     let after = venue.known_account_snapshot();
     assert_eq!(after.open_orders.len(), 1);
     assert_eq!(after.open_orders[0].remaining_amount, Decimal::new(25, 2));

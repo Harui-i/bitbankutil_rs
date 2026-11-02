@@ -166,17 +166,18 @@ pub(super) fn process(
                         },
                     ))
                 } else {
-                    let status = engine.settlement_status();
                     let exchange = engine
                         .config
                         .time_model
                         .local_to_exchange_ms(executed)
                         .map_err(TradingVenueError::Paper)?;
+                    let values = match endpoint {
+                        Endpoint::Orders => Values::Orders(engine.open_orders()),
+                        Endpoint::Balances => Values::Balances(engine.balances()),
+                    };
+                    let status = engine.settlement_observation();
                     Ok(Part {
-                        values: match endpoint {
-                            Endpoint::Orders => Values::Orders(engine.open_orders()),
-                            Endpoint::Balances => Values::Balances(engine.balances()),
-                        },
+                        values,
                         observation: AccountObservation {
                             request_id: id,
                             requested_local_ms: requested,
@@ -184,11 +185,12 @@ pub(super) fn process(
                             sampled_exchange_ms: exchange,
                             received_local_ms: None,
                             watermark_ms: status.watermark_ms,
-                            unsettled: engine.current_unsettled(),
+                            unsettled: status.unsettled,
                             issues: status
                                 .issues
-                                .into_iter()
+                                .iter()
                                 .chain(status.model_issues)
+                                .cloned()
                                 .collect(),
                         },
                     })
