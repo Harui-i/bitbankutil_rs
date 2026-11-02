@@ -1379,6 +1379,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             ),
             market_event_id: active.market_id,
             input_id: active.input_id.clone(),
+            replay_clock: self.last_time.map(|_| self.replay_clock.clone()),
             ..Default::default()
         };
         crate::execution_recording::sync_scope(context, || active.future.as_mut().poll(cx))

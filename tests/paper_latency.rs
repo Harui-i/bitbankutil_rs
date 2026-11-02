@@ -704,3 +704,49 @@ async fn direct_runner_releases_driver_for_later_direct_venue_operations() {
         2
     );
 }
+
+#[tokio::test]
+async fn delayed_order_manager_completion_records_current_time_inside_nested_scopes() {
+    let records = Records::default();
+    let recorder = ExecutionRecorder::new("completion", serde_json::json!({}), records.clone());
+    let mut e = engine(PaperClock::Replay { now_ms: 900 }, 0, Some(recorder));
+    e.place_order(sell(100)).unwrap();
+    let venue = PaperTradingVenue::with_latency(e, latency()).unwrap();
+    let mut runner = BotRunner::new(Strategy(Default::default()), venue);
+    runner
+        .process(
+            1000,
+            Some(InputId {
+                session_id: "request".into(),
+                sequence: 7,
+            }),
+            BotEvent::Custom(()),
+        )
+        .await
+        .unwrap();
+    let records = records.0.lock().unwrap();
+    let finished = records
+        .iter()
+        .filter(|r| {
+            r.kind == "operation_finished"
+                && ["place_order", "cancel_orders"]
+                    .contains(&r.data["operation"].as_str().unwrap_or(""))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 2);
+    for end in finished {
+        let start = records
+            .iter()
+            .find(|r| r.kind == "operation_started" && r.operation_id == end.operation_id)
+            .unwrap();
+        let response = records
+            .iter()
+            .find(|r| r.kind == "paper_operation_response" && r.operation_id == end.operation_id)
+            .unwrap();
+        assert_eq!(start.event_time_ms, Some(1000));
+        assert_eq!(end.event_time_ms, response.event_time_ms);
+        assert_eq!(end.input_id.as_ref().unwrap().sequence, 7);
+        assert_eq!(start.input_id, end.input_id);
+        assert!(end.event_time_ms.unwrap() > 1000);
+    }
+}

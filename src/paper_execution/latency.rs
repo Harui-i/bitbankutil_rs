@@ -495,6 +495,8 @@ impl TradingVenue for PaperTradingVenue {
             }
             let executed = local_now(&e)?;
             context.event_time_ms = Some(executed);
+            // 内部イベントはその実行時刻を明示する。元要求の共有時計に上書きさせない。
+            context.replay_clock = None;
             crate::execution_recording::sync_scope(
                 context,
                 || -> Result<(), TradingVenueError> {
