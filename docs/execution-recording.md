@@ -111,6 +111,7 @@ cargo run --example record_execution -- /tmp/execution.jsonl
   終了側の `sent` がfalseなら、送信前にリクエストの構築に失敗しています。
   HTTPステータスは応答ハンドラーまで届いた場合のみ保存できます。
   エラーについては失敗した段階と取引所のエラーコードを保存し、エラーの全文は保存しません。
+- `paper_settlement` / `paper_delay_assumption`: 公開約定の確定境界・未確定状態・評価異常と、任意の遅延上限の仮定です。
 - `paper_initial_state` / `paper_event`: paper tradingの記録開始時の設定・口座状態と、
   注文の受理・拒否・取消・約定、その直後の残高・未約定注文です。
   エンジンの `drain_events` で取得できるメモリ上の履歴は最新1024件に制限され、

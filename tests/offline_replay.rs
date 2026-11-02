@@ -605,3 +605,197 @@ async fn unknown_partial_or_ambiguous_subscriptions_leave_gaps_open() {
     assert_eq!(report.gaps.len(), 2);
     assert!(report.gaps.iter().all(|gap| gap.end.is_none()));
 }
+
+struct PaperRecoveryProbe {
+    seen: Arc<Mutex<Vec<i64>>>,
+    fail_after_gap: bool,
+}
+impl BotStrategy<bitbankutil_rs::paper_execution::PaperTradingVenue> for PaperRecoveryProbe {
+    type CustomEvent = ();
+    type Error = String;
+    async fn handle_event(
+        &mut self,
+        event: BotEvent<()>,
+        ctx: &BotContext<(), bitbankutil_rs::paper_execution::PaperTradingVenue>,
+    ) -> Result<(), String> {
+        use bitbankutil_rs::{
+            order_domain::*, paper_execution::PaperExecutionError, trading_venue::*,
+        };
+        if let BotEvent::Market(MarketEvent::DepthUpdated { depth, .. }) = event {
+            self.seen.lock().unwrap().push(ctx.now_ms());
+            if !ctx
+                .venue()
+                .paper_settlement_status()
+                .unwrap()
+                .issues
+                .is_empty()
+            {
+                // 再接続した板は新しいwholeとdiffから復元され、戦略へ届く。
+                assert_eq!(
+                    *depth.best_bid().unwrap().0,
+                    rust_decimal::Decimal::from(98)
+                );
+                ctx.venue()
+                    .cancel_orders("btc_jpy", vec![OrderId(1)])
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    ctx.venue()
+                        .place_order(
+                            DesiredLimitOrder::limit(
+                                "btc_jpy".into(),
+                                OrderSide::Buy,
+                                1.into(),
+                                100.into()
+                            )
+                            .into()
+                        )
+                        .await,
+                    Err(TradingVenueError::Paper(
+                        PaperExecutionError::InvalidTradeStream
+                    ))
+                ));
+                assert!(ctx.venue().advance_trade_watermark(ctx.now_ms()).is_err());
+                if self.fail_after_gap {
+                    return Err("strategy failed after reconnect".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+fn paper_recovery_venue() -> bitbankutil_rs::paper_execution::PaperTradingVenue {
+    use bitbankutil_rs::{order_domain::*, paper_execution::*};
+    let mut engine = PaperExecutionEngine::new(
+        PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+        PaperClock::Replay { now_ms: 0 },
+        [("btc", 2), ("jpy", 1000)]
+            .into_iter()
+            .map(|(asset, n)| BalanceSnapshot {
+                asset: asset.into(),
+                free_amount: n.into(),
+                onhand_amount: n.into(),
+                locked_amount: 0.into(),
+            })
+            .collect(),
+        None,
+    )
+    .unwrap();
+    engine
+        .place_order(DesiredLimitOrder::limit(
+            "btc_jpy".into(),
+            OrderSide::Buy,
+            1.into(),
+            100.into(),
+        ))
+        .unwrap();
+    engine.advance_trade_watermark(0).unwrap();
+    PaperTradingVenue::new(engine)
+}
+#[tokio::test]
+async fn paper_recovery_delivers_reconnected_market_and_records_later_gaps_without_settling() {
+    use bitbankutil_rs::trading_venue::TradingVenue;
+    let venue = paper_recovery_venue();
+    let before = venue.account_snapshot("btc_jpy").await.unwrap().balances;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut runner = BotRunner::new(
+        PaperRecoveryProbe {
+            seen: seen.clone(),
+            fail_after_gap: false,
+        },
+        venue.clone(),
+    );
+    let report = run_replay(
+        &mut runner,
+        ReplayInput::open(manifest()).unwrap(),
+        true,
+        &AtomicBool::new(false),
+        |_| Ok(None),
+    )
+    .await;
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(report.records, 14);
+    assert_eq!(report.last_input.unwrap().sequence, 10);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [1_793_113_199_930, 1_793_113_200_010, 1_793_113_200_080]
+    );
+    assert_eq!(report.gaps.len(), 2);
+    assert_eq!(report.gaps[0].end.as_ref().unwrap().sequence, 7);
+    assert!(report.gaps[1].end.is_none());
+    assert!(report.incomplete);
+    let settlement = report.settlement.unwrap();
+    assert!(settlement.unsettled);
+    assert_eq!(settlement.watermark_ms, Some(0));
+    assert_eq!(settlement.pending_cancellations, 1);
+    assert_eq!(settlement.issues.len(), 2);
+    assert_eq!(
+        venue.account_snapshot("btc_jpy").await.unwrap().balances,
+        before
+    );
+}
+#[tokio::test]
+async fn paper_strict_replay_still_stops_at_first_disconnect() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut runner = BotRunner::new(
+        PaperRecoveryProbe {
+            seen: seen.clone(),
+            fail_after_gap: false,
+        },
+        paper_recovery_venue(),
+    );
+    let report = run_replay(
+        &mut runner,
+        ReplayInput::open(manifest()).unwrap(),
+        false,
+        &AtomicBool::new(false),
+        |_| Ok(None),
+    )
+    .await;
+    assert!(report.error.is_none());
+    assert!(report.incomplete);
+    assert_eq!(report.last_input.unwrap().sequence, 6);
+    assert_eq!(report.gaps.len(), 1);
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+#[tokio::test]
+async fn paper_recovery_preserves_input_validation_and_strategy_errors_after_reconnect() {
+    for malformed in [false, true] {
+        let mut input: Vec<_> = ReplayInput::open(manifest())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        if malformed {
+            let (_, record) = input
+                .iter_mut()
+                .find(|(source, record)| *source == 0 && record.sequence == 9)
+                .unwrap();
+            if let CapturePayload::Message { message } = &mut record.payload {
+                message[1]["message"]["data"]["bids"] = serde_json::json!([["bad-price", "1"]]);
+            }
+        }
+        let mut runner = BotRunner::new(
+            PaperRecoveryProbe {
+                seen: Arc::default(),
+                fail_after_gap: !malformed,
+            },
+            paper_recovery_venue(),
+        );
+        let report = run_replay(
+            &mut runner,
+            input.into_iter().map(Ok),
+            true,
+            &AtomicBool::new(false),
+            |_| Ok(None),
+        )
+        .await;
+        let error = report.error.unwrap();
+        if !malformed {
+            assert!(error.contains("strategy failed after reconnect"), "{error}");
+        }
+        assert!(report.incomplete);
+        assert_eq!(report.last_input.unwrap().sequence, 9);
+        assert_eq!(report.gaps.len(), 1);
+        assert!(report.settlement.unwrap().unsettled);
+    }
+}

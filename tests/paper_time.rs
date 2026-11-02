@@ -37,13 +37,12 @@ fn trades(times: &[i64]) -> MarketEvent {
         pair: "btc_jpy".into(),
         transactions: times
             .iter()
-            .enumerate()
-            .map(|(i, t)| MarketTrade {
+            .map(|t| MarketTrade {
                 amount: rust_decimal::Decimal::new(5, 1),
                 price: 100.into(),
                 side: OrderSide::Buy,
                 executed_at: *t,
-                transaction_id: i as i64,
+                transaction_id: *t,
             })
             .collect(),
     }
@@ -57,9 +56,9 @@ fn book(time: i64) -> MarketEvent {
 fn filled_ids(events: Vec<PaperEvent>) -> Vec<OrderId> {
     events
         .into_iter()
-        .map(|e| match e {
-            PaperEvent::OrderFilled { order_id, .. } => order_id,
-            _ => panic!(),
+        .filter_map(|e| match e {
+            PaperEvent::OrderFilled { order_id, .. } => Some(order_id),
+            _ => None,
         })
         .collect()
 }
@@ -71,25 +70,21 @@ fn mixed_trades_partial_fills_cancel_and_replace_preserve_activation() {
         e.apply_market_event(&book(1100));
         e.advance_replay_time(1110).unwrap();
         e.place_order(order()).unwrap();
-        // 遅延した過去の約定は古い注文だけを部分約定させる。
+        e.apply_market_event(&trades(&[1000, 900, 1110]));
+        e.apply_market_event(&trades(&[1100, 1110, 1111]));
         assert_eq!(
-            filled_ids(e.apply_market_event(&trades(&[1000, 900, 1110]))),
-            [OrderId(1), OrderId(1)]
-        );
-        assert_eq!(e.open_orders()[0].order_id, OrderId(2));
-        // 同一メッセージ内の有効開始前・同一ms・開始後を個別に判定。
-        assert_eq!(
-            filled_ids(e.apply_market_event(&trades(&[1100, 1110, 1111]))),
-            [OrderId(2)]
+            filled_ids(e.advance_trade_watermark(1111).unwrap()),
+            [OrderId(1), OrderId(1), OrderId(2)]
         );
         e.cancel_orders("wrong_pair", vec![OrderId(2)]);
         assert_eq!(e.open_orders().len(), 1);
         e.cancel_orders("btc_jpy", vec![OrderId(2)]);
         e.advance_replay_time(1200).unwrap();
         e.place_order(order()).unwrap();
-        assert!(e.apply_market_event(&trades(&[1111, 1200])).is_empty());
+        e.apply_market_event(&trades(&[1111, 1200]));
+        e.apply_market_event(&trades(&[1201, 1202]));
         assert_eq!(
-            filled_ids(e.apply_market_event(&trades(&[1201, 1202]))),
+            filled_ids(e.advance_trade_watermark(1202).unwrap()),
             [OrderId(3), OrderId(3)]
         );
         assert!(e.open_orders().is_empty());
@@ -103,7 +98,8 @@ fn observed_exchange_book_time_is_a_floor_even_when_local_clock_lags() {
     e.apply_market_event(&book(1000));
     e.place_order(order()).unwrap();
     assert!(e.apply_market_event(&trades(&[1099, 1100])).is_empty());
-    assert_eq!(e.apply_market_event(&trades(&[1101])).len(), 1);
+    e.apply_market_event(&trades(&[1101]));
+    assert_eq!(e.advance_trade_watermark(1101).unwrap().len(), 1);
 }
 #[tokio::test]
 async fn realtime_venue_uses_acceptance_clock_without_recording_context() {
@@ -129,6 +125,7 @@ async fn realtime_venue_uses_acceptance_clock_without_recording_context() {
             1.into()
         );
         v.on_market_event(&trades(&[after + 1, after + 2])).unwrap();
+        v.advance_trade_watermark(after + 2).unwrap();
         assert!(
             v.account_snapshot("btc_jpy")
                 .await
@@ -198,6 +195,8 @@ async fn replay(recording: bool, slow: bool) -> (AccountSnapshot, Vec<PaperEvent
     .await;
     assert!(report.error.is_none(), "{:?}", report.error);
     assert_eq!(report.records, 4);
+    assert!(report.incomplete); // EOFはストリーム完了の証明にならない。
+    v.advance_trade_watermark(1300).unwrap(); // この合成入力の既知の完了境界。
     let account = v.account_snapshot("btc_jpy").await.unwrap();
     assert_eq!(
         account.open_orders[0].remaining_amount,

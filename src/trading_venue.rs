@@ -53,6 +53,14 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
         Ok(())
     }
 
+    /// paper/backtestの確定状態。終了時にも保存し、未確定評価を識別する。
+    fn paper_settlement_status(&self) -> Option<crate::paper_execution::PaperSettlementStatus> {
+        None
+    }
+
+    /// 切断・入力欠損をvenueに伝える。再接続後も評価の異常は残す。
+    fn mark_market_incomplete(&self, _reason: &str) {}
+
     fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
         None
     }
@@ -67,10 +75,17 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
     ) -> TradingVenueFuture<'a, ()>;
 
     /// ボットが戦略へ市場データを渡す前に呼ぶ処理。
-    /// paper tradingでは市場データから約定を判定し、注文と残高を更新する。
+    /// paper tradingでは公開約定を登録し、設定したwatermarkまで注文と残高を確定する。
     /// live tradingでは約定・残高を取引所が管理するため、ここでは何もしない。
     fn on_market_event(&self, _event: &MarketEvent) -> Result<(), TradingVenueError> {
         Ok(())
+    }
+
+    /// 欠損を記録しながら市場入力を継続するときの処理。
+    /// paper tradingでは執行の未確定状態だけを理由に配送を止めない。
+    /// 発注・確定の制限は解除せず、状態ロックなどの実行エラーは引き続き返す。
+    fn on_market_event_recovering(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+        self.on_market_event(event)
     }
 }
 

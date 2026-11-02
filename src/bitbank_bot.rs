@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 /// ボットが受け取る市場データ、またはユーザー定義のイベント。
-/// 市場データはまず `TradingVenue::on_market_event()` に渡し、その後で戦略に渡す。
-/// paper tradingでは、この順序により戦略がシミュレーションした約定後の注文・残高を参照できる。
+/// 市場データはまずvenueに渡し（復旧経路では `on_market_event_recovering`）、その後で戦略に渡す。
+/// paper tradingでは、この順序により戦略がwatermarkまで確定した注文・残高を参照できる。
 #[derive(Debug, Clone, PartialEq)]
 pub enum BotEvent<C = Infallible> {
     Market(MarketEvent),
@@ -76,8 +76,8 @@ impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
 }
 
 /// 市場データなどを受け取り、発注や取消を判断する処理。
-/// paper tradingの約定判定・残高更新は、ボットが `handle_event()` を呼ぶ前に行う。
-/// 戦略内で `TradingVenue::on_market_event()` を呼ぶ必要はない。
+/// paper tradingの約定登録と、設定したwatermarkまでの残高更新は `handle_event()` の前に行う。
+/// 戦略内でvenueへ市場データを再適用する必要はない。
 /// ユーザー定義のイベントを使わない場合はCustomEventにInfallibleを指定する。
 pub trait BotStrategy<V: TradingVenue = NoTradingVenue>: Send + 'static {
     type CustomEvent: Send + 'static;
@@ -140,10 +140,15 @@ where
                 _ = &mut shutdown_rx, if !stopping => { stopping = true; event_rx.close(); }
                 maybe_event = event_rx.recv() => {
                     let Some(event) = maybe_event else { break; };
-                    if let Err(err) = runner.process_live(event).await { return Err(format!("bot processing failed: {err:?}")); }
+                    if let Err(err) = runner.process_live(event).await {
+                        runner.venue().mark_market_incomplete("bot processing failed");
+                        runner.record_settlement();
+                        return Err(format!("bot processing failed: {err:?}"));
+                    }
                 }
             }
         }
+        runner.record_settlement();
         Ok(())
     });
 
@@ -653,9 +658,14 @@ mod tests {
         type Error = String;
         async fn handle_event(
             &mut self,
-            _event: BotEvent,
+            event: BotEvent,
             ctx: &BotContext<Infallible, crate::paper_execution::PaperTradingVenue>,
         ) -> Result<(), Self::Error> {
+            if let BotEvent::Market(MarketEvent::Transactions { transactions, .. }) = event {
+                let through = transactions.iter().map(|t| t.executed_at).max().unwrap();
+                // この合成入力では取引の完了境界が既知。
+                ctx.venue().advance_trade_watermark(through).unwrap();
+            }
             self.snapshots
                 .send(ctx.venue().account_snapshot("btc_jpy").await.unwrap())
                 .unwrap();
@@ -955,6 +965,14 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
     pub fn venue(&self) -> &V {
         &self.venue
     }
+    fn record_settlement(&self) {
+        if let Some(status) = self.venue.paper_settlement_status() {
+            log::info!("paper settlement at shutdown: {status:?}");
+            if let Some(recorder) = self.venue.recorder() {
+                recorder.record("paper_settlement", serde_json::json!(status));
+            }
+        }
+    }
     pub fn advance_time(&mut self, time_ms: i64) -> Result<(), BotRunError<S::Error>> {
         if self.last_time.is_some_and(|t| time_ms < t) {
             return Err(BotRunError::TimeReversed);
@@ -972,19 +990,34 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         event: BotEvent<S::CustomEvent>,
     ) -> Result<(), BotRunError<S::Error>> {
         self.advance_time(time_ms)?;
-        self.process_inner(Some(time_ms), input_id, event).await
+        self.process_inner(Some(time_ms), input_id, event, false)
+            .await
+    }
+    /// 欠損後も受信順に市場入力と戦略を処理する。
+    /// venueの執行保留は解除しない。入力変換・戦略などのエラーは引き続き返す。
+    pub async fn process_recovering(
+        &mut self,
+        time_ms: i64,
+        input_id: Option<InputId>,
+        event: BotEvent<S::CustomEvent>,
+    ) -> Result<(), BotRunError<S::Error>> {
+        self.advance_time(time_ms)?;
+        self.process_inner(Some(time_ms), input_id, event, true)
+            .await
     }
     async fn process_live(
         &mut self,
         event: BotEvent<S::CustomEvent>,
     ) -> Result<(), BotRunError<S::Error>> {
-        self.process_inner(None, None, event).await
+        // 接続の再確立はフィードが担当し、執行保留と戦略の生存は分ける。
+        self.process_inner(None, None, event, true).await
     }
     async fn process_inner(
         &mut self,
         time: Option<i64>,
         input_id: Option<InputId>,
         event: BotEvent<S::CustomEvent>,
+        recovery: bool,
     ) -> Result<(), BotRunError<S::Error>> {
         let mut queue = std::collections::VecDeque::from([(event, None)]);
         let mut count = 0;
@@ -1037,9 +1070,12 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                     );
                 }
                 if let BotEvent::Market(market) = &event {
-                    self.venue
-                        .on_market_event(market)
-                        .map_err(BotRunError::Venue)?;
+                    if recovery {
+                        self.venue.on_market_event_recovering(market)
+                    } else {
+                        self.venue.on_market_event(market)
+                    }
+                    .map_err(BotRunError::Venue)?;
                 }
                 self.strategy
                     .handle_event(event, &ctx)

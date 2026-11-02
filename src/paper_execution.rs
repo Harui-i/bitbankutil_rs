@@ -70,6 +70,11 @@ pub enum PaperEvent {
         order: DesiredLimitOrder,
         reason: PaperRejectReason,
     },
+    /// 取消を受け付けたが、残数量と資金解放はwatermarkまで未確定。
+    OrderCancelPending {
+        order_id: OrderId,
+        effective_at_ms: i64,
+    },
     OrderCancelled {
         order_id: OrderId,
         order: OpenOrder,
@@ -105,6 +110,8 @@ pub enum PaperRejectReason {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PaperExecutionError {
     InvalidClock,
+    InvalidWatermark,
+    InvalidTradeStream,
     PairMismatch {
         expected: String,
         actual: String,
@@ -122,6 +129,17 @@ pub enum PaperExecutionError {
     UnsupportedPair(String),
 }
 
+/// 確定境界と未確定状態。issuesがある評価は正常な損益として扱わない。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PaperSettlementStatus {
+    pub watermark_ms: Option<i64>,
+    pub max_trade_delay_ms: Option<i64>,
+    pub buffered_trades: usize,
+    pub pending_cancellations: usize,
+    pub unsettled: bool,
+    pub issues: Vec<String>,
+}
+
 /// メモリ上に保持する最近のpaperイベントの最大件数。
 pub const PAPER_EVENT_HISTORY_LIMIT: usize = 1024;
 
@@ -134,7 +152,7 @@ pub enum PaperClock {
 }
 
 /// 公開約定の数量を使ってmaker指値注文を執行するエンジン。
-/// 注文受付時計と観測済み板時刻の最大値より、厳密に新しい約定だけを適用する。
+/// 受信済み公開約定をwatermarkで確定し、注文の有効期間内の約定だけを適用する。
 /// 時刻・時計差の制約は `docs/paper-execution.md` を参照。
 #[derive(Debug, Clone)]
 pub struct PaperExecutionEngine {
@@ -142,6 +160,12 @@ pub struct PaperExecutionEngine {
     clock: PaperClock,
     effective_after: BTreeMap<OrderId, i64>,
     time_floor: i64,
+    cancel_at: BTreeMap<OrderId, i64>,
+    buffered_trades: BTreeMap<(i64, i64), MarketTrade>,
+    seen_trades: BTreeMap<i64, MarketTrade>,
+    watermark_ms: Option<i64>,
+    max_trade_delay_ms: Option<i64>,
+    settlement_issues: Vec<String>,
     base_asset: String,
     quote_asset: String,
     balances: BTreeMap<String, BalanceSnapshot>,
@@ -178,6 +202,12 @@ impl PaperExecutionEngine {
             clock,
             effective_after: BTreeMap::new(),
             time_floor: i64::MIN,
+            cancel_at: BTreeMap::new(),
+            buffered_trades: BTreeMap::new(),
+            seen_trades: BTreeMap::new(),
+            watermark_ms: None,
+            max_trade_delay_ms: None,
+            settlement_issues: Vec::new(),
             base_asset,
             quote_asset,
             balances,
@@ -190,7 +220,7 @@ impl PaperExecutionEngine {
             recorder.record(
                 "paper_initial_state",
                 serde_json::json!({
-                    "config": engine.config(), "clock": engine.clock, "model": "limit_price_trade_volume_v2",
+                    "config": engine.config(), "clock": engine.clock, "model": "limit_price_trade_volume_v3_watermark",
                     "balances": engine.balances(), "open_orders": engine.open_orders()
                 }),
             );
@@ -239,6 +269,9 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::from(reason));
         }
 
+        if !self.settlement_issues.is_empty() {
+            return Err(PaperExecutionError::InvalidTradeStream);
+        }
         let lock_result = self.lock_funds_for_order(&order);
         if let Err(err) = lock_result {
             self.record_event(PaperEvent::OrderRejected {
@@ -248,11 +281,7 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::from(err));
         }
 
-        let now_ms = match self.clock {
-            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
-            PaperClock::Replay { now_ms } => now_ms,
-        };
-        self.time_floor = self.time_floor.max(now_ms);
+        self.operation_time();
         let order_id = self.config.next_order_id;
         self.effective_after.insert(order_id, self.time_floor);
         self.config.next_order_id = OrderId(self.config.next_order_id.0 + 1);
@@ -282,65 +311,231 @@ impl PaperExecutionEngine {
         })
     }
 
+    /// 取消を即時有効化する。成功は受付を表し、資金解放はwatermark確定後。
+    /// 取消と同じmsに成立した取引は対象外（有効期間は開始・終了とも開区間）。
+    /// 封鎖済みwatermark以下への取消は挿入せず、最初の未確定ms以降へ有効化する。
     pub fn cancel_orders(&mut self, pair: &str, order_ids: Vec<OrderId>) {
+        let mut time = self.operation_time();
+        // 封鎖済みのmsに取消を挿入すると、先に確定した同msの部分約定と矛盾する。
+        if let Some(watermark) = self.watermark_ms {
+            let Some(first_unsealed_ms) = watermark.checked_add(1) else {
+                self.mark_incomplete("cancellation after terminal watermark");
+                return;
+            };
+            time = time.max(first_unsealed_ms);
+            self.time_floor = self.time_floor.max(time);
+        }
         for order_id in order_ids {
-            let Some(open_order) = self.open_orders.remove(&order_id) else {
+            let Some(order) = self.open_orders.get(&order_id) else {
                 continue;
             };
-
-            if open_order.pair != pair {
-                self.open_orders.insert(order_id, open_order);
+            if order.pair != pair || self.cancel_at.contains_key(&order_id) {
                 continue;
             }
-
-            self.effective_after.remove(&order_id);
-            self.unlock_funds_for_open_order(&open_order);
-            self.record_event(PaperEvent::OrderCancelled {
+            self.cancel_at.insert(order_id, time);
+            self.record_event(PaperEvent::OrderCancelPending {
                 order_id,
-                order: open_order,
+                effective_at_ms: time,
             });
         }
     }
 
+    fn operation_time(&mut self) -> i64 {
+        let now = match self.clock {
+            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
+            PaperClock::Replay { now_ms } => now_ms,
+        };
+        self.time_floor = self.time_floor.max(now);
+        // 確定済み時刻以前に新しい操作を挿入しない。
+        self.time_floor = self.time_floor.max(self.watermark_ms.unwrap_or(i64::MIN));
+        self.time_floor
+    }
+
+    /// 公開約定を受信順に登録する。約定・取消結果はwatermarkで確定する。
+    /// 同一IDの重複は無視し、内容衝突や確定済み境界への遅着は評価異常として記録する。
     pub fn apply_market_event(&mut self, event: &MarketEvent) -> Vec<PaperEvent> {
-        if let MarketEvent::DepthUpdated { pair, depth } = event {
-            if pair == &self.config.pair {
-                self.time_floor = self.time_floor.max(depth.last_timestamp());
+        let received_ms = match self.clock {
+            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
+            PaperClock::Replay { now_ms } => now_ms,
+        };
+        if let MarketEvent::DepthUpdated { pair, depth } = event
+            && pair == &self.config.pair
+        {
+            self.time_floor = self.time_floor.max(depth.last_timestamp());
+        }
+        if let MarketEvent::Transactions { pair, transactions } = event
+            && pair == &self.config.pair
+        {
+            for trade in transactions {
+                if let Some(previous) = self.seen_trades.get(&trade.transaction_id) {
+                    if previous != trade {
+                        self.mark_incomplete(format!(
+                            "conflicting transaction ID {}",
+                            trade.transaction_id
+                        ));
+                    }
+                    continue;
+                }
+                self.seen_trades.insert(trade.transaction_id, trade.clone());
+                if self.watermark_ms.is_some_and(|w| trade.executed_at <= w) {
+                    self.mark_incomplete(format!(
+                        "trade {} at {} arrived behind watermark",
+                        trade.transaction_id, trade.executed_at
+                    ));
+                    continue;
+                }
+                if self
+                    .max_trade_delay_ms
+                    .is_some_and(|delay| trade.executed_at < received_ms.saturating_sub(delay))
+                {
+                    self.mark_incomplete(format!(
+                        "trade {} exceeded configured delay",
+                        trade.transaction_id
+                    ));
+                    continue;
+                }
+                if trade.amount <= Decimal::ZERO || trade.price <= Decimal::ZERO {
+                    self.mark_incomplete(format!("invalid trade {}", trade.transaction_id));
+                    continue;
+                }
+                self.buffered_trades
+                    .insert((trade.executed_at, trade.transaction_id), trade.clone());
             }
         }
-        let MarketEvent::Transactions { pair, transactions } = event else {
-            return Vec::new();
-        };
-        if pair != &self.config.pair {
-            return Vec::new();
+        if let Some(delay) = self.max_trade_delay_ms {
+            let boundary = received_ms.saturating_sub(delay).saturating_sub(1);
+            if self.watermark_ms.is_none_or(|w| boundary >= w) {
+                return self.advance_trade_watermark(boundary).unwrap_or_default();
+            }
         }
+        Vec::new()
+    }
 
+    /// `executed_at <= through_ms` の全公開約定を受信済みと呼び出し元が保証する。
+    /// 板時刻や単なるEOFはこの保証にならない。保証違反後は確定を停止する。
+    /// 成立時刻・同msではtransaction ID順で処理し、約定後に取消残数量を解放する。
+    pub fn advance_trade_watermark(
+        &mut self,
+        through_ms: i64,
+    ) -> Result<Vec<PaperEvent>, PaperExecutionError> {
+        if self.watermark_ms.is_some_and(|w| through_ms < w) {
+            return Err(PaperExecutionError::InvalidWatermark);
+        }
+        if !self.settlement_issues.is_empty() {
+            return Err(PaperExecutionError::InvalidTradeStream);
+        }
         let mut events = Vec::new();
-        for trade in transactions {
-            let mut remaining_trade_amount = trade.amount;
-            let fill_order_ids = self.fill_order_ids_for_trade(trade);
-            for order_id in fill_order_ids {
-                if remaining_trade_amount <= Decimal::ZERO {
+        while self
+            .buffered_trades
+            .first_key_value()
+            .is_some_and(|(key, _)| key.0 <= through_ms)
+        {
+            let (_, trade) = self.buffered_trades.pop_first().unwrap();
+            let mut remaining = trade.amount;
+            for order_id in self.fill_order_ids_for_trade(&trade) {
+                if remaining <= Decimal::ZERO {
                     break;
                 }
-
-                let Some(open_order) = self.open_orders.remove(&order_id) else {
-                    continue;
-                };
-
-                let fill_amount = open_order.remaining_amount.min(remaining_trade_amount);
-                let event = self.fill_open_order(open_order, trade.clone(), fill_amount);
-                remaining_trade_amount -= fill_amount;
+                let order = self.open_orders.remove(&order_id).unwrap();
+                let amount = order.remaining_amount.min(remaining);
+                let event = self.fill_open_order(order, trade.clone(), amount);
+                remaining -= amount;
                 self.record_event(event.clone());
                 events.push(event);
             }
         }
+        self.watermark_ms = Some(through_ms);
+        events.extend(self.finalize_cancellations());
+        self.record_settlement();
+        Ok(events)
+    }
 
+    fn finalize_cancellations(&mut self) -> Vec<PaperEvent> {
+        if !self.settlement_issues.is_empty() {
+            return Vec::new();
+        }
+        let ids: Vec<_> = self
+            .cancel_at
+            .iter()
+            .filter(|(_, t)| self.watermark_ms.is_some_and(|w| **t <= w))
+            .map(|(id, _)| *id)
+            .collect();
+        let mut events = Vec::new();
+        for id in ids {
+            self.cancel_at.remove(&id);
+            self.effective_after.remove(&id);
+            if let Some(order) = self.open_orders.remove(&id) {
+                self.unlock_funds_for_open_order(&order);
+                let event = PaperEvent::OrderCancelled {
+                    order_id: id,
+                    order,
+                };
+                self.record_event(event.clone());
+                events.push(event);
+            }
+        }
         events
     }
 
+    /// 有限遅延を仮定して自動確定する場合だけ明示設定する。既定では自動確定しない。
+    /// 境界は受信時計 - delay - 1ms。これは取引所の保証ではなく利用者の仮定。
+    pub fn with_max_trade_delay_ms(mut self, delay: i64) -> Result<Self, PaperExecutionError> {
+        if delay < 0 {
+            return Err(PaperExecutionError::InvalidWatermark);
+        }
+        self.max_trade_delay_ms = Some(delay);
+        if let Some(r) = &self.recorder {
+            r.record(
+                "paper_delay_assumption",
+                serde_json::json!({"max_trade_delay_ms": delay}),
+            );
+        }
+        Ok(self)
+    }
+
+    /// 切断・欠損を記録し、以降の確定と新規注文を停止する。再接続だけでは解除しない。
+    pub fn mark_incomplete(&mut self, reason: impl Into<String>) {
+        self.settlement_issues.push(reason.into());
+        self.record_settlement();
+    }
+
+    /// 終了時にも取得・保存する。未確定残高を確定済み損益へ混ぜない。
+    pub fn settlement_status(&self) -> PaperSettlementStatus {
+        let now = match self.clock {
+            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
+            PaperClock::Replay { now_ms } => now_ms,
+        };
+        PaperSettlementStatus {
+            watermark_ms: self.watermark_ms,
+            max_trade_delay_ms: self.max_trade_delay_ms,
+            buffered_trades: self.buffered_trades.len(),
+            pending_cancellations: self.cancel_at.len(),
+            unsettled: !self.settlement_issues.is_empty()
+                || !self.buffered_trades.is_empty()
+                || !self.cancel_at.is_empty()
+                || self
+                    .watermark_ms
+                    .is_none_or(|w| w < now.max(self.time_floor)),
+            issues: self.settlement_issues.clone(),
+        }
+    }
+
+    fn record_settlement(&self) {
+        if let Some(r) = &self.recorder {
+            r.record(
+                "paper_settlement",
+                serde_json::json!(self.settlement_status()),
+            );
+        }
+    }
+
+    /// 取消受付済み注文を除く。取消確定待ちの拘束資金はbalancesに残る。
     pub fn open_orders(&self) -> Vec<OpenOrder> {
-        self.open_orders.values().cloned().collect()
+        self.open_orders
+            .values()
+            .filter(|o| !self.cancel_at.contains_key(&o.order_id))
+            .cloned()
+            .collect()
     }
 
     pub fn balances(&self) -> Vec<BalanceSnapshot> {
@@ -405,7 +600,12 @@ impl PaperExecutionEngine {
             .open_orders
             .values()
             .filter(|order| {
-                trade.executed_at > self.effective_after[&order.order_id]
+                order.remaining_amount > Decimal::ZERO
+                    && trade.executed_at > self.effective_after[&order.order_id]
+                    && self
+                        .cancel_at
+                        .get(&order.order_id)
+                        .is_none_or(|t| trade.executed_at < *t)
                     && order_matches_trade(order, trade)
             })
             .cloned()
@@ -466,10 +666,11 @@ impl PaperExecutionEngine {
         let price = open_order
             .price
             .expect("paper engine limit order must have price");
-        if open_order.remaining_amount > Decimal::ZERO {
+        if open_order.remaining_amount > Decimal::ZERO || self.cancel_at.contains_key(&order_id) {
             self.open_orders.insert(order_id, open_order);
         } else {
             self.effective_after.remove(&order_id);
+            self.cancel_at.remove(&order_id);
         }
 
         PaperEvent::OrderFilled {
@@ -511,12 +712,40 @@ impl PaperTradingVenue {
         Self { engine }
     }
 
+    /// 受信完了を保証できた境界を確定し、約定・取消イベントを返す。
+    pub fn advance_trade_watermark(
+        &self,
+        through_ms: i64,
+    ) -> Result<Vec<PaperEvent>, TradingVenueError> {
+        self.engine
+            .lock()
+            .map_err(|_| TradingVenueError::StatePoisoned)?
+            .advance_trade_watermark(through_ms)
+            .map_err(TradingVenueError::Paper)
+    }
+
     pub fn engine(&self) -> Arc<Mutex<PaperExecutionEngine>> {
         self.engine.clone()
     }
 }
 
 impl TradingVenue for PaperTradingVenue {
+    fn paper_settlement_status(&self) -> Option<PaperSettlementStatus> {
+        Some(
+            self.engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .settlement_status(),
+        )
+    }
+
+    fn mark_market_incomplete(&self, reason: &str) {
+        self.engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_incomplete(reason);
+    }
+
     fn advance_replay_time(&self, time_ms: i64) -> Result<(), TradingVenueError> {
         self.engine
             .lock()
@@ -606,10 +835,25 @@ impl TradingVenue for PaperTradingVenue {
     }
 
     fn on_market_event(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|_| TradingVenueError::StatePoisoned)?;
+        engine.apply_market_event(event);
+        if !engine.settlement_issues.is_empty() {
+            return Err(TradingVenueError::Paper(
+                PaperExecutionError::InvalidTradeStream,
+            ));
+        }
+        Ok(())
+    }
+
+    fn on_market_event_recovering(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
         self.engine
             .lock()
             .map_err(|_| TradingVenueError::StatePoisoned)?
             .apply_market_event(event);
+        // issuesは維持する。入力の継続は約定確定・資金解放・新規注文の再開ではない。
         Ok(())
     }
 }
@@ -908,6 +1152,7 @@ mod tests {
         engine.drain_events();
 
         engine.cancel_orders("btc_jpy", vec![OrderId(1), OrderId(999)]);
+        engine.advance_trade_watermark(0).unwrap();
 
         assert!(engine.open_orders().is_empty());
         assert_eq!(
@@ -917,10 +1162,13 @@ mod tests {
         assert_eq!(balance_of(&engine, "jpy").locked_amount, Decimal::ZERO);
         assert!(matches!(
             engine.drain_events().as_slice(),
-            [PaperEvent::OrderCancelled {
-                order_id: OrderId(1),
-                ..
-            }]
+            [
+                PaperEvent::OrderCancelPending { .. },
+                PaperEvent::OrderCancelled {
+                    order_id: OrderId(1),
+                    ..
+                }
+            ]
         ));
     }
 
@@ -936,12 +1184,13 @@ mod tests {
             .unwrap();
         engine.drain_events();
 
-        let events = engine.apply_market_event(&transactions(vec![trade(
+        engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Buy,
             Decimal::new(1, 1),
             Decimal::new(5_100_000, 0),
             10,
         )]));
+        let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
         assert!(engine.open_orders().is_empty());
         assert_eq!(balance_of(&engine, "btc").locked_amount, Decimal::ZERO);
@@ -975,12 +1224,13 @@ mod tests {
             .unwrap();
         engine.drain_events();
 
-        let events = engine.apply_market_event(&transactions(vec![trade(
+        engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
             Decimal::new(1, 1),
             Decimal::new(4_900_000, 0),
             11,
         )]));
+        let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
         assert!(engine.open_orders().is_empty());
         assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(1, 1));
@@ -1017,12 +1267,13 @@ mod tests {
             .unwrap();
         engine.drain_events();
 
-        let events = engine.apply_market_event(&transactions(vec![trade(
+        engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
             Decimal::new(1, 1),
             Decimal::new(5_000_000, 0),
             12,
         )]));
+        let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
         assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(1, 1));
         assert_eq!(balance_of(&engine, "jpy").locked_amount, Decimal::ZERO);
@@ -1108,7 +1359,7 @@ mod tests {
             .unwrap();
         engine.drain_events();
 
-        let events = engine.apply_market_event(&MarketEvent::Transactions {
+        engine.apply_market_event(&MarketEvent::Transactions {
             pair: "eth_jpy".to_owned(),
             transactions: vec![trade(
                 OrderSide::Buy,
@@ -1118,6 +1369,7 @@ mod tests {
             )],
         });
 
+        let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
         assert_eq!(
             balance_of(&engine, "jpy").free_amount,
             Decimal::new(500_100, 0)
@@ -1156,12 +1408,13 @@ mod tests {
             .unwrap();
         engine.drain_events();
 
-        let events = engine.apply_market_event(&transactions(vec![trade(
+        engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
             Decimal::new(3, 1),
             Decimal::new(4_800_000, 0),
             30,
         )]));
+        let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
         let fill_ids = events
             .into_iter()
@@ -1195,11 +1448,13 @@ mod tests {
 
         let engine = executor.engine();
         let mut engine = engine.lock().unwrap();
+        engine.advance_trade_watermark(0).unwrap();
         assert!(engine.open_orders().is_empty());
         assert!(matches!(
             engine.drain_events().as_slice(),
             [
                 PaperEvent::OrderAccepted { .. },
+                PaperEvent::OrderCancelPending { .. },
                 PaperEvent::OrderCancelled { .. }
             ]
         ));
@@ -1244,12 +1499,13 @@ mod tests {
         }
         engine.drain_events();
 
-        let events = engine.apply_market_event(&transactions(vec![trade(
+        engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
             Decimal::new(8, 2),
             Decimal::new(5_000_000, 0),
             40,
         )]));
+        let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
         assert!(matches!(
             events.as_slice(),
