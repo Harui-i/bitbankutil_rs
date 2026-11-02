@@ -19,6 +19,7 @@ impl TradingVenue for ProbeVenue {
             self.calls.lock().unwrap().push("snapshot");
             self.snapshot_read.notify_one();
             Ok(bitbankutil_rs::trading_venue::AccountSnapshot {
+                query: None,
                 open_orders: vec![],
                 balances: vec![
                     BalanceSnapshot {

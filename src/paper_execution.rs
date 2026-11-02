@@ -175,6 +175,8 @@ pub struct PaperSettlementStatus {
     pub pending_operations: usize,
     pub latency_model: PaperLatencyConfig,
     pub pending_operation_details: Vec<serde_json::Value>,
+    /// 未確定の採取状態を応答した履歴。後のwatermarkで消さない。
+    pub uncertain_query_observations: usize,
     pub unsettled: bool,
     pub issues: Vec<String>,
 }
@@ -207,6 +209,7 @@ pub struct PaperExecutionEngine {
     watermark_ms: Option<i64>,
     max_trade_delay_ms: Option<i64>,
     settlement_issues: Vec<String>,
+    uncertain_query_observations: usize,
     base_asset: String,
     quote_asset: String,
     balances: BTreeMap<String, BalanceSnapshot>,
@@ -256,6 +259,7 @@ impl PaperExecutionEngine {
             watermark_ms: None,
             max_trade_delay_ms: None,
             settlement_issues: Vec::new(),
+            uncertain_query_observations: 0,
             base_asset,
             quote_asset,
             balances,
@@ -583,7 +587,6 @@ impl PaperExecutionEngine {
 
     /// 終了時にも取得・保存する。未確定残高を確定済み損益へ混ぜない。
     pub fn settlement_status(&self) -> PaperSettlementStatus {
-        let now = self.exchange_now_ms();
         PaperSettlementStatus {
             time_model: self.config.time_model,
             watermark_ms: self.watermark_ms,
@@ -593,14 +596,21 @@ impl PaperExecutionEngine {
             pending_operations: 0,
             latency_model: PaperLatencyConfig::default(),
             pending_operation_details: Vec::new(),
-            unsettled: !self.settlement_issues.is_empty()
-                || !self.buffered_trades.is_empty()
-                || !self.cancel_at.is_empty()
-                || self
-                    .watermark_ms
-                    .is_none_or(|w| now.map_or(true, |now| w < now.max(self.time_floor))),
+            uncertain_query_observations: self.uncertain_query_observations,
+            unsettled: self.current_unsettled() || self.uncertain_query_observations > 0,
             issues: self.settlement_issues.clone(),
         }
+    }
+
+    /// 現在の採取値の未確定性。評価全体の履歴とは分離する。
+    fn current_unsettled(&self) -> bool {
+        let now = self.exchange_now_ms();
+        !self.settlement_issues.is_empty()
+            || !self.buffered_trades.is_empty()
+            || !self.cancel_at.is_empty()
+            || self
+                .watermark_ms
+                .is_none_or(|w| now.map_or(true, |now| w < now.max(self.time_floor)))
     }
 
     fn record_settlement(&self) {

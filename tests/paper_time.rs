@@ -219,7 +219,9 @@ async fn replay(recording: bool, slow: bool, delta: i64) -> (AccountSnapshot, Ve
     assert_eq!(report.settlement.as_ref().unwrap().time_model, model(delta));
     assert!(report.incomplete); // EOFはストリーム完了の証明にならない。
     v.advance_trade_watermark(1300).unwrap(); // この合成入力の既知の完了境界。
-    let account = v.account_snapshot("btc_jpy").await.unwrap();
+    let mut account = v.account_snapshot("btc_jpy").await.unwrap();
+    // 比較対象は取引結果。ローカル採取時刻のδ依存は照会の専用テストで検証する。
+    account.query = None;
     assert_eq!(
         account.open_orders[0].remaining_amount,
         rust_decimal::Decimal::new(5, 1)

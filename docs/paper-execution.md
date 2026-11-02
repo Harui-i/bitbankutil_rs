@@ -54,6 +54,8 @@ usでの入力順はms変換後も維持します。同msの複数操作・入�
 let venue = PaperTradingVenue::with_latency(engine, PaperLatencyConfig {
     placement: PaperOperationLatency { entry_ms: 50, response_ms: 50 },
     cancellation: PaperOperationLatency { entry_ms: 150, response_ms: 50 },
+    orders_query: PaperOperationLatency { entry_ms: 20, response_ms: 40 },
+    balances_query: PaperOperationLatency { entry_ms: 40, response_ms: 40 },
     notification_ms: 20,
 })?;
 ```
@@ -76,7 +78,40 @@ let venue = PaperTradingVenue::with_latency(engine, PaperLatencyConfig {
 ローカル口座の状態通知は取引所状態遷移の順序を保つスナップショット列です。先行する未通知の受付があると、
 後続の口座通知もその時刻以降まで待ちます。これは口座状態の一貫したprefixを公開するための明示的な簡略化です。
 REST応答の完了順と口座通知の公開順は別で、遅い先行通知により後続の口座反映が遅れることがあります。
-口座照会の要求・採取・応答それぞれの遅延はまだモデル化しておらず、`account_snapshot` はこのローカル状態を返します。
+この通知用キャッシュは `known_account_snapshot()` で読み出せます。REST照会の
+`account_snapshot()` は以下の別経路を使い、キャッシュへ照会結果を書き戻しません。
+
+### 注文一覧・残高の照会
+
+`PaperLatencyConfig.orders_query` / `balances_query` にそれぞれ
+`PaperOperationLatency { entry_ms, response_ms }` を設定します。`entry_ms` は要求から
+取引所で採取するまで、`response_ms` は実際の採取からローカル応答までの非負整数msです。
+既定は0です。実APIと同じく2照会を並行開始し、両応答がそろってから
+`account_snapshot()` が返ります。片方が失敗しても、他方の送信済み要求を消しません。
+
+採取時点でエンジンが把握している注文一覧・残高をそれぞれ凍結し、応答時に最新状態へ
+差し替えません。両採取時刻は異なり得るため、返却値は原子的な口座snapshotではありません。
+注文応答や非同期通知より先に、照会から取引所で受付済みの注文を知ることもあります。
+古い照会結果は呼び出し元へ返すだけで、通知用キャッシュを巻き戻しません。
+
+返却値の `AccountSnapshot.query` は、各照会の要求ID、ローカル要求・採取・応答時刻、
+取引所採取時刻、採取時点のwatermark・`unsettled`・`issues` を保持します。
+採取イベントの記録では `received_local_ms` はまだNone、応答後の返却値ではSomeです。
+合成完了時刻も別に残します。実APIではサーバー内の採取時刻が分からないため、queryはNoneです。
+
+公開約定の通知が遅れている間、採取時点の真の取引所口座を再現できるとは保証しません。
+採取時点で既知の状態を返す簡略化であり、未確定ならmetadataも未確定のままです。
+後から届いた取引で返却済みsnapshotを書き換えず、未来情報を先に登録して確定もしません。
+未確定な採取値を応答した件数を `settlement_status().uncertain_query_observations` に累積し、
+後のwatermarkが追いついてもその評価の `unsettled` を解除しません。この履歴を含む評価を
+無条件に確定した損益として扱わないでください。件数は端点ごとの応答数で、実際に戦略が
+値を使用したかまでは判定しません。キャッシュの即時読出しを実取引所照会とは扱いません。
+
+`paper_query_requested` / `paper_query_sampled` / `paper_query_response` /
+`paper_query_completed` を既存の実行記録へ保存します。記録無効でも同じ状態遷移です。
+待機中も市場・注文処理は進みますが、同一戦略の次のハンドラーは逐次配送されます。
+paperのタイマーが遅れた場合は実際の採取時刻から応答遅延を数え、過去へ遡りません。
+EOFや評価境界では未採取・未応答の照会を保留し、既存の残存操作一覧へ残します。
 
 送信中の要求に対するローカルでの資金予約は行いません。取引所の資金判定は有効化順に直列化するので、
 同じ資金を見て送った競合要求は一方が拒否され得ます。失敗も発注応答の期限で返り、二重拘束は行いません。

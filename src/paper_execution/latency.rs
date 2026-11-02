@@ -2,6 +2,8 @@
 use super::*;
 use std::task::Waker;
 use tokio::sync::oneshot;
+mod query;
+use query::QueryEvent;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperOperationLatency {
@@ -13,6 +15,8 @@ pub struct PaperOperationLatency {
 pub struct PaperLatencyConfig {
     pub placement: PaperOperationLatency,
     pub cancellation: PaperOperationLatency,
+    pub orders_query: PaperOperationLatency,
+    pub balances_query: PaperOperationLatency,
     /// watermarkで確定できた状態変化からローカル通知までの遅延。
     pub notification_ms: i64,
 }
@@ -24,6 +28,10 @@ impl PaperLatencyConfig {
             self.placement.response_ms,
             self.cancellation.entry_ms,
             self.cancellation.response_ms,
+            self.orders_query.entry_ms,
+            self.orders_query.response_ms,
+            self.balances_query.entry_ms,
+            self.balances_query.response_ms,
             self.notification_ms,
         ]
         .into_iter()
@@ -37,6 +45,7 @@ impl PaperLatencyConfig {
 
 #[derive(Debug)]
 enum Internal {
+    Query(QueryEvent),
     Place {
         id: u64,
         order: DesiredLimitOrder,
@@ -169,6 +178,7 @@ fn snapshot(engine: &PaperExecutionEngine) -> AccountSnapshot {
     AccountSnapshot {
         open_orders: engine.open_orders(),
         balances: engine.balances(),
+        query: None,
     }
 }
 fn local_now(engine: &PaperExecutionEngine) -> Result<i64, TradingVenueError> {
@@ -237,6 +247,12 @@ impl PaperTradingVenue {
 
     pub fn latency_config(&self) -> PaperLatencyConfig {
         self.state.lock().unwrap().latency
+    }
+
+    /// 応答・通知で既知となった口座キャッシュ。REST照会とは別の読み出し。
+    /// 照会結果をこのキャッシュへ書き戻さず、古い応答による巻き戻しを防ぐ。
+    pub fn known_account_snapshot(&self) -> AccountSnapshot {
+        self.state.lock().unwrap().local.clone()
     }
 
     pub fn pending_operations(&self) -> Vec<serde_json::Value> {
@@ -501,6 +517,7 @@ impl TradingVenue for PaperTradingVenue {
                 context,
                 || -> Result<(), TradingVenueError> {
                     match event {
+                        Internal::Query(event) => query::process(&mut s, &mut e, event, executed)?,
                         Internal::Place {
                             id,
                             order,
@@ -622,26 +639,7 @@ impl TradingVenue for PaperTradingVenue {
                 recorder.as_ref(),
                 "account_snapshot",
                 serde_json::json!({"pair":pair}),
-                async move {
-                    self.drive_now()?;
-                    let s = self
-                        .state
-                        .lock()
-                        .map_err(|_| TradingVenueError::StatePoisoned)?;
-                    let e = self
-                        .engine
-                        .lock()
-                        .map_err(|_| TradingVenueError::StatePoisoned)?;
-                    if pair != e.config.pair {
-                        return Err(TradingVenueError::Paper(
-                            PaperExecutionError::PairMismatch {
-                                expected: e.config.pair.clone(),
-                                actual: pair.into(),
-                            },
-                        ));
-                    }
-                    Ok(s.local.clone())
-                },
+                async move { self.query_account(pair).await },
             )
             .await
         })
