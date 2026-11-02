@@ -105,6 +105,11 @@ async fn demo(
         },
     )
     .await;
+    // fixtureのこの区間では、ここまでに成立した取引がすべて収録済みと分かっている。
+    // 一般のcaptureのEOFにこの保証はない。
+    venue
+        .advance_trade_watermark(1_793_113_200_030)
+        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     let account = venue
         .account_snapshot("btc_jpy")
         .await
@@ -116,11 +121,15 @@ async fn demo(
         )
         .await
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+    // 同msの確定後に出した取消は次の未確定msに有効になる。
+    venue
+        .advance_trade_watermark(1_793_113_200_031)
+        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     let final_account = venue
         .account_snapshot("btc_jpy")
         .await
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    recorder.record("replay_finished",json!({"error":report.error,"incomplete":report.incomplete,"interrupted":report.interrupted,"records":report.records,"final_account":final_account}));
+    recorder.record("replay_finished",json!({"error":report.error,"incomplete":report.incomplete,"interrupted":report.interrupted,"records":report.records,"final_account":final_account,"settlement":venue.paper_settlement_status()}));
     recorder.finish()?;
     if let Some(error) = report.error {
         return Err(std::io::Error::other(error).into());
@@ -155,12 +164,7 @@ mod tests {
                     .filter(|r| r.kind == "market_event" || r.kind == "custom_event")
                     .all(|r| r.input_id.is_some() && r.event_time_ms.is_some())
             );
-            assert!(
-                records
-                    .iter()
-                    .filter(|r| r.kind == "paper_event" && r.data.to_string().contains("Fill"))
-                    .all(|r| r.input_id.is_some())
-            );
+            assert!(records.iter().any(|r| r.kind == "paper_settlement"));
             results.push((serde_json::to_value(account).unwrap(), events));
             std::fs::remove_file(path).unwrap();
         }

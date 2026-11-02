@@ -335,6 +335,7 @@ pub struct ReplayGap {
 }
 #[derive(Debug, Default, serde::Serialize)]
 pub struct ReplayReport {
+    pub settlement: Option<crate::paper_execution::PaperSettlementStatus>,
     pub records: usize,
     pub incomplete: bool,
     pub interrupted: bool,
@@ -448,6 +449,9 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
         }
 
         if matches!(record.payload, CapturePayload::Disconnected { .. }) {
+            runner
+                .venue()
+                .mark_market_incomplete("replay input disconnected");
             report.incomplete = true;
             let reason = match &record.payload {
                 CapturePayload::Disconnected { reason } => reason.clone(),
@@ -500,6 +504,13 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
         }
         report.records += 1;
     }
+    if report.error.is_some() || report.interrupted {
+        runner
+            .venue()
+            .mark_market_incomplete("replay error or interruption");
+    }
+    report.settlement = runner.venue().paper_settlement_status();
+    report.incomplete |= report.settlement.as_ref().is_some_and(|s| s.unsettled);
     if let Some(recorder) = runner.venue().recorder() {
         recorder.record("replay_outcome", serde_json::json!(&report));
     }

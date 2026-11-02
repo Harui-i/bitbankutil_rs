@@ -282,6 +282,7 @@ fn paper_venue(
     pair: &str,
     base_initial: Decimal,
     jpy_initial: Decimal,
+    max_trade_delay_ms: i64,
 ) -> Result<PaperTradingVenue, String> {
     if base_initial < Decimal::ZERO || jpy_initial < Decimal::ZERO {
         return Err("paper initial balances must be non-negative".to_owned());
@@ -311,7 +312,12 @@ fn paper_venue(
         balances,
         None,
     )
+    .map_err(|err| format!("{err:?}"))?
+    .with_max_trade_delay_ms(max_trade_delay_ms)
     .map_err(|err| format!("{err:?}"))?;
+    log::info!(
+        "paper assumes max trade delay {max_trade_delay_ms} ms; stream completeness is unverified"
+    );
     Ok(PaperTradingVenue::new(engine))
 }
 
@@ -326,7 +332,7 @@ async fn main() {
     let mode = args.get(1).map(String::as_str);
     let expected_len = match mode {
         Some("--live") => 7,
-        Some("--paper") => 9,
+        Some("--paper") => 10,
         _ => 0,
     };
     if args.len() != expected_len {
@@ -334,7 +340,7 @@ async fn main() {
             "usage: cargo run --example best_mm -- --live PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT"
         );
         log::error!(
-            "   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL"
+            "   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL MAX_TRADE_DELAY_MS"
         );
         std::process::exit(2);
     }
@@ -371,7 +377,9 @@ async fn main() {
         Some("--paper") => {
             let base_initial: Decimal = args[7].parse().expect("invalid base initial balance");
             let jpy_initial: Decimal = args[8].parse().expect("invalid JPY initial balance");
-            let venue = paper_venue(&pair, base_initial, jpy_initial).expect("invalid paper setup");
+            let max_trade_delay_ms = args[9].parse().expect("invalid max trade delay");
+            let venue = paper_venue(&pair, base_initial, jpy_initial, max_trade_delay_ms)
+                .expect("invalid paper setup");
             let engine = venue.engine();
             let runtime = spawn_bot(
                 venue,
@@ -391,10 +399,12 @@ async fn main() {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if let Some(engine) = &paper_engine {
             // 各イベントは記録時にログ出力済み。取得済みの履歴を定期的に破棄する。
-            engine
-                .lock()
-                .expect("paper engine lock poisoned")
-                .drain_events();
+            let mut engine = engine.lock().expect("paper engine lock poisoned");
+            engine.drain_events();
+            log::debug!(
+                "paper settlement (provisional): {:?}",
+                engine.settlement_status()
+            );
         }
     }
 }

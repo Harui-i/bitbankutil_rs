@@ -261,9 +261,11 @@ pub(crate) mod tests {
             }],
         })
         .unwrap();
+        v.advance_trade_watermark(123).unwrap();
         v.cancel_orders("btc_jpy", vec![placed.order_id.unwrap()])
             .await
             .unwrap();
+        v.advance_trade_watermark(124).unwrap();
         let account = v.account_snapshot("btc_jpy").await.unwrap();
         assert!(account.open_orders.is_empty());
         assert_eq!(

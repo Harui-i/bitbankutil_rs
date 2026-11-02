@@ -65,10 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }],
         })
         .unwrap();
+    venue.advance_trade_watermark(1).unwrap(); // 合成入力の完了境界
     venue
         .cancel_orders("btc_jpy", vec![placed.order_id.unwrap()])
         .await
         .unwrap();
+    venue.advance_trade_watermark(2).unwrap(); // 取消を含む次のmsまで合成入力は完了
     let mut rejected = order;
     rejected.amount = Decimal::from(1000);
     assert!(venue.place_order(rejected.into()).await.is_err());
