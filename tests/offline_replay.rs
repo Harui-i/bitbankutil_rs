@@ -680,6 +680,7 @@ fn paper_recovery_venue() -> bitbankutil_rs::paper_execution::PaperTradingVenue 
             .collect(),
         None,
     )
+    .map(|engine| seeded_engine(engine, 0))
     .unwrap();
     engine
         .place_order(DesiredLimitOrder::limit(
@@ -798,4 +799,20 @@ async fn paper_recovery_preserves_input_validation_and_strategy_errors_after_rec
         assert_eq!(report.gaps.len(), 1);
         assert!(report.settlement.unwrap().unsettled);
     }
+}
+
+// 合成の時刻/資金fixture用。注文をspread内に置き、先行数量を0にする。
+fn seeded_engine(
+    mut engine: bitbankutil_rs::paper_execution::PaperExecutionEngine,
+    exchange_ms: i64,
+) -> bitbankutil_rs::paper_execution::PaperExecutionEngine {
+    engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
+        pair: "btc_jpy".into(),
+        depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
+            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            exchange_ms,
+        ),
+    });
+    engine
 }

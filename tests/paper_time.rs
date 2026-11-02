@@ -22,6 +22,11 @@ fn model(delta: i64) -> PaperTimeModel {
     }
 }
 fn offset_engine(clock: PaperClock, recording: bool, delta: i64) -> PaperExecutionEngine {
+    let initial_local_ms = match &clock {
+        PaperClock::Replay { now_ms } => *now_ms,
+        PaperClock::Realtime => bitbankutil_rs::execution_recording::timestamp_ms() as i64,
+    };
+    let exchange_ms = initial_local_ms.checked_add(delta).unwrap();
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
     config.time_model = model(delta);
     PaperExecutionEngine::new(
@@ -38,6 +43,7 @@ fn offset_engine(clock: PaperClock, recording: bool, delta: i64) -> PaperExecuti
             .collect(),
         recording.then(|| ExecutionRecorder::new("time", json!({}), JsonlSink(std::io::sink()))),
     )
+    .map(|engine| seeded_engine(engine, exchange_ms))
     .unwrap()
 }
 fn order() -> DesiredLimitOrder {
@@ -61,7 +67,11 @@ fn trades(times: &[i64]) -> MarketEvent {
 fn book(time: i64) -> MarketEvent {
     MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
-        depth: MarketDepthSnapshot::new(BTreeMap::new(), BTreeMap::new(), time),
+        depth: MarketDepthSnapshot::new(
+            BTreeMap::from([(1_000_000.into(), 1.0)]),
+            BTreeMap::from([(1.into(), 1.0)]),
+            time,
+        ),
     }
 }
 fn filled_ids(events: Vec<PaperEvent>) -> Vec<OrderId> {
@@ -187,7 +197,7 @@ async fn replay(recording: bool, slow: bool, delta: i64) -> (AccountSnapshot, Ve
         (
             1110,
             json!({"kind":"message", "message":["message", {"room_name":"depth_whole_btc_jpy", "message":{"data":{
-                "asks":[],"bids":[],"asks_over":"0","bids_under":"0","asks_under":"0","bids_over":"0","ask_market":"0","bid_market":"0","timestamp":1100,"sequenceId":"1"
+                "asks":[["1000000","1"]],"bids":[["1","1"]],"asks_over":"0","bids_under":"0","asks_under":"0","bids_over":"0","ask_market":"0","bid_market":"0","timestamp":1100,"sequenceId":"1"
             }}}]}),
         ),
         (
@@ -415,6 +425,7 @@ async fn recording_preserves_local_context_and_exchange_times_with_model() {
             initial.balances(),
             Some(recorder.clone()),
         )
+        .map(|engine| seeded_engine(engine, 1000))
         .unwrap();
         scope(
             RecordingContext {
@@ -459,4 +470,17 @@ async fn recording_preserves_local_context_and_exchange_times_with_model() {
         );
         assert_eq!(status.data["watermark_ms"], 1001);
     }
+}
+
+// 時刻・資金の回帰fixture。注文価格をspread内に置き、先行数量を0にする。
+fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExecutionEngine {
+    engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
+        pair: "btc_jpy".into(),
+        depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
+            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            exchange_ms,
+        ),
+    });
+    engine
 }

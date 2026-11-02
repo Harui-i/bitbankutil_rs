@@ -527,6 +527,22 @@ pub async fn forward_bitbank_messages<E>(
 
 #[cfg(test)]
 mod tests {
+    // 合成の時刻/資金fixture用。注文をspread内に置き、先行数量を0にする。
+    fn seeded_engine(
+        mut engine: crate::paper_execution::PaperExecutionEngine,
+        exchange_ms: i64,
+    ) -> crate::paper_execution::PaperExecutionEngine {
+        engine.apply_market_event(&crate::market_event::MarketEvent::DepthUpdated {
+            pair: "btc_jpy".into(),
+            depth: crate::market_event::MarketDepthSnapshot::new(
+                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                exchange_ms,
+            ),
+        });
+        engine
+    }
+
     use super::*;
     use crate::depth::Depth;
     use crate::order_domain::OrderSide;
@@ -761,6 +777,7 @@ mod tests {
             ],
             None,
         )
+        .map(|engine| seeded_engine(engine, 0))
         .unwrap();
         let venue = PaperTradingVenue::new(engine);
         venue

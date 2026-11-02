@@ -185,7 +185,11 @@ pub(super) fn process(
                             received_local_ms: None,
                             watermark_ms: status.watermark_ms,
                             unsettled: engine.current_unsettled(),
-                            issues: status.issues,
+                            issues: status
+                                .issues
+                                .into_iter()
+                                .chain(status.model_issues)
+                                .collect(),
                         },
                     })
                 }
