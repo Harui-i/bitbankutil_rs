@@ -129,6 +129,12 @@ cargo run --example record_execution -- /tmp/execution.jsonl
 時刻は用途別に分けています。`recorded_at_ms` は記録を書き出す処理を行った実時刻、
 `event_time_ms` は利用者が指定する実行環境上のイベント時刻です。
 取引所の約定時刻は、約定情報の中に別途保存します。
+paper / backtestの `event_time_ms` はローカル時計のままです。
+`paper_initial_state.config.time_model` と `paper_settlement.time_model` に固定時計モデルと
+オフセットδ（取引所E = ローカルL + δ、ms）を残します。
+注文有効時刻・取消有効時刻・watermarkは取引所時計で、δを再適用しません。
+API計測のローカルUTC時刻や生市場受信記録も書き換えません。
+詳細は [paper tradingの時計契約](paper-execution.md) を参照してください。
 
 `scope(RecordingContext { ... }, future).await` を使うと、その非同期処理中に作られる記録に
 イベント時刻や操作・市場イベントとの関連を設定できます。

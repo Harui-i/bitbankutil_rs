@@ -14,11 +14,42 @@ use crate::{
     },
 };
 
+/// ローカルUTC Unix msを取引所UTC Unix msへ変換する時計モデル。
+/// E = L + exchange_minus_local_ms。0も同期確認ではなく仮定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "model", rename_all = "snake_case")]
+pub enum PaperTimeModel {
+    FixedOffset { exchange_minus_local_ms: i64 },
+}
+
+impl Default for PaperTimeModel {
+    fn default() -> Self {
+        Self::FixedOffset {
+            exchange_minus_local_ms: 0,
+        }
+    }
+}
+
+impl PaperTimeModel {
+    /// ローカル時計にだけ適用する。取引所時刻・watermarkは変換しない。
+    /// i64の範囲を超える場合は丸めずInvalidClockを返す。
+    pub fn local_to_exchange_ms(self, local_ms: i64) -> Result<i64, PaperExecutionError> {
+        let Self::FixedOffset {
+            exchange_minus_local_ms,
+        } = self;
+        local_ms
+            .checked_add(exchange_minus_local_ms)
+            .ok_or(PaperExecutionError::InvalidClock)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperExecutionConfig {
     pub pair: String,
     pub fee_schedule: PaperFeeSchedule,
     pub next_order_id: OrderId,
+    /// ローカル時計から取引所時計への写像。実行中は固定する。
+    pub time_model: PaperTimeModel,
 }
 
 impl PaperExecutionConfig {
@@ -28,6 +59,7 @@ impl PaperExecutionConfig {
             fee_schedule: PaperFeeSchedule::bitbank_spot_default(&pair)?,
             pair,
             next_order_id: OrderId(1),
+            time_model: PaperTimeModel::default(),
         })
     }
 }
@@ -132,6 +164,9 @@ pub enum PaperExecutionError {
 /// 確定境界と未確定状態。issuesがある評価は正常な損益として扱わない。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PaperSettlementStatus {
+    /// 結果の比較・識別用に、記録の有無によらず設定を残す。
+    pub time_model: PaperTimeModel,
+    /// 取引所UTC Unix ms。
     pub watermark_ms: Option<i64>,
     pub max_trade_delay_ms: Option<i64>,
     pub buffered_trades: usize,
@@ -159,6 +194,7 @@ pub struct PaperExecutionEngine {
     config: PaperExecutionConfig,
     clock: PaperClock,
     effective_after: BTreeMap<OrderId, i64>,
+    // 有効期間・板による下限・watermarkはすべて取引所UTC Unix ms。
     time_floor: i64,
     cancel_at: BTreeMap<OrderId, i64>,
     buffered_trades: BTreeMap<(i64, i64), MarketTrade>,
@@ -184,6 +220,12 @@ impl PaperExecutionEngine {
         balances: Vec<BalanceSnapshot>,
         recorder: Option<crate::execution_recording::ExecutionRecorder>,
     ) -> Result<Self, PaperExecutionError> {
+        let initial_local_ms = match clock {
+            PaperClock::Replay { now_ms } => now_ms,
+            PaperClock::Realtime => i64::try_from(crate::execution_recording::timestamp_ms())
+                .map_err(|_| PaperExecutionError::InvalidClock)?,
+        };
+        config.time_model.local_to_exchange_ms(initial_local_ms)?;
         let (base_asset, quote_asset) = parse_jpy_pair(&config.pair)?;
         let balances = balances
             .into_iter()
@@ -220,7 +262,7 @@ impl PaperExecutionEngine {
             recorder.record(
                 "paper_initial_state",
                 serde_json::json!({
-                    "config": engine.config(), "clock": engine.clock, "model": "limit_price_trade_volume_v3_watermark",
+                    "config": engine.config(), "clock": engine.clock, "model": "limit_price_trade_volume_v4_fixed_offset",
                     "balances": engine.balances(), "open_orders": engine.open_orders()
                 }),
             );
@@ -230,6 +272,7 @@ impl PaperExecutionEngine {
 
     /// 再生時計を単調に進める。実時計のエンジンや時刻の逆行はエラー。
     pub fn advance_replay_time(&mut self, time_ms: i64) -> Result<(), PaperExecutionError> {
+        self.config.time_model.local_to_exchange_ms(time_ms)?;
         match &mut self.clock {
             PaperClock::Replay { now_ms } if time_ms >= *now_ms => {
                 *now_ms = time_ms;
@@ -272,6 +315,8 @@ impl PaperExecutionEngine {
         if !self.settlement_issues.is_empty() {
             return Err(PaperExecutionError::InvalidTradeStream);
         }
+        // 変換失敗で資金を拘束せず、資金不足で操作時刻下限を進めない。
+        let exchange_now = self.exchange_now_ms()?;
         let lock_result = self.lock_funds_for_order(&order);
         if let Err(err) = lock_result {
             self.record_event(PaperEvent::OrderRejected {
@@ -281,7 +326,7 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::from(err));
         }
 
-        self.operation_time();
+        self.observe_operation_time(exchange_now);
         let order_id = self.config.next_order_id;
         self.effective_after.insert(order_id, self.time_floor);
         self.config.next_order_id = OrderId(self.config.next_order_id.0 + 1);
@@ -315,7 +360,13 @@ impl PaperExecutionEngine {
     /// 取消と同じmsに成立した取引は対象外（有効期間は開始・終了とも開区間）。
     /// 封鎖済みwatermark以下への取消は挿入せず、最初の未確定ms以降へ有効化する。
     pub fn cancel_orders(&mut self, pair: &str, order_ids: Vec<OrderId>) {
-        let mut time = self.operation_time();
+        let mut time = match self.operation_time() {
+            Ok(time) => time,
+            Err(_) => {
+                self.mark_incomplete("operation clock overflow");
+                return;
+            }
+        };
         // 封鎖済みのmsに取消を挿入すると、先に確定した同msの部分約定と矛盾する。
         if let Some(watermark) = self.watermark_ms {
             let Some(first_unsealed_ms) = watermark.checked_add(1) else {
@@ -340,12 +391,22 @@ impl PaperExecutionEngine {
         }
     }
 
-    fn operation_time(&mut self) -> i64 {
-        let now = match self.clock {
-            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
+    fn exchange_now_ms(&self) -> Result<i64, PaperExecutionError> {
+        let local_ms = match self.clock {
+            PaperClock::Realtime => i64::try_from(crate::execution_recording::timestamp_ms())
+                .map_err(|_| PaperExecutionError::InvalidClock)?,
             PaperClock::Replay { now_ms } => now_ms,
         };
-        self.time_floor = self.time_floor.max(now);
+        self.config.time_model.local_to_exchange_ms(local_ms)
+    }
+
+    fn operation_time(&mut self) -> Result<i64, PaperExecutionError> {
+        let now = self.exchange_now_ms()?;
+        Ok(self.observe_operation_time(now))
+    }
+
+    fn observe_operation_time(&mut self, exchange_ms: i64) -> i64 {
+        self.time_floor = self.time_floor.max(exchange_ms);
         // 確定済み時刻以前に新しい操作を挿入しない。
         self.time_floor = self.time_floor.max(self.watermark_ms.unwrap_or(i64::MIN));
         self.time_floor
@@ -354,9 +415,23 @@ impl PaperExecutionEngine {
     /// 公開約定を受信順に登録する。約定・取消結果はwatermarkで確定する。
     /// 同一IDの重複は無視し、内容衝突や確定済み境界への遅着は評価異常として記録する。
     pub fn apply_market_event(&mut self, event: &MarketEvent) -> Vec<PaperEvent> {
-        let received_ms = match self.clock {
-            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
-            PaperClock::Replay { now_ms } => now_ms,
+        let received_exchange_ms = match self.exchange_now_ms() {
+            Ok(time) => time,
+            Err(_) => {
+                self.mark_incomplete("market receipt clock overflow");
+                return Vec::new();
+            }
+        };
+        let delay_threshold = if let Some(delay) = self.max_trade_delay_ms {
+            match received_exchange_ms.checked_sub(delay) {
+                Some(time) => Some(time),
+                None => {
+                    self.mark_incomplete("trade delay threshold overflow");
+                    return Vec::new();
+                }
+            }
+        } else {
+            None
         };
         if let MarketEvent::DepthUpdated { pair, depth } = event
             && pair == &self.config.pair
@@ -384,10 +459,7 @@ impl PaperExecutionEngine {
                     ));
                     continue;
                 }
-                if self
-                    .max_trade_delay_ms
-                    .is_some_and(|delay| trade.executed_at < received_ms.saturating_sub(delay))
-                {
+                if delay_threshold.is_some_and(|threshold| trade.executed_at < threshold) {
                     self.mark_incomplete(format!(
                         "trade {} exceeded configured delay",
                         trade.transaction_id
@@ -402,8 +474,11 @@ impl PaperExecutionEngine {
                     .insert((trade.executed_at, trade.transaction_id), trade.clone());
             }
         }
-        if let Some(delay) = self.max_trade_delay_ms {
-            let boundary = received_ms.saturating_sub(delay).saturating_sub(1);
+        if let Some(threshold) = delay_threshold {
+            let Some(boundary) = threshold.checked_sub(1) else {
+                self.mark_incomplete("trade watermark overflow");
+                return Vec::new();
+            };
             if self.watermark_ms.is_none_or(|w| boundary >= w) {
                 return self.advance_trade_watermark(boundary).unwrap_or_default();
             }
@@ -411,6 +486,7 @@ impl PaperExecutionEngine {
         Vec::new()
     }
 
+    /// through_msは取引所UTC Unix ms（オフセットを再適用しない）。
     /// `executed_at <= through_ms` の全公開約定を受信済みと呼び出し元が保証する。
     /// 板時刻や単なるEOFはこの保証にならない。保証違反後は確定を停止する。
     /// 成立時刻・同msではtransaction ID順で処理し、約定後に取消残数量を解放する。
@@ -478,7 +554,7 @@ impl PaperExecutionEngine {
     }
 
     /// 有限遅延を仮定して自動確定する場合だけ明示設定する。既定では自動確定しない。
-    /// 境界は受信時計 - delay - 1ms。これは取引所の保証ではなく利用者の仮定。
+    /// 境界は取引所時計へ変換した受信時計 - delay - 1ms。利用者の仮定。
     pub fn with_max_trade_delay_ms(mut self, delay: i64) -> Result<Self, PaperExecutionError> {
         if delay < 0 {
             return Err(PaperExecutionError::InvalidWatermark);
@@ -501,11 +577,9 @@ impl PaperExecutionEngine {
 
     /// 終了時にも取得・保存する。未確定残高を確定済み損益へ混ぜない。
     pub fn settlement_status(&self) -> PaperSettlementStatus {
-        let now = match self.clock {
-            PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
-            PaperClock::Replay { now_ms } => now_ms,
-        };
+        let now = self.exchange_now_ms();
         PaperSettlementStatus {
+            time_model: self.config.time_model,
             watermark_ms: self.watermark_ms,
             max_trade_delay_ms: self.max_trade_delay_ms,
             buffered_trades: self.buffered_trades.len(),
@@ -515,7 +589,7 @@ impl PaperExecutionEngine {
                 || !self.cancel_at.is_empty()
                 || self
                     .watermark_ms
-                    .is_none_or(|w| w < now.max(self.time_floor)),
+                    .is_none_or(|w| now.map_or(true, |now| w < now.max(self.time_floor))),
             issues: self.settlement_issues.clone(),
         }
     }
@@ -974,6 +1048,22 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn utc_rollback_does_not_reverse_operation_floor_or_sealed_boundary() {
+        let mut engine = engine_with_balances(Decimal::ONE, Decimal::ZERO);
+        // Realtimeの読み取り後と同じ境界へ、補正前後の取引所時計サンプルを渡す。
+        assert_eq!(engine.observe_operation_time(1200), 1200);
+        assert_eq!(engine.observe_operation_time(1100), 1200);
+        engine.advance_trade_watermark(1300).unwrap();
+        assert_eq!(engine.observe_operation_time(1150), 1300);
+        // 逆行したローカル時計での取消も最初の未確定ms以降。
+        engine
+            .place_order(order(OrderSide::Sell, Decimal::ONE, Decimal::ONE))
+            .unwrap();
+        engine.cancel_orders("btc_jpy", vec![OrderId(1)]);
+        assert_eq!(engine.cancel_at[&OrderId(1)], 1301);
+    }
+
     fn order(side: OrderSide, amount: Decimal, price: Decimal) -> DesiredLimitOrder {
         DesiredLimitOrder::limit("btc_jpy".to_owned(), side, amount, price)
     }
@@ -1249,6 +1339,7 @@ mod tests {
                 pair: "btc_jpy".to_owned(),
                 fee_schedule: PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO),
                 next_order_id: OrderId(1),
+                time_model: PaperTimeModel::default(),
             },
             crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![

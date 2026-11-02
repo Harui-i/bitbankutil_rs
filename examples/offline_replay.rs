@@ -72,6 +72,10 @@ async fn demo(
         JsonlSink::open(output)?,
     );
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
+    // E = L + δ。0は同期が検証済みという意味ではなく、この合成fixtureの仮定。
+    config.time_model = PaperTimeModel::FixedOffset {
+        exchange_minus_local_ms: 0,
+    };
     config.fee_schedule = PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::new(2, 3));
     let balances = [("btc", 0), ("jpy", 1000)]
         .into_iter()
