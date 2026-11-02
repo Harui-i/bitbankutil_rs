@@ -410,7 +410,6 @@ mod legacy;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::order_domain::OrderType;
 
     fn book(t: i64, quantity: f64) -> MarketDepthSnapshot {
         MarketDepthSnapshot::new(
@@ -477,7 +476,7 @@ mod tests {
                                 order_id: id,
                                 pair: order.pair.clone(),
                                 side,
-                                order_type: OrderType::Limit,
+                                order_type: crate::order_domain::OrderType::Limit,
                                 remaining_amount: 1.into(),
                                 price: Some(order.price),
                                 post_only: Some(true),
