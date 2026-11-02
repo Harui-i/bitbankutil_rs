@@ -958,3 +958,95 @@ async fn delayed_realtime_timer_preserves_response_delay_after_actual_activation
         assert!(response - entry >= 30, "entry={entry}, response={response}");
     }
 }
+
+struct EmitTwo;
+impl BotStrategy<PaperTradingVenue> for EmitTwo {
+    type CustomEvent = u8;
+    type Error = String;
+    async fn handle_event(
+        &mut self,
+        event: BotEvent<u8>,
+        ctx: &BotContext<u8, PaperTradingVenue>,
+    ) -> Result<(), String> {
+        if matches!(event, BotEvent::Custom(0) | BotEvent::Custom(3)) {
+            ctx.venue().place_order(sell(100).into()).await.unwrap();
+            if matches!(event, BotEvent::Custom(0)) {
+                ctx.emit(BotEvent::Custom(3)).await.unwrap();
+                ctx.emit(BotEvent::Custom(4)).await.unwrap();
+            }
+        }
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn emitted_delivery_capacity_includes_queued_external_inputs_without_dropping_them() {
+    let venue = PaperTradingVenue::with_latency(
+        engine(PaperClock::Replay { now_ms: 1000 }, 0, None),
+        PaperLatencyConfig {
+            placement: PaperOperationLatency {
+                entry_ms: 10,
+                response_ms: 100,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut runner = BotRunner::new(EmitTwo, venue);
+    runner.delivery_limit = 2;
+    runner
+        .submit_replay(1000, None, BotEvent::Custom(0), false)
+        .await
+        .unwrap();
+    runner
+        .submit_replay(1001, None, BotEvent::Custom(1), false)
+        .await
+        .unwrap();
+    runner
+        .submit_replay(1002, None, BotEvent::Custom(2), false)
+        .await
+        .unwrap();
+    runner.process_next_internal(false).await.unwrap(); // 1010有効化。
+    assert_eq!(runner.pending_delivery_count(), 2);
+    assert!(matches!(
+        runner.process_next_internal(false).await,
+        Err(BotRunError::DeliveryLimit)
+    ));
+    assert_eq!(runner.pending_delivery_count(), 2); // 起点の外部保留は失わない。
+}
+
+#[tokio::test]
+async fn failed_derived_market_validation_restores_queued_external_input() {
+    let venue = PaperTradingVenue::with_latency(
+        engine(PaperClock::Replay { now_ms: 1000 }, 0, None),
+        PaperLatencyConfig {
+            placement: PaperOperationLatency {
+                entry_ms: 10,
+                response_ms: 10,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut runner = BotRunner::new(
+        EmitInvalid {
+            delayed: true,
+            scheduled: false,
+            delivered: Default::default(),
+        },
+        venue,
+    );
+    runner
+        .submit_replay(1000, None, BotEvent::Custom(0), false)
+        .await
+        .unwrap();
+    runner
+        .submit_replay(1001, None, BotEvent::Custom(9), false)
+        .await
+        .unwrap();
+    runner.process_next_internal(false).await.unwrap();
+    assert!(matches!(
+        runner.process_next_internal(false).await,
+        Err(BotRunError::Venue(_))
+    ));
+    assert_eq!(runner.pending_delivery_count(), 1);
+}

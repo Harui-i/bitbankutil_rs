@@ -1108,6 +1108,18 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
     pub fn pending_delivery_count(&self) -> usize {
         self.delivery.len()
     }
+    /// 全追加経路で、退避・復元分を含む最終保留数を事前検証する。
+    fn ensure_delivery_capacity(&self, additional: usize) -> Result<(), BotRunError<S::Error>> {
+        if self
+            .delivery
+            .len()
+            .checked_add(additional)
+            .is_none_or(|len| len > self.delivery_limit)
+        {
+            return Err(BotRunError::DeliveryLimit);
+        }
+        Ok(())
+    }
     pub fn handler_pending(&self) -> bool {
         self.active.is_some()
     }
@@ -1183,9 +1195,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             return Ok(());
         };
         // 容量不足なら予約を消費せず、終了結果で未実行として追跡できるようにする。
-        if self.delivery.len() >= self.delivery_limit {
-            return Err(BotRunError::DeliveryLimit);
-        }
+        self.ensure_delivery_capacity(1)?;
         let time = self.last_time.map_or(time, |now| now.max(time));
         let count = match self.scheduled_tick {
             Some((tick, count)) if tick == time => count,
@@ -1250,9 +1260,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         inherited_market_id: Option<u64>,
         derived: bool,
     ) -> Result<(), BotRunError<S::Error>> {
-        if self.delivery.len() >= self.delivery_limit {
-            return Err(BotRunError::DeliveryLimit);
-        }
+        self.ensure_delivery_capacity(1)?;
         let recorder = self.venue.recorder();
         let market_id = if matches!(event, BotEvent::Market(_)) {
             recorder.as_ref().map(|r| r.next_id())
@@ -1396,17 +1404,24 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         if self.active.is_some() {
             return Ok(());
         }
-        let Some(entry) = self.delivery.pop_front() else {
+        let Some(entry) = self.delivery.front() else {
             return Ok(());
         };
-        if entry.derived {
-            self.derived_count += 1;
+        let next_count = if entry.derived {
+            self.derived_count
+                .checked_add(1)
+                .ok_or(BotRunError::DerivedLimit)?
         } else {
-            self.derived_count = 1;
-        }
-        if self.derived_count > self.derived_limit.saturating_add(1) {
+            1
+        };
+        if next_count > self.derived_limit.saturating_add(1) {
             return Err(BotRunError::DerivedLimit);
         }
+        if self.strategy.is_none() {
+            return Err(BotRunError::Stopped);
+        }
+        let entry = self.delivery.pop_front().unwrap();
+        self.derived_count = next_count;
         let pending = std::sync::Arc::new(std::sync::Mutex::new(Pending {
             queue: Default::default(),
             scheduled: Vec::new(),
@@ -1482,6 +1497,8 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             )
         };
         result.map_err(BotRunError::Strategy)?;
+        // FIFO優先のため外部入力を退避する前に、復元後の全件数を検証する。
+        self.ensure_delivery_capacity(emitted.len())?;
         // 派生イベントは待機中に受信した市場入力より先にFIFOで配送する。
         let external_start = self
             .delivery
@@ -1489,16 +1506,17 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             .position(|e| !e.derived)
             .unwrap_or(self.delivery.len());
         let queued = self.delivery.split_off(external_start);
-        for event in emitted {
+        let ingestion = emitted.into_iter().try_for_each(|event| {
             self.ingest(
                 active.input_id.clone(),
                 event,
                 active.recovery,
                 active.market_id,
                 true,
-            )?;
-        }
+            )
+        });
         self.delivery.extend(queued);
+        ingestion?;
         for (execute_at_ms, event) in scheduled {
             if self.scheduled.len() >= self.scheduled_limit {
                 return Err(BotRunError::ScheduledLimit);
