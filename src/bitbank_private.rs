@@ -449,6 +449,10 @@ mod recording_tests {
                     request.extend_from_slice(&b[..n]);
                 }
                 if let Some((status, mut body)) = reply {
+                    if body == "__timeout__" {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
                     if body.contains("\"orders\":[],\"assets\":[]") {
                         body = if String::from_utf8_lossy(&request).contains("/user/assets") {
                             r#"{"success":1,"data":{"assets":[]}}"#
@@ -456,6 +460,27 @@ mod recording_tests {
                             r#"{"success":1,"data":{"orders":[]}}"#
                         };
                     }
+                    let body = if body == "__order__" {
+                        let request = String::from_utf8_lossy(&request);
+                        let cancel = request.contains("/cancel_");
+                        let mut order = serde_json::json!({
+                            "order_id":if cancel {72} else {71}, "pair":"btc_jpy",
+                            "side":"buy", "type":"limit", "start_amount":"1",
+                            "remaining_amount":"1", "executed_amount":"0", "price":"100",
+                            "user_cancelable":true, "average_price":"0", "ordered_at":1234,
+                            "status":if cancel {"CANCELED_UNFILLED"} else {"UNFILLED"}
+                        });
+                        if cancel {
+                            order["canceled_at"] = serde_json::json!(2345);
+                        }
+                        if request.contains("/cancel_orders") {
+                            // 73は返却されない。要求にあったという理由だけで成功扱いしない。
+                            order = serde_json::json!({"orders":[order]});
+                        }
+                        serde_json::json!({"success":1,"data":order}).to_string()
+                    } else {
+                        body.to_owned()
+                    };
                     write!(stream,"HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
                 }
             }
@@ -506,6 +531,151 @@ mod recording_tests {
         assert!(!text.contains("secret-value-sentinel"));
         assert!(!text.contains("ACCESS-"));
     }
+    #[tokio::test]
+    async fn parallel_order_and_cancel_keep_ids_timestamps_and_missing_results() {
+        use crate::order_domain::{DesiredLimitOrder, OrderId, OrderSide};
+        let (c, m, r, server) = client(vec![Some((200, "__order__")); 4], 1);
+        let venue = BitbankTradingVenue::new(c.clone()).with_recorder(r.clone());
+        let (placed, canceled) = tokio::join!(
+            venue.place_order(
+                DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 1.into(), 100.into())
+                    .into()
+            ),
+            venue.cancel_orders("btc_jpy", vec![OrderId(72), OrderId(73)]),
+        );
+        assert_eq!(placed.unwrap().order_id, Some(OrderId(71)));
+        canceled.unwrap();
+        c.post_cancel_order("btc_jpy", 72).await.unwrap();
+        c.get_order("btc_jpy", 71).await.unwrap();
+        server.join().unwrap();
+        let records = read_records(&m.0.lock().unwrap()[..]).unwrap();
+        let calls: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind == "http_finished")
+            .collect();
+        assert_eq!(calls.len(), 4);
+        let ids: std::collections::BTreeSet<_> =
+            calls.iter().map(|r| r.operation_id.unwrap()).collect();
+        assert_eq!(ids.len(), 4);
+        for call in calls {
+            let start = records
+                .iter()
+                .find(|s| {
+                    s.kind == "http_started" && s.data["request_id"] == call.data["request_id"]
+                })
+                .unwrap();
+            assert_eq!(start.operation_id, call.operation_id);
+            let timing = &call.data["timing"];
+            assert_eq!(
+                timing["started_at_unix_us"],
+                start.data["started_at_unix_us"]
+            );
+            assert!(timing["elapsed_us"].as_u64().is_some());
+            assert!(
+                timing["completed_at_unix_us"].as_u64().unwrap()
+                    <= call.recorded_at_ms * 1000 + 999
+            );
+            let result = &call.data["result"];
+            match call.data["endpoint"].as_str().unwrap() {
+                "/user/spot/cancel_orders" => {
+                    assert_eq!(
+                        start.data["request"]["order_ids"],
+                        serde_json::json!([72, 73])
+                    );
+                    assert_eq!(result["orders"].as_array().unwrap().len(), 1);
+                    assert_eq!(result["orders"][0]["order_id"], 72);
+                    assert_eq!(result["orders"][0]["canceled_at"], 2345);
+                    let op = records
+                        .iter()
+                        .find(|s| {
+                            s.kind == "operation_started" && s.operation_id == call.operation_id
+                        })
+                        .unwrap();
+                    assert_eq!(op.data["operation"], "cancel_orders");
+                }
+                "/user/spot/cancel_order" => {
+                    assert_eq!(start.data["request"]["order_id"], 72);
+                    assert_eq!(result["canceled_at"], 2345);
+                }
+                "/user/spot/order" => {
+                    assert_eq!(result["order_id"], 71);
+                    assert_eq!(result["ordered_at"], 1234);
+                    assert!(result.get("canceled_at").is_none());
+                    if start.data["method"] == "GET" {
+                        assert_eq!(start.data["request"]["order_id"], 71);
+                    }
+                }
+                _ => panic!(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_is_a_failed_attempt_and_recording_does_not_change_retry_policy() {
+        for recording in [false, true] {
+            let (mut c, m, _, server) = client(
+                vec![
+                    Some((200, "__timeout__")),
+                    Some((200, r#"{"success":1,"data":{"assets":[]}}"#)),
+                ],
+                2,
+            );
+            c.options.request_config.timeout = std::time::Duration::from_millis(30);
+            // 最初の接続を閉じた後に2回目を受け付ける。
+            c.options.request_config.retry_cooldown = std::time::Duration::from_millis(120);
+            if !recording {
+                c.transport.recorder = None;
+            }
+            assert!(c.get_assets().await.is_ok());
+            server.join().unwrap();
+            let records = read_records(&m.0.lock().unwrap()[..]).unwrap();
+            let calls: Vec<_> = records
+                .iter()
+                .filter(|r| r.kind == "http_finished")
+                .collect();
+            if !recording {
+                assert!(calls.is_empty());
+                continue;
+            }
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].data["timeout"], true);
+            assert_eq!(calls[0].data["success"], false);
+            assert_eq!(calls[0].data["will_retry"], true);
+            assert_eq!(calls[1].data["timeout"], false);
+            assert_eq!(calls[1].data["success"], true);
+            assert_eq!(calls[0].operation_id, calls[1].operation_id);
+            let total = records
+                .iter()
+                .find(|r| r.kind == "http_request_finished")
+                .unwrap();
+            assert_eq!(total.data["attempts"], 2);
+            assert!(total.data["timing"]["elapsed_us"].as_u64().unwrap() >= 120_000);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_failure_is_not_sent_or_retried() {
+        let memory = Memory::default();
+        let recorder =
+            ExecutionRecorder::new("build", serde_json::json!({}), JsonlSink(memory.clone()));
+        let mut c = BitbankPrivateApiClient::new("key".into(), "secret".into(), None)
+            .with_recorder(recorder);
+        c.options.key = None;
+        c.options.request_config.max_try = 3;
+        assert!(c.post_cancel_order("btc_jpy", 99).await.is_err());
+        let records = read_records(&memory.0.lock().unwrap()[..]).unwrap();
+        let calls: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind == "http_finished")
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].data["stage"], "build");
+        assert_eq!(calls[0].data["send_attempted"], false);
+        assert_eq!(calls[0].data["will_retry"], false);
+        assert!(calls[0].data["http_status"].is_null());
+        assert!(calls[0].data["result"].is_null());
+    }
+
     #[tokio::test]
     async fn errors_retries_and_token_are_recorded_safely() {
         let (c, m, r, server) = client(

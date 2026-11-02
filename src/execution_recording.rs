@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::{
     io::{self, BufRead, Write},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub trait EventSink: Send {
@@ -89,6 +89,34 @@ pub fn timestamp_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+/// ローカルUTCと単調時計を組にした計測。UTC差分から経過時間を求めない。
+pub(crate) struct Measurement {
+    started_at_unix_us: u64,
+    started: Instant,
+}
+impl Measurement {
+    pub(crate) fn start() -> Self {
+        Self {
+            started_at_unix_us: timestamp_us(),
+            started: Instant::now(),
+        }
+    }
+    pub(crate) fn started_at_unix_us(&self) -> u64 {
+        self.started_at_unix_us
+    }
+    pub(crate) fn finish(self) -> Value {
+        let elapsed_us = self.started.elapsed().as_micros();
+        let completed_at_unix_us = timestamp_us();
+        json!({"started_at_unix_us": self.started_at_unix_us,
+            "completed_at_unix_us": completed_at_unix_us, "elapsed_us": elapsed_us})
+    }
+}
+fn timestamp_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
 impl ExecutionRecorder {
     pub fn new(run_id: impl Into<String>, metadata: Value, sink: impl EventSink + 'static) -> Self {
         let r = Self(Arc::new(Mutex::new(State {
@@ -115,7 +143,7 @@ impl ExecutionRecorder {
             return;
         }
         let record = ExecutionRecord {
-            version: 1,
+            version: 2,
             run_id: s.run_id.clone(),
             sequence: s.sequence,
             recorded_at_ms: timestamp_ms(),
@@ -175,12 +203,14 @@ pub(crate) async fn operation<T: Serialize>(
     let mut c = current_context();
     c.operation_id = Some(r.next_id());
     scope(c, async {
+        let measurement = Measurement::start();
         r.record(
             "operation_started",
-            json!({"operation":name,"request":request}),
+            json!({"operation":name,"request":request,"started_at_unix_us":measurement.started_at_unix_us()}),
         );
         let result = future.await;
-        let data = match &result {
+        let timing = measurement.finish();
+        let mut data = match &result {
             Ok(value) => json!({"operation": name, "success": true, "result": value}),
             Err(error) => {
                 use crate::trading_venue::TradingVenueError;
@@ -194,6 +224,7 @@ pub(crate) async fn operation<T: Serialize>(
                 json!({"operation": name, "success": false, "error": category, "details": details})
             }
         };
+        data["timing"] = timing;
         r.record("operation_finished", data);
         result
     })
@@ -214,6 +245,44 @@ pub(crate) mod tests {
             Ok(())
         }
     }
+    #[test]
+    fn elapsed_does_not_subtract_utc_timestamps() {
+        let mut measurement = Measurement::start();
+        // 開始UTCが完了UTCより未来でも、経過時間はInstantだけから計算する。
+        measurement.started_at_unix_us = u64::MAX;
+        let before = measurement.started.elapsed().as_micros();
+        let timing = measurement.finish();
+        assert_eq!(timing["started_at_unix_us"], u64::MAX);
+        assert!(timing["completed_at_unix_us"].as_u64().unwrap() < u64::MAX);
+        assert!(u128::from(timing["elapsed_us"].as_u64().unwrap()) >= before);
+    }
+
+    #[tokio::test]
+    async fn operation_timing_includes_start_sink_wait_but_excludes_finish_sink_wait() {
+        struct SlowSink(Memory);
+        impl EventSink for SlowSink {
+            fn append(&mut self, record: &ExecutionRecord) -> io::Result<()> {
+                if record.kind == "operation_started" || record.kind == "operation_finished" {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                JsonlSink(self.0.clone()).append(record)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let memory = Memory::default();
+        let recorder = ExecutionRecorder::new("slow", json!({}), SlowSink(memory.clone()));
+        operation(Some(&recorder), "test", json!({}), async { Ok(()) })
+            .await
+            .unwrap();
+        let after = timestamp_us();
+        let records = read_records(&memory.0.lock().unwrap()[..]).unwrap();
+        let timing = &records.last().unwrap().data["timing"];
+        assert!(timing["elapsed_us"].as_u64().unwrap() >= 20_000);
+        assert!(after - timing["completed_at_unix_us"].as_u64().unwrap() >= 20_000);
+    }
+
     #[tokio::test]
     async fn paper_roundtrip() {
         let path = std::env::temp_dir().join(format!(
