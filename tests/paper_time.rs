@@ -4,7 +4,8 @@ use bitbankutil_rs::{
     market_event::{MarketDepthSnapshot, MarketEvent, MarketTrade},
     order_domain::{BalanceSnapshot, DesiredLimitOrder, OrderId, OrderSide},
     paper_execution::{
-        PaperClock, PaperEvent, PaperExecutionConfig, PaperExecutionEngine, PaperTradingVenue,
+        PaperClock, PaperEvent, PaperExecutionConfig, PaperExecutionEngine, PaperExecutionError,
+        PaperTimeModel, PaperTradingVenue,
     },
     replay::{CaptureRecord, run_replay},
     trading_venue::{AccountSnapshot, TradingVenue},
@@ -13,8 +14,18 @@ use serde_json::json;
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
 
 fn engine(clock: PaperClock, recording: bool) -> PaperExecutionEngine {
+    offset_engine(clock, recording, 0)
+}
+fn model(delta: i64) -> PaperTimeModel {
+    PaperTimeModel::FixedOffset {
+        exchange_minus_local_ms: delta,
+    }
+}
+fn offset_engine(clock: PaperClock, recording: bool, delta: i64) -> PaperExecutionEngine {
+    let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
+    config.time_model = model(delta);
     PaperExecutionEngine::new(
-        PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+        config,
         clock,
         [("btc", 10), ("jpy", 1000)]
             .into_iter()
@@ -103,40 +114,45 @@ fn observed_exchange_book_time_is_a_floor_even_when_local_clock_lags() {
 }
 #[tokio::test]
 async fn realtime_venue_uses_acceptance_clock_without_recording_context() {
-    for recording in [false, true] {
-        let v = PaperTradingVenue::new(engine(PaperClock::Realtime, recording));
-        v.place_order(order().into()).await.unwrap();
-        let shared = v.engine();
-        let after = shared
-            .lock()
-            .unwrap()
-            .drain_events()
-            .into_iter()
-            .find_map(|e| match e {
-                PaperEvent::OrderAccepted {
-                    effective_after_ms, ..
-                } => Some(effective_after_ms),
-                _ => None,
-            })
-            .unwrap();
-        v.on_market_event(&trades(&[after - 110, after])).unwrap();
-        assert_eq!(
-            v.account_snapshot("btc_jpy").await.unwrap().open_orders[0].remaining_amount,
-            1.into()
-        );
-        v.on_market_event(&trades(&[after + 1, after + 2])).unwrap();
-        v.advance_trade_watermark(after + 2).unwrap();
-        assert!(
-            v.account_snapshot("btc_jpy")
-                .await
+    for delta in [0, 250, -250] {
+        for recording in [false, true] {
+            let v = PaperTradingVenue::new(offset_engine(PaperClock::Realtime, recording, delta));
+            let before = bitbankutil_rs::execution_recording::timestamp_ms() as i64;
+            v.place_order(order().into()).await.unwrap();
+            let shared = v.engine();
+            let after = shared
+                .lock()
                 .unwrap()
-                .open_orders
-                .is_empty()
-        );
-        assert!(v.advance_replay_time(after).is_err());
+                .drain_events()
+                .into_iter()
+                .find_map(|e| match e {
+                    PaperEvent::OrderAccepted {
+                        effective_after_ms, ..
+                    } => Some(effective_after_ms),
+                    _ => None,
+                })
+                .unwrap();
+            let local_after = bitbankutil_rs::execution_recording::timestamp_ms() as i64;
+            assert!((before + delta..=local_after + delta).contains(&after));
+            v.on_market_event(&trades(&[after - 110, after])).unwrap();
+            assert_eq!(
+                v.account_snapshot("btc_jpy").await.unwrap().open_orders[0].remaining_amount,
+                1.into()
+            );
+            v.on_market_event(&trades(&[after + 1, after + 2])).unwrap();
+            v.advance_trade_watermark(after + 2).unwrap();
+            assert!(
+                v.account_snapshot("btc_jpy")
+                    .await
+                    .unwrap()
+                    .open_orders
+                    .is_empty()
+            );
+            assert!(v.advance_replay_time(after).is_err());
+        }
     }
 }
-struct Strategy(bool);
+struct Strategy(bool, i64);
 impl BotStrategy<PaperTradingVenue> for Strategy {
     type CustomEvent = ();
     type Error = String;
@@ -146,7 +162,7 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
         ctx: &BotContext<(), PaperTradingVenue>,
     ) -> Result<(), String> {
         if matches!(event, BotEvent::Market(MarketEvent::DepthUpdated { .. })) && !self.0 {
-            assert_eq!(ctx.now_ms(), 1110);
+            assert_eq!(ctx.now_ms(), 1110 - self.1);
             ctx.venue()
                 .place_order(order().into())
                 .await
@@ -156,9 +172,13 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
         Ok(())
     }
 }
-async fn replay(recording: bool, slow: bool) -> (AccountSnapshot, Vec<PaperEvent>) {
-    let v = PaperTradingVenue::new(engine(PaperClock::Replay { now_ms: 0 }, recording));
-    let mut runner = BotRunner::new(Strategy(false), v.clone());
+async fn replay(recording: bool, slow: bool, delta: i64) -> (AccountSnapshot, Vec<PaperEvent>) {
+    let v = PaperTradingVenue::new(offset_engine(
+        PaperClock::Replay { now_ms: -delta },
+        recording,
+        delta,
+    ));
+    let mut runner = BotRunner::new(Strategy(false, delta), v.clone());
     let messages = [
         (
             900,
@@ -185,7 +205,8 @@ async fn replay(recording: bool, slow: bool) -> (AccountSnapshot, Vec<PaperEvent
     ];
     let input = messages.into_iter().enumerate().map(|(i, (time, payload))| {
         if slow { std::thread::sleep(std::time::Duration::from_millis(3)); }
-        let mut r = json!({"format_version":1,"exchange":"bitbank","stream":"public","session_id":"test","connection_id":"one","sequence":i+1,"received_at_micros":time*1000});
+        // 同ms内の端数は切り捨て、入力・戦略の時計にはδを適用しない。
+        let mut r = json!({"format_version":1,"exchange":"bitbank","stream":"public","session_id":"test","connection_id":"one","sequence":i+1,"received_at_micros":(time-delta)*1000+999});
         r.as_object_mut().unwrap().extend(payload.as_object().unwrap().clone());
         Ok((0, serde_json::from_value::<CaptureRecord>(r).unwrap()))
     });
@@ -195,6 +216,7 @@ async fn replay(recording: bool, slow: bool) -> (AccountSnapshot, Vec<PaperEvent
     .await;
     assert!(report.error.is_none(), "{:?}", report.error);
     assert_eq!(report.records, 4);
+    assert_eq!(report.settlement.as_ref().unwrap().time_model, model(delta));
     assert!(report.incomplete); // EOFはストリーム完了の証明にならない。
     v.advance_trade_watermark(1300).unwrap(); // この合成入力の既知の完了境界。
     let account = v.account_snapshot("btc_jpy").await.unwrap();
@@ -207,7 +229,232 @@ async fn replay(recording: bool, slow: bool) -> (AccountSnapshot, Vec<PaperEvent
 }
 #[tokio::test]
 async fn replay_is_independent_of_wall_time_speed_and_recorder() {
-    let expected = replay(false, false).await;
-    assert_eq!(expected, replay(false, true).await);
-    assert_eq!(expected, replay(true, true).await);
+    let expected = replay(false, false, 0).await;
+    for delta in [0, 250, -250] {
+        assert_eq!(expected, replay(false, true, delta).await);
+        assert_eq!(expected, replay(true, true, delta).await);
+    }
+}
+
+#[test]
+fn offset_preserves_exchange_causality_and_late_cancellation() {
+    let mut expected = None;
+    for delta in [0, 250, -250] {
+        for recording in [false, true] {
+            let mut e = offset_engine(
+                PaperClock::Replay {
+                    now_ms: 1000 - delta,
+                },
+                recording,
+                delta,
+            );
+            e.apply_market_event(&book(1005));
+            e.place_order(order()).unwrap();
+            e.advance_replay_time(1100 - delta).unwrap();
+            e.cancel_orders("btc_jpy", vec![OrderId(1)]);
+            e.advance_replay_time(1200 - delta).unwrap();
+            e.place_order(order()).unwrap();
+            e.apply_market_event(&trades(&[1004, 1005, 1006, 1100, 1199, 1200, 1201]));
+            let events = e.advance_trade_watermark(1300).unwrap();
+            assert_eq!(filled_ids(events), [OrderId(1), OrderId(2)]);
+            assert_eq!(e.open_orders().len(), 1);
+            assert_eq!(
+                e.open_orders()[0].remaining_amount,
+                rust_decimal::Decimal::new(5, 1)
+            );
+            assert!(!e.settlement_status().unsettled);
+            let result = (e.balances(), e.open_orders(), e.drain_events());
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected);
+            } else {
+                expected = Some(result);
+            }
+        }
+    }
+}
+
+#[test]
+fn automatic_watermark_and_delay_limit_use_exchange_clock() {
+    for delta in [0, 250, -250] {
+        let mut e = offset_engine(
+            PaperClock::Replay {
+                now_ms: 1000 - delta,
+            },
+            false,
+            delta,
+        )
+        .with_max_trade_delay_ms(100)
+        .unwrap();
+        e.place_order(order()).unwrap();
+        e.advance_replay_time(1102 - delta).unwrap();
+        e.apply_market_event(&trades(&[1002])); // ちょうど上限: まだ未確定。
+        assert_eq!(e.settlement_status().watermark_ms, Some(1001));
+        assert_eq!(e.settlement_status().buffered_trades, 1);
+        assert!(e.settlement_status().issues.is_empty());
+        e.advance_replay_time(1103 - delta).unwrap();
+        assert_eq!(filled_ids(e.apply_market_event(&book(1000))), [OrderId(1)]);
+        assert_eq!(e.settlement_status().watermark_ms, Some(1002));
+        e.apply_market_event(&trades(&[1001])); // 封鎖済み境界への遅着。
+        assert!(!e.settlement_status().issues.is_empty());
+
+        let mut e = offset_engine(
+            PaperClock::Replay {
+                now_ms: 1102 - delta,
+            },
+            false,
+            delta,
+        )
+        .with_max_trade_delay_ms(100)
+        .unwrap();
+        e.apply_market_event(&trades(&[1001])); // watermarkの有無に関係なく上限超過。
+        assert!(e.settlement_status().issues[0].contains("exceeded configured delay"));
+        assert_eq!(e.settlement_status().watermark_ms, None);
+    }
+}
+
+#[test]
+fn extreme_offsets_and_arithmetic_do_not_wrap_or_saturate() {
+    let initial = engine(PaperClock::Replay { now_ms: 0 }, false);
+    let mut config = initial.config().clone();
+    config.time_model = model(i64::MAX);
+    assert!(matches!(
+        PaperExecutionEngine::new(
+            config,
+            PaperClock::Replay { now_ms: 1 },
+            initial.balances(),
+            None
+        ),
+        Err(PaperExecutionError::InvalidClock)
+    ));
+    assert_eq!(model(i64::MAX).local_to_exchange_ms(0), Ok(i64::MAX));
+    assert_eq!(model(i64::MIN).local_to_exchange_ms(0), Ok(i64::MIN));
+    assert_eq!(
+        model(i64::MAX).local_to_exchange_ms(1),
+        Err(PaperExecutionError::InvalidClock)
+    );
+    assert_eq!(
+        model(i64::MIN).local_to_exchange_ms(-1),
+        Err(PaperExecutionError::InvalidClock)
+    );
+    let mut e = offset_engine(PaperClock::Replay { now_ms: 0 }, false, i64::MAX);
+    assert_eq!(
+        e.advance_replay_time(1),
+        Err(PaperExecutionError::InvalidClock)
+    );
+    e.place_order(order()).unwrap();
+    assert!(matches!(
+        e.drain_events()[0],
+        PaperEvent::OrderAccepted {
+            effective_after_ms: i64::MAX,
+            ..
+        }
+    ));
+    assert_eq!(
+        e.advance_replay_time(-1),
+        Err(PaperExecutionError::InvalidClock)
+    );
+    e.advance_trade_watermark(i64::MAX).unwrap();
+    e.cancel_orders("btc_jpy", vec![OrderId(1)]);
+    assert!(e.settlement_status().issues[0].contains("terminal watermark"));
+
+    for delay in [0, 1] {
+        let mut e = offset_engine(PaperClock::Replay { now_ms: 0 }, false, i64::MIN)
+            .with_max_trade_delay_ms(delay)
+            .unwrap();
+        e.apply_market_event(&book(i64::MIN));
+        assert!(e.settlement_status().issues[0].contains("overflow"));
+        assert_eq!(e.settlement_status().watermark_ms, None);
+    }
+    assert!(
+        engine(PaperClock::Replay { now_ms: 0 }, false)
+            .with_max_trade_delay_ms(-1)
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn recording_preserves_local_context_and_exchange_times_with_model() {
+    use bitbankutil_rs::execution_recording::{
+        EventSink, ExecutionRecord, RecordingContext, scope,
+    };
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<ExecutionRecord>>>);
+    impl EventSink for Sink {
+        fn append(&mut self, record: &ExecutionRecord) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for delta in [0, 250, -250] {
+        let records = Sink(Arc::new(Mutex::new(Vec::new())));
+        let recorder = ExecutionRecorder::new("offset", json!({}), records.clone());
+        let initial = offset_engine(
+            PaperClock::Replay {
+                now_ms: 1000 - delta,
+            },
+            false,
+            delta,
+        );
+        let config = initial.config().clone();
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PaperExecutionConfig>(serialized).unwrap(),
+            config
+        );
+        let mut e = PaperExecutionEngine::new(
+            config,
+            PaperClock::Replay {
+                now_ms: 1000 - delta,
+            },
+            initial.balances(),
+            Some(recorder.clone()),
+        )
+        .unwrap();
+        scope(
+            RecordingContext {
+                event_time_ms: Some(1000 - delta),
+                ..Default::default()
+            },
+            async {
+                e.place_order(order()).unwrap();
+                e.apply_market_event(&trades(&[1001]));
+                e.advance_trade_watermark(1001).unwrap();
+            },
+        )
+        .await;
+        recorder.finish().unwrap();
+        let records = records.0.lock().unwrap();
+        let initial = records
+            .iter()
+            .find(|r| r.kind == "paper_initial_state")
+            .unwrap();
+        assert_eq!(
+            initial.data["config"]["time_model"],
+            json!({"model":"fixed_offset", "exchange_minus_local_ms":delta})
+        );
+        assert_eq!(initial.data["clock"]["Replay"]["now_ms"], 1000 - delta);
+        let events: Vec<_> = records.iter().filter(|r| r.kind == "paper_event").collect();
+        assert!(events.iter().all(|r| r.event_time_ms == Some(1000 - delta)));
+        assert_eq!(
+            events[0].data["event"]["OrderAccepted"]["effective_after_ms"],
+            1000
+        );
+        assert_eq!(
+            events[1].data["event"]["OrderFilled"]["trade"]["executed_at"],
+            1001
+        );
+        let status = records
+            .iter()
+            .rfind(|r| r.kind == "paper_settlement")
+            .unwrap();
+        assert_eq!(
+            status.data["time_model"],
+            initial.data["config"]["time_model"]
+        );
+        assert_eq!(status.data["watermark_ms"], 1001);
+    }
 }

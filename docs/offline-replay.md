@@ -23,6 +23,13 @@ paper trading用のエンジンをbacktestに使う場合、コンストラク�
 `PaperClock::Realtime` のvenueを再生へ渡すと `InvalidClock` エラーになります。
 注文有効開始時刻と取引所時刻の比較は [paper tradingの約定モデル](paper-execution.md) を参照してください。
 
+`PaperExecutionConfig.time_model` の `PaperTimeModel::FixedOffset { exchange_minus_local_ms: delta }` で
+取引所時刻E = ローカル時刻L + δを指定します。既定のδ=0も同期が検証済みという意味ではありません。
+受信記録・戦略時刻はローカル時計のまま、エンジン内の比較時にだけ変換します。
+板・公開約定・明示供給するwatermarkは取引所時計なので変換しません。
+公開約定の遅延上限は独立した設定で、自動境界はL + δ - delay - 1msです。
+時計モデルとδは `ReplayReport.settlement.time_model` にも残ります。結果を比較するときに確認してください。
+
 ## 市場データv1
 
 `ReplayInput::open(manifest_path)` はmanifestのsource一覧とJSONLファイルを逐次読み込みます。
