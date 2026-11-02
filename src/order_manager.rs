@@ -319,6 +319,7 @@ mod tests {
         ) -> TradingVenueFuture<'a, AccountSnapshot> {
             Box::pin(async {
                 Ok(AccountSnapshot {
+                    query: None,
                     open_orders: vec![],
                     balances: vec![],
                 })

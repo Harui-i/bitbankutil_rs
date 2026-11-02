@@ -51,6 +51,7 @@ fn latency() -> PaperLatencyConfig {
             response_ms: 50,
         },
         notification_ms: 20,
+        ..Default::default()
     }
 }
 fn trades() -> MarketEvent {
@@ -128,17 +129,14 @@ async fn overlap(delta: i64, recording: bool) -> (AccountSnapshot, Vec<PaperEven
         .unwrap();
     assert!(runner.handler_pending());
     assert_eq!(venue.engine().lock().unwrap().open_orders().len(), 1);
-    runner.process_next_internal(false).await.unwrap(); // 1050: B有効、応答前。
+    while runner
+        .next_internal_time()
+        .is_some_and(|t| t <= 1050 - delta)
+    {
+        runner.process_next_internal(false).await.unwrap();
+    } // 1050: B有効、応答前。
     assert_eq!(venue.engine().lock().unwrap().open_orders().len(), 2);
-    assert_eq!(
-        venue
-            .account_snapshot("btc_jpy")
-            .await
-            .unwrap()
-            .open_orders
-            .len(),
-        1
-    );
+    assert_eq!(venue.known_account_snapshot().open_orders.len(), 1);
     while runner
         .next_internal_time()
         .is_some_and(|t| t <= 1200 - delta)
@@ -147,7 +145,7 @@ async fn overlap(delta: i64, recording: bool) -> (AccountSnapshot, Vec<PaperEven
     }
     assert!(!runner.handler_pending());
     assert_eq!(*observed.lock().unwrap(), [1200 - delta]);
-    let before = venue.account_snapshot("btc_jpy").await.unwrap();
+    let before = venue.known_account_snapshot();
     assert_eq!(before.open_orders.len(), 1);
     assert_eq!(before.open_orders[0].order_id, OrderId(2));
     assert_eq!(balance(&before, "btc").locked_amount, Decimal::from(2));
@@ -165,12 +163,12 @@ async fn overlap(delta: i64, recording: bool) -> (AccountSnapshot, Vec<PaperEven
     venue.advance_trade_watermark(1200).unwrap();
     // 確定は1250。通知は1270以降で、過去の1200には遡らない。
     assert_eq!(
-        balance(&venue.account_snapshot("btc_jpy").await.unwrap(), "jpy").onhand_amount,
+        balance(&venue.known_account_snapshot(), "jpy").onhand_amount,
         Decimal::ZERO
     );
     runner.process_next_internal(false).await.unwrap();
     assert_eq!(runner.now_ms(), Some(1270 - delta));
-    let after = venue.account_snapshot("btc_jpy").await.unwrap();
+    let after = venue.known_account_snapshot();
     assert_eq!(after.open_orders.len(), 1);
     assert_eq!(after.open_orders[0].remaining_amount, Decimal::new(25, 2));
     assert_eq!(balance(&after, "btc").free_amount, Decimal::ONE);
@@ -311,6 +309,7 @@ async fn realtime_operations_progress_without_market_input_and_share_handles() {
                 response_ms: 5,
             },
             notification_ms: 0,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -324,15 +323,7 @@ async fn realtime_operations_progress_without_market_input_and_share_handles() {
     .unwrap()
     .order_id
     .unwrap();
-    assert_eq!(
-        shared
-            .account_snapshot("btc_jpy")
-            .await
-            .unwrap()
-            .open_orders
-            .len(),
-        1
-    );
+    assert_eq!(shared.known_account_snapshot().open_orders.len(), 1);
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         shared.cancel_orders("btc_jpy", vec![id, id]),
@@ -340,14 +331,7 @@ async fn realtime_operations_progress_without_market_input_and_share_handles() {
     .await
     .unwrap()
     .unwrap();
-    assert!(
-        venue
-            .account_snapshot("btc_jpy")
-            .await
-            .unwrap()
-            .open_orders
-            .is_empty()
-    );
+    assert!(venue.known_account_snapshot().open_orders.is_empty());
     assert_eq!(
         venue
             .paper_settlement_status()
@@ -356,13 +340,13 @@ async fn realtime_operations_progress_without_market_input_and_share_handles() {
         1
     );
     assert_eq!(
-        balance(&venue.account_snapshot("btc_jpy").await.unwrap(), "btc").locked_amount,
+        balance(&venue.known_account_snapshot(), "btc").locked_amount,
         Decimal::ONE
     );
     let through = bitbankutil_rs::execution_recording::timestamp_ms() as i64;
     shared.advance_trade_watermark(through).unwrap();
     assert_eq!(
-        balance(&venue.account_snapshot("btc_jpy").await.unwrap(), "btc").locked_amount,
+        balance(&venue.known_account_snapshot(), "btc").locked_amount,
         Decimal::ZERO
     );
 }
@@ -421,21 +405,13 @@ async fn concurrent_requests_check_exchange_funds_at_entry_and_report_failure_on
         (Decimal::ONE, Decimal::from(2))
     );
     assert_eq!(
-        balance(&venue.account_snapshot("btc_jpy").await.unwrap(), "btc").free_amount,
+        balance(&venue.known_account_snapshot(), "btc").free_amount,
         Decimal::from(3)
     );
     runner.process_next_internal(false).await.unwrap();
     assert_eq!(*results.lock().unwrap(), [true, false]);
     assert_eq!(venue.pending_operations().len(), 0);
-    assert_eq!(
-        venue
-            .account_snapshot("btc_jpy")
-            .await
-            .unwrap()
-            .open_orders
-            .len(),
-        1
-    );
+    assert_eq!(venue.known_account_snapshot().open_orders.len(), 1);
 }
 
 #[tokio::test]
@@ -452,6 +428,7 @@ async fn full_fill_before_cancel_and_duplicate_cancel_never_unlock_twice() {
                 response_ms: 20,
             },
             notification_ms: 0,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -486,7 +463,7 @@ async fn full_fill_before_cancel_and_duplicate_cancel_never_unlock_twice() {
     venue.process_internal_events(1120).unwrap();
     cancel.await.unwrap();
     venue.advance_trade_watermark(1120).unwrap();
-    let state = venue.account_snapshot("btc_jpy").await.unwrap();
+    let state = venue.known_account_snapshot();
     assert!(state.open_orders.is_empty());
     assert_eq!(
         (
@@ -522,7 +499,7 @@ async fn overflow_rejection_does_not_enqueue_or_lock_funds() {
     assert!(venue.pending_operations().is_empty());
     assert_eq!(venue.next_internal_time(), None);
     assert_eq!(
-        balance(&venue.account_snapshot("btc_jpy").await.unwrap(), "btc").locked_amount,
+        balance(&venue.known_account_snapshot(), "btc").locked_amount,
         Decimal::ZERO
     );
 }
@@ -584,12 +561,12 @@ async fn activation_boundary_and_pre_ack_fill_preserve_recording_context() {
     venue.advance_trade_watermark(1051).unwrap();
     assert!(venue.engine().lock().unwrap().open_orders().is_empty());
     assert_eq!(
-        balance(&venue.account_snapshot("btc_jpy").await.unwrap(), "jpy").free_amount,
+        balance(&venue.known_account_snapshot(), "jpy").free_amount,
         Decimal::ZERO
     );
     venue.process_internal_events(1100).unwrap();
     place.await.unwrap();
-    let state = venue.account_snapshot("btc_jpy").await.unwrap();
+    let state = venue.known_account_snapshot();
     assert!(state.open_orders.is_empty());
     assert_eq!(balance(&state, "jpy").free_amount, Decimal::from(100));
     let records = records.0.lock().unwrap();
@@ -657,6 +634,7 @@ async fn response_order_does_not_determine_exchange_activation_order() {
                 response_ms: 20,
             },
             notification_ms: 0,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -674,7 +652,7 @@ async fn response_order_does_not_determine_exchange_activation_order() {
     }
     assert_eq!(*seen.lock().unwrap(), [(false, 1170), (true, 1310)]);
     assert_eq!(
-        venue.account_snapshot("btc_jpy").await.unwrap().open_orders[0].order_id,
+        venue.known_account_snapshot().open_orders[0].order_id,
         OrderId(2)
     );
 }
@@ -694,15 +672,7 @@ async fn direct_runner_releases_driver_for_later_direct_venue_operations() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        venue
-            .account_snapshot("btc_jpy")
-            .await
-            .unwrap()
-            .open_orders
-            .len(),
-        2
-    );
+    assert_eq!(venue.known_account_snapshot().open_orders.len(), 2);
 }
 
 #[tokio::test]

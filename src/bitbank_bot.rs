@@ -29,6 +29,7 @@ pub enum BotEvent<C = Infallible> {
 /// クローンしても別口座は作らず、同じ口座と注文を操作する。
 pub struct BotContext<C = Infallible, V = NoTradingVenue> {
     venue: V,
+    received_at_ms: i64,
     time: Option<std::sync::Arc<std::sync::atomic::AtomicI64>>,
     pending: std::sync::Arc<std::sync::Mutex<Pending<C>>>,
 }
@@ -38,6 +39,7 @@ impl<C, V: Clone> Clone for BotContext<C, V> {
     fn clone(&self) -> Self {
         Self {
             venue: self.venue.clone(),
+            received_at_ms: self.received_at_ms,
             time: self.time.clone(),
             pending: self.pending.clone(),
         }
@@ -45,6 +47,10 @@ impl<C, V: Clone> Clone for BotContext<C, V> {
 }
 
 impl<C: Send + 'static, V: TradingVenue> BotContext<C, V> {
+    /// このイベントが登録された時刻。API待機・配送滞留後も変わらない。
+    pub fn received_at_ms(&self) -> i64 {
+        self.received_at_ms
+    }
     pub fn now_ms(&self) -> i64 {
         self.time
             .as_ref()
@@ -546,6 +552,7 @@ mod tests {
             Box::pin(async move {
                 self.calls.lock().unwrap().push("snapshot");
                 Ok(AccountSnapshot {
+                    query: None,
                     open_orders: vec![],
                     balances: vec![],
                 })
@@ -1031,6 +1038,7 @@ pub enum BotRunError<E> {
 /// 模擬操作を待つ間も市場はvenueへ登録するが、戦略ハンドラーは同時実行しない。
 /// 詳しい実行手順は `docs/offline-replay.md` を参照。
 struct QueuedEvent<C> {
+    received_at_ms: i64,
     event: BotEvent<C>,
     input_id: Option<InputId>,
     market_id: Option<u64>,
@@ -1213,6 +1221,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             );
         }
         self.delivery.push_back(QueuedEvent {
+            received_at_ms: entry.info.execute_at_ms,
             event: BotEvent::Custom(entry.event),
             input_id: entry.info.input_id,
             market_id: None,
@@ -1291,6 +1300,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             Ok::<(), BotRunError<S::Error>>(())
         })?;
         self.delivery.push_back(QueuedEvent {
+            received_at_ms,
             event,
             input_id,
             market_id,
@@ -1437,6 +1447,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         }));
         let ctx = BotContext {
             venue: self.venue.clone(),
+            received_at_ms: entry.received_at_ms,
             time: replay.then(|| self.replay_clock.clone()),
             pending: pending.clone(),
         };
@@ -1462,7 +1473,8 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                 };
                 r.record(
                     kind,
-                    serde_json::json!({"id":market_id,"input_id":input_id,"type":event_type}),
+                    serde_json::json!({"id":market_id,"input_id":input_id,"type":event_type,
+                        "received_at_ms":ctx.received_at_ms(),"processed_at_ms":ctx.now_ms()}),
                 );
             }
             let result = strategy.handle_event(entry.event, &ctx).await;

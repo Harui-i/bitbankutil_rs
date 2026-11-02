@@ -27,6 +27,28 @@ pub enum TradingVenueError {
 pub struct AccountSnapshot {
     pub open_orders: Vec<OpenOrder>,
     pub balances: Vec<BalanceSnapshot>,
+    /// 模擬照会の採取・受信時刻と、採取時点で判明していた確定範囲。
+    /// 実APIではサーバー内の採取時刻を観測できないためNone。
+    pub query: Option<AccountQueryMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AccountObservation {
+    pub request_id: u64,
+    pub requested_local_ms: i64,
+    pub sampled_local_ms: i64,
+    pub sampled_exchange_ms: i64,
+    pub received_local_ms: Option<i64>,
+    pub watermark_ms: Option<i64>,
+    pub unsettled: bool,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AccountQueryMetadata {
+    pub orders: AccountObservation,
+    pub balances: AccountObservation,
+    pub completed_local_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -144,6 +166,7 @@ fn convert_account_snapshot(
             .map(BalanceSnapshot::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(TradingVenueError::Parse)?,
+        query: None,
     })
 }
 

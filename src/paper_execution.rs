@@ -175,6 +175,8 @@ pub struct PaperSettlementStatus {
     pub pending_operations: usize,
     pub latency_model: PaperLatencyConfig,
     pub pending_operation_details: Vec<serde_json::Value>,
+    /// 未確定の採取状態を応答した履歴。後のwatermarkで消さない。
+    pub uncertain_query_observations: usize,
     pub unsettled: bool,
     pub issues: Vec<String>,
 }
@@ -593,6 +595,7 @@ impl PaperExecutionEngine {
             pending_operations: 0,
             latency_model: PaperLatencyConfig::default(),
             pending_operation_details: Vec::new(),
+            uncertain_query_observations: 0,
             unsettled: !self.settlement_issues.is_empty()
                 || !self.buffered_trades.is_empty()
                 || !self.cancel_at.is_empty()

@@ -64,6 +64,7 @@ impl TradingVenue for Venue {
     fn account_snapshot<'a>(&'a self, _: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
         Box::pin(async {
             Ok(AccountSnapshot {
+                query: None,
                 open_orders: vec![],
                 balances: vec![],
             })
