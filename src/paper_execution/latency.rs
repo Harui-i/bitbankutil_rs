@@ -520,7 +520,8 @@ impl TradingVenue for PaperTradingVenue {
                                     "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),
                                     "order_id":accepted_id,"effective_exchange_ms":accepted_id.and_then(|id|e.effective_after.get(&id).copied()),"success":result.is_ok()}),
                             );
-                            let response_at = response_at.max(executed);
+                            let response_at =
+                                response_at.max(add(executed, s.latency.placement.response_ms)?);
                             if result.is_ok() {
                                 s.publish(&e, response_at, id)?;
                             }
@@ -550,7 +551,8 @@ impl TradingVenue for PaperTradingVenue {
                                 serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
                         "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),"success":result.is_ok()}),
                             );
-                            let response_at = response_at.max(executed);
+                            let response_at =
+                                response_at.max(add(executed, s.latency.cancellation.response_ms)?);
                             if result.is_ok() {
                                 s.publish(&e, response_at, id)?;
                             }

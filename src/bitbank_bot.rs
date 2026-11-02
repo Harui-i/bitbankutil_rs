@@ -1182,6 +1182,10 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         let Some((&(time, _), _)) = self.scheduled.first_key_value() else {
             return Ok(());
         };
+        // 容量不足なら予約を消費せず、終了結果で未実行として追跡できるようにする。
+        if self.delivery.len() >= self.delivery_limit {
+            return Err(BotRunError::DeliveryLimit);
+        }
         let time = self.last_time.map_or(time, |now| now.max(time));
         let count = match self.scheduled_tick {
             Some((tick, count)) if tick == time => count,

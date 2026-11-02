@@ -842,3 +842,119 @@ async fn derived_market_validation_inherits_strict_or_recovery_mode_after_waits_
         }
     }
 }
+
+struct QueueLimit;
+impl BotStrategy<PaperTradingVenue> for QueueLimit {
+    type CustomEvent = u8;
+    type Error = String;
+    async fn handle_event(
+        &mut self,
+        event: BotEvent<u8>,
+        ctx: &BotContext<u8, PaperTradingVenue>,
+    ) -> Result<(), String> {
+        match event {
+            BotEvent::Custom(0) => {
+                for (time, n) in [(1010, 1), (1020, 2), (1030, 3)] {
+                    ctx.schedule_at(time, n).unwrap();
+                }
+            }
+            BotEvent::Custom(1) => {
+                ctx.venue().place_order(sell(100).into()).await.unwrap();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn scheduled_deliveries_respect_capacity_and_preserve_unconsumed_reservation() {
+    let venue = PaperTradingVenue::with_latency(
+        engine(PaperClock::Replay { now_ms: 1000 }, 0, None),
+        PaperLatencyConfig {
+            placement: PaperOperationLatency {
+                entry_ms: 0,
+                response_ms: 100,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut runner = BotRunner::new(QueueLimit, venue);
+    runner.delivery_limit = 1;
+    runner
+        .process(1000, None, BotEvent::Custom(0))
+        .await
+        .unwrap();
+    runner.process_next_internal(false).await.unwrap(); // 1010のハンドラーが発注応答待ち。
+    runner.process_next_internal(false).await.unwrap(); // 同msの注文有効化。
+    runner.process_next_internal(false).await.unwrap(); // 1020を保留、キュー満杯。
+    assert_eq!(runner.pending_delivery_count(), 1);
+    assert!(matches!(
+        runner.process_next_internal(false).await,
+        Err(BotRunError::DeliveryLimit)
+    ));
+    assert_eq!(runner.pending_delivery_count(), 1);
+    assert_eq!(runner.pending_scheduled().len(), 1);
+    assert_eq!(runner.pending_scheduled()[0].execute_at_ms, 1030);
+}
+
+#[tokio::test]
+async fn delayed_realtime_timer_preserves_response_delay_after_actual_activation() {
+    let records = Records::default();
+    let recorder = ExecutionRecorder::new("late_timer", serde_json::json!({}), records.clone());
+    let venue = PaperTradingVenue::with_latency(
+        engine(PaperClock::Realtime, 0, Some(recorder)),
+        PaperLatencyConfig {
+            placement: PaperOperationLatency {
+                entry_ms: 2,
+                response_ms: 30,
+            },
+            cancellation: PaperOperationLatency {
+                entry_ms: 2,
+                response_ms: 30,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut place = Box::pin(venue.place_order(sell(100).into()));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(place.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    // 単一スレッドruntimeでtimer実行を遅らせ、予定応答時刻も過ぎてから再開する。
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    tokio::time::timeout(std::time::Duration::from_secs(2), place)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut cancel = Box::pin(venue.cancel_orders("btc_jpy", vec![OrderId(1)]));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(cancel.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let records = records.0.lock().unwrap();
+    let entries = records
+        .iter()
+        .filter(|r| r.kind == "paper_operation_effective")
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        let response = records
+            .iter()
+            .find(|r| r.kind == "paper_operation_response" && r.data["id"] == entry.data["id"])
+            .unwrap()
+            .data["local_ms"]
+            .as_i64()
+            .unwrap();
+        let entry = entry.data["local_ms"].as_i64().unwrap();
+        assert!(response - entry >= 30, "entry={entry}, response={response}");
+    }
+}
