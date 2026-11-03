@@ -114,11 +114,17 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 
 ```toml
 [dependencies]
-bitbankutil_rs = "0.2.4"
+bitbankutil_rs = "0.3.0"
 ```
 
 API通信には、bitbank対応を追加した`crypto-botters`のforkである
 [`crypto-botters-bitbank`](https://crates.io/crates/crypto-botters-bitbank)を使用しています。
+
+0.3.0では`crypto-botters-bitbank`を0.8系に更新し、従来`ApiError`になっていた
+公式エラーコード25件を意味に応じたエラー型で返します。回復・再試行の方針は変更していません。
+依存先の`BitbankHandleError`にvariantが追加されているため、0.2系から移行するときは、
+この型を網羅する`match`に新しいvariantの処理またはフォールバックを追加してください。
+利用側でも`crypto-botters-bitbank`を直接依存に指定している場合は、0.8系に揃えてください。
 
 開発・テスト手順は [開発ガイド](CONTRIBUTING.md) を参照してください。
 
