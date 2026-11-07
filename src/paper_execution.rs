@@ -688,7 +688,8 @@ impl PaperExecutionEngine {
                 if order.remaining_amount > Quantity::ZERO || self.cancel_at.contains_key(&id) {
                     orders.insert(id, order);
                 }
-                staged.push(event);
+                let account = self.stage_event_account(&balances, &orders);
+                staged.push((event, account));
             }
             self.buffered_trades.pop_first();
             self.queue_model.commit_allocations(plan);
@@ -705,8 +706,8 @@ impl PaperExecutionEngine {
             if let Some(recorder) = &self.recorder {
                 recorder.record_lazy("paper_queue_trade",||serde_json::json!({"trade":trade,"allocations":allocations,"reason":"same_price_fifo_or_price_through_public_volume_cap"}));
             }
-            for event in staged {
-                self.record_event(event.clone());
+            for (event, account) in staged {
+                self.record_event_with_account(event.clone(), account);
                 events.push(event);
             }
         }
@@ -733,8 +734,10 @@ impl PaperExecutionEngine {
             return Ok(Vec::new());
         }
         let mut balances = self.balances.clone();
+        let mut orders = self.open_orders.clone();
+        let mut staged = Vec::new();
         for id in &ids {
-            if let Some(order) = self.open_orders.get(id) {
+            if let Some(order) = orders.remove(id) {
                 let asset = if order.side == OrderSide::Buy {
                     &self.quote_asset
                 } else {
@@ -744,27 +747,31 @@ impl PaperExecutionEngine {
                     &mut balances,
                     asset,
                     locked_amount_for_open_order(
-                        order,
+                        &order,
                         self.config.fee_schedule.maker_fee_rate_quote,
                     )?,
                 )?;
+                let event = PaperEvent::OrderCancelled {
+                    order_id: *id,
+                    order,
+                };
+                let account = self.stage_event_account(&balances, &orders);
+                staged.push((event, account));
             }
         }
+        // 全取消の数値検証が成功するまで、口座・注文・ログを変更しない。
         self.watermark_ms = Some(through_ms);
         self.balances = balances;
-        let mut events = Vec::new();
+        self.open_orders = orders;
         for id in ids {
             self.cancel_at.remove(&id);
             self.effective_after.remove(&id);
-            if let Some(order) = self.open_orders.remove(&id) {
-                self.queue_model.remove(id);
-                let event = PaperEvent::OrderCancelled {
-                    order_id: id,
-                    order,
-                };
-                self.record_event(event.clone());
-                events.push(event);
-            }
+            self.queue_model.remove(id);
+        }
+        let mut events = Vec::new();
+        for (event, account) in staged {
+            self.record_event_with_account(event.clone(), account);
+            events.push(event);
         }
         Ok(events)
     }
@@ -965,11 +972,42 @@ impl PaperExecutionEngine {
         Ok(())
     }
 
+    /// ログ用の中間口座。未記録・Disabledでは複製しない。
+    fn stage_event_account(
+        &self,
+        balances: &BTreeMap<String, BalanceSnapshot>,
+        orders: &BTreeMap<OrderId, OpenOrder>,
+    ) -> Option<AccountSnapshot> {
+        self.recorder
+            .as_ref()
+            .filter(|r| r.enabled("paper_event"))
+            .map(|_| AccountSnapshot {
+                balances: balances.values().cloned().collect(),
+                // open_orders()と同じく、取消確定待ちの注文は公開しない。
+                open_orders: orders
+                    .values()
+                    .filter(|o| !self.cancel_at.contains_key(&o.order_id))
+                    .cloned()
+                    .collect(),
+                query: None,
+            })
+    }
+
     fn record_event(&mut self, event: PaperEvent) {
+        self.record_event_with_account(event, None);
+    }
+
+    fn record_event_with_account(&mut self, event: PaperEvent, account: Option<AccountSnapshot>) {
         self.record_queue(false);
         log::info!("paper event: {:?}", event);
         if let Some(r) = &self.recorder {
-            r.record_lazy("paper_event",|| serde_json::json!({"event":event,"clock":self.clock,"watermark_ms":self.watermark_ms,"balances":self.balances(),"open_orders":self.open_orders()}));
+            r.record_lazy("paper_event", || {
+                let account = account.unwrap_or_else(|| AccountSnapshot {
+                    balances: self.balances(), open_orders: self.open_orders(), query: None,
+                });
+                serde_json::json!({"event":event,"clock":self.clock,"watermark_ms":self.watermark_ms,
+                    "balances":account.balances,"open_orders":account.open_orders})
+            });
         }
         if self.event_history.len() == PAPER_EVENT_HISTORY_LIMIT {
             self.event_history.pop_front();
@@ -1291,6 +1329,59 @@ mod tests {
         assert_eq!(e.queue_model.state(), queue);
         assert_eq!(e.cancel_at, pending);
         assert_eq!(e.watermark_ms, None);
+    }
+
+    #[test]
+    fn later_cancellation_overflow_does_not_emit_or_apply_first_release() {
+        use crate::execution_recording::{
+            ExecutionRecorder, JsonlSink, read_records, tests::Memory,
+        };
+        let memory = Memory::default();
+        let mut e = PaperExecutionEngine::new(
+            PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+            PaperClock::Replay { now_ms: 0 },
+            vec![balance("btc", Amount::ONE), balance("jpy", 1000.into())],
+            Some(ExecutionRecorder::new(
+                "cancel-atomic",
+                serde_json::json!({}),
+                JsonlSink(memory.clone()),
+            )),
+        )
+        .unwrap();
+        seed_book(&mut e);
+        e.place_order(DesiredLimitOrder::limit(
+            "btc_jpy".into(),
+            OrderSide::Sell,
+            1.into(),
+            110.into(),
+        ))
+        .unwrap();
+        e.place_order(DesiredLimitOrder::limit(
+            "btc_jpy".into(),
+            OrderSide::Buy,
+            1.into(),
+            90.into(),
+        ))
+        .unwrap();
+        // 最初のbase資金解放は成功し、2件目のquote資金解放だけが失敗する状態を注入。
+        e.balances.get_mut("jpy").unwrap().free_amount = Amount::MAX;
+        e.advance_replay_time(10).unwrap();
+        e.cancel_orders("btc_jpy", vec![OrderId(1), OrderId(2)]);
+        let balances = e.balances();
+        let orders = e.open_orders.clone();
+        let queue = e.queue_model.state();
+        let pending = e.cancel_at.clone();
+        assert_eq!(
+            e.advance_trade_watermark(10),
+            Err(PaperExecutionError::Numeric(NumericError::Overflow))
+        );
+        assert_eq!(e.balances(), balances);
+        assert_eq!(e.open_orders, orders);
+        assert_eq!(e.queue_model.state(), queue);
+        assert_eq!(e.cancel_at, pending);
+        assert_eq!(e.watermark_ms, None);
+        let records = read_records(&memory.0.lock().unwrap()[..]).unwrap();
+        assert!(!records.iter().any(|r| r.kind=="paper_event" && r.data["event"].get("OrderCancelled").is_some()));
     }
 
     #[test]

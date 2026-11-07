@@ -520,6 +520,325 @@ pub(crate) mod tests {
         assert!(after - timing["completed_at_unix_us"].as_u64().unwrap() >= 20_000);
     }
 
+    fn batch_recording_engine(
+        profile: RecordingProfile,
+        base: Amount,
+        quote: Amount,
+        fee: Rate,
+    ) -> (crate::paper_execution::PaperExecutionEngine, Memory) {
+        use crate::{order_domain::BalanceSnapshot, paper_execution::*};
+        let memory = Memory::default();
+        let recorder = ExecutionRecorder::with_profile(
+            "batch-account",
+            json!({}),
+            profile,
+            JsonlSink(memory.clone()),
+        );
+        let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
+        config.fee_schedule.maker_fee_rate_quote = fee;
+        let balances = [("btc", base), ("jpy", quote)]
+            .into_iter()
+            .map(|(asset, amount)| BalanceSnapshot {
+                asset: asset.into(),
+                free_amount: amount,
+                locked_amount: Amount::ZERO,
+                onhand_amount: amount,
+            })
+            .collect();
+        (
+            seeded_engine(
+                PaperExecutionEngine::new(
+                    config,
+                    PaperClock::Replay { now_ms: 0 },
+                    balances,
+                    Some(recorder),
+                )
+                .unwrap(),
+                0,
+            ),
+            memory,
+        )
+    }
+
+    fn batch_events(memory: &Memory, variant: &str) -> Vec<ExecutionRecord> {
+        read_records(&memory.0.lock().unwrap()[..])
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == "paper_event" && r.data["event"].get(variant).is_some())
+            .collect()
+    }
+
+    fn batch_balance(
+        record: &ExecutionRecord,
+        asset: &str,
+    ) -> crate::order_domain::BalanceSnapshot {
+        serde_json::from_value(
+            record.data["balances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["asset"] == asset)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn batch_fills_record_each_intermediate_account() {
+        use crate::{
+            market_event::{MarketEvent, MarketTrade},
+            order_domain::*,
+        };
+        for profile in [
+            RecordingProfile::Financial,
+            RecordingProfile::Diagnostic {
+                queue: QueueRecording::Counters,
+            },
+        ] {
+            for side in [OrderSide::Buy, OrderSide::Sell] {
+                for fee in [literal::<Rate>("0.01"), literal::<Rate>("-0.01")] {
+                    let (mut engine, memory) = batch_recording_engine(
+                        profile,
+                        if side == OrderSide::Buy {
+                            Amount::ZERO
+                        } else {
+                            3.into()
+                        },
+                        if side == OrderSide::Buy {
+                            1000.into()
+                        } else {
+                            Amount::ZERO
+                        },
+                        fee,
+                    );
+                    for quantity in [1, 2] {
+                        engine
+                            .place_order(DesiredLimitOrder::limit(
+                                "btc_jpy".into(),
+                                side,
+                                quantity.into(),
+                                100.into(),
+                            ))
+                            .unwrap();
+                    }
+                    engine.advance_replay_time(10).unwrap();
+                    engine.apply_market_event(&MarketEvent::Transactions {
+                        pair: "btc_jpy".into(),
+                        transactions: vec![MarketTrade {
+                            transaction_id: 1,
+                            executed_at: 10,
+                            side: if side == OrderSide::Buy {
+                                OrderSide::Sell
+                            } else {
+                                OrderSide::Buy
+                            },
+                            price: 100.into(),
+                            amount: literal("2.5"),
+                        }],
+                    });
+                    assert_eq!(engine.advance_trade_watermark(10).unwrap().len(), 2);
+                    let records = batch_events(&memory, "OrderFilled");
+                    assert_eq!(records.len(), 2);
+                    for (index, record) in records.iter().enumerate() {
+                        let btc = batch_balance(record, "btc");
+                        let jpy = batch_balance(record, "jpy");
+                        let (base_free, base_locked, quote_free, quote_locked): (
+                            Amount,
+                            Amount,
+                            Amount,
+                            Amount,
+                        ) = match (side, fee > Rate::ZERO, index) {
+                            (OrderSide::Buy, true, 0) => {
+                                (1.into(), 0.into(), 697.into(), 202.into())
+                            }
+                            (OrderSide::Buy, true, _) => {
+                                (literal("2.5"), 0.into(), 697.into(), literal("50.5"))
+                            }
+                            (OrderSide::Buy, false, 0) => {
+                                (1.into(), 0.into(), 701.into(), 200.into())
+                            }
+                            (OrderSide::Buy, false, _) => {
+                                (literal("2.5"), 0.into(), literal("702.5"), 50.into())
+                            }
+                            (OrderSide::Sell, true, 0) => (0.into(), 2.into(), 99.into(), 0.into()),
+                            (OrderSide::Sell, true, _) => {
+                                (0.into(), literal("0.5"), literal("247.5"), 0.into())
+                            }
+                            (OrderSide::Sell, false, 0) => {
+                                (0.into(), 2.into(), 101.into(), 0.into())
+                            }
+                            (OrderSide::Sell, false, _) => {
+                                (0.into(), literal("0.5"), literal("252.5"), 0.into())
+                            }
+                        };
+                        assert_eq!(
+                            (btc.free_amount, btc.locked_amount),
+                            (base_free, base_locked)
+                        );
+                        assert_eq!(
+                            btc.onhand_amount,
+                            base_free.checked_add(base_locked).unwrap()
+                        );
+                        assert_eq!(
+                            (jpy.free_amount, jpy.locked_amount),
+                            (quote_free, quote_locked)
+                        );
+                        assert_eq!(
+                            jpy.onhand_amount,
+                            quote_free.checked_add(quote_locked).unwrap()
+                        );
+                        let orders: Vec<OpenOrder> =
+                            serde_json::from_value(record.data["open_orders"].clone()).unwrap();
+                        assert_eq!(orders.len(), 1);
+                        assert_eq!(orders[0].order_id, OrderId(2));
+                        assert_eq!(
+                            orders[0].remaining_amount,
+                            if index == 0 { 2.into() } else { literal("0.5") }
+                        );
+                        assert_eq!(
+                            record.data["event"]["OrderFilled"]["order_id"],
+                            (index + 1) as u64
+                        );
+                    }
+                    assert_eq!(
+                        records.last().unwrap().data["balances"],
+                        json!(engine.balances())
+                    );
+                    assert_eq!(
+                        records.last().unwrap().data["open_orders"],
+                        json!(engine.open_orders())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batch_cancellations_record_each_release_and_keep_unrelated_orders() {
+        use crate::order_domain::*;
+        for profile in [
+            RecordingProfile::Financial,
+            RecordingProfile::Diagnostic {
+                queue: QueueRecording::Counters,
+            },
+        ] {
+            for side in [OrderSide::Buy, OrderSide::Sell] {
+                for fee in [literal::<Rate>("0.01"), literal::<Rate>("-0.01")] {
+                    let (mut engine, memory) = batch_recording_engine(
+                        profile,
+                        if side == OrderSide::Buy {
+                            Amount::ZERO
+                        } else {
+                            4.into()
+                        },
+                        if side == OrderSide::Buy {
+                            1000.into()
+                        } else {
+                            Amount::ZERO
+                        },
+                        fee,
+                    );
+                    for quantity in [1, 2, 1] {
+                        engine
+                            .place_order(DesiredLimitOrder::limit(
+                                "btc_jpy".into(),
+                                side,
+                                quantity.into(),
+                                100.into(),
+                            ))
+                            .unwrap();
+                    }
+                    engine.advance_replay_time(10).unwrap();
+                    engine.cancel_orders("btc_jpy", vec![OrderId(1), OrderId(2)]);
+                    assert_eq!(engine.advance_trade_watermark(10).unwrap().len(), 2);
+                    let records = batch_events(&memory, "OrderCancelled");
+                    assert_eq!(records.len(), 2);
+                    for (index, record) in records.iter().enumerate() {
+                        let asset = if side == OrderSide::Buy { "jpy" } else { "btc" };
+                        let balance = batch_balance(record, asset);
+                        let (free, locked): (Amount, Amount) = match (side, fee > Rate::ZERO, index)
+                        {
+                            (OrderSide::Buy, true, 0) => (697.into(), 303.into()),
+                            (OrderSide::Buy, true, _) => (899.into(), 101.into()),
+                            (OrderSide::Buy, false, 0) => (700.into(), 300.into()),
+                            (OrderSide::Buy, false, _) => (900.into(), 100.into()),
+                            (OrderSide::Sell, _, 0) => (1.into(), 3.into()),
+                            (OrderSide::Sell, _, _) => (3.into(), 1.into()),
+                        };
+                        assert_eq!((balance.free_amount, balance.locked_amount), (free, locked));
+                        assert_eq!(balance.onhand_amount, free.checked_add(locked).unwrap());
+                        let orders: Vec<OpenOrder> =
+                            serde_json::from_value(record.data["open_orders"].clone()).unwrap();
+                        // 取消確定待ちは最初から公開注文一覧に含めず、無関係の注文だけ残す。
+                        assert_eq!(orders.len(), 1);
+                        assert_eq!(orders[0].order_id, OrderId(3));
+                        assert_eq!(record.data["watermark_ms"], 10);
+                        assert_eq!(
+                            record.data["event"]["OrderCancelled"]["order_id"],
+                            (index + 1) as u64
+                        );
+                    }
+                    assert_eq!(
+                        records.last().unwrap().data["balances"],
+                        json!(engine.balances())
+                    );
+                    assert_eq!(
+                        records.last().unwrap().data["open_orders"],
+                        json!(engine.open_orders())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batch_late_numeric_failure_does_not_emit_or_apply_earlier_fill() {
+        use crate::{
+            market_event::{MarketEvent, MarketTrade},
+            order_domain::*,
+            paper_execution::*,
+        };
+        let (mut engine, memory) = batch_recording_engine(
+            RecordingProfile::Financial,
+            2.into(),
+            Amount::MAX.checked_sub(150.into()).unwrap(),
+            Rate::ZERO,
+        );
+        for _ in 0..2 {
+            engine
+                .place_order(DesiredLimitOrder::limit(
+                    "btc_jpy".into(),
+                    OrderSide::Sell,
+                    1.into(),
+                    100.into(),
+                ))
+                .unwrap();
+        }
+        engine.advance_replay_time(10).unwrap();
+        engine.apply_market_event(&MarketEvent::Transactions {
+            pair: "btc_jpy".into(),
+            transactions: vec![MarketTrade {
+                transaction_id: 1,
+                executed_at: 10,
+                side: OrderSide::Buy,
+                price: 100.into(),
+                amount: 2.into(),
+            }],
+        });
+        let balances = engine.balances();
+        let orders = engine.open_orders();
+        let status = engine.settlement_status();
+        assert_eq!(
+            engine.advance_trade_watermark(10),
+            Err(PaperExecutionError::Numeric(NumericError::Overflow))
+        );
+        assert_eq!(engine.balances(), balances);
+        assert_eq!(engine.open_orders(), orders);
+        assert_eq!(engine.settlement_status(), status);
+        assert!(batch_events(&memory, "OrderFilled").is_empty());
+    }
+
     #[tokio::test]
     async fn paper_roundtrip() {
         let path = std::env::temp_dir().join(format!(
