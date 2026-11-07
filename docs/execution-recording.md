@@ -396,3 +396,8 @@ cargo run --example summarize_execution -- execution.jsonl
 途中でタイムアウトしても再試行で成功した要求は、requestの行ではsuccessとして集計します。
 途中で失敗した試行も含めたい場合はattemptの行を使います。
 `run_id` はファイル内で再利用しないでください。
+
+## 取引所との時計差の観測
+
+HTTP試行の時計と、任意に有効化したWS受信時計を同じrecorderに保存できます。
+設定・区間計算・分析exampleは[時計観測ガイド](clock-observation.md)を参照してください。

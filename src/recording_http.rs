@@ -16,6 +16,7 @@ pub(crate) struct Transport {
     http: crypto_botters::generic_api_client::http::Client,
 }
 struct Observed<H> {
+    response_clock: Mutex<Option<crate::clock_observation::ClockObservation>>,
     inner: H,
     status: Mutex<Option<u16>>,
     code: Mutex<Option<u64>>,
@@ -43,6 +44,8 @@ impl<B, H: RequestHandler<B>> RequestHandler<B> for Observed<H> {
         h: HeaderMap,
         b: Bytes,
     ) -> Result<Self::Successful, Self::Unsuccessful> {
+        *self.response_clock.lock().unwrap() =
+            Some(crate::clock_observation::ClockObservation::now());
         *self.status.lock().unwrap() = Some(s.as_u16());
         *self.code.lock().unwrap() = serde_json::from_slice::<Value>(&b)
             .ok()
@@ -87,6 +90,7 @@ impl Transport {
         assert!(config.max_try > 0);
         let observed = Observed {
             inner: handler,
+            response_clock: Mutex::new(None),
             status: Mutex::new(None),
             code: Mutex::new(None),
         };
@@ -108,8 +112,10 @@ impl Transport {
             });
         }
         for attempt in 1..=config.max_try {
+            *observed.response_clock.lock().unwrap() = None;
             *observed.status.lock().unwrap() = None;
             *observed.code.lock().unwrap() = None;
+            let request_clock = crate::clock_observation::ClockObservation::now();
             let measurement = Measurement::start();
             if let Some(r) = &self.recorder {
                 r.record_lazy("http_started", || {
@@ -149,6 +155,8 @@ impl Transport {
                     "exchange_code": *observed.code.lock().unwrap(),
                     "send_attempted": stage != "build", "timeout": timeout,
                     "will_retry": will_retry, "timing": timing,
+                    "request_clock": request_clock,
+                    "response_clock": *observed.response_clock.lock().unwrap(),
                     "result": result.as_ref().ok().map(|response| safe_result(path, &response.data)),
                 }));
             }
@@ -265,5 +273,128 @@ mod tests {
         );
         assert_eq!(request, json!({"order_id":1,"pair":"btc_jpy"}));
         assert!(safe_result("/user/subscribe", &json!({"token":"sentinel"})).is_null());
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use crate::clock_observation::{ClockObservation, private_offset};
+    use crate::execution_recording::{JsonlSink, read_records, tests::Memory};
+    use crypto_botters::bitbank::BitbankHttpUrl;
+    use std::io::{Read, Write};
+    #[tokio::test]
+    async fn local_http_records_causal_order_and_cancel_timestamps() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for cancel in [false, true] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut b = [0; 4096];
+                let mut request = Vec::new();
+                loop {
+                    let n = stream.read(&mut b).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&b[..n]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let now = ClockObservation::now().unix_us / 1000;
+                let data = if cancel {
+                    json!({"order_id":42,"ordered_at":1,"canceled_at":now,"status":"CANCELED_UNFILLED"})
+                } else {
+                    json!({"order_id":42,"ordered_at":now,"status":"UNFILLED"})
+                };
+                let body = json!({"success":1,"data":data}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let m = Memory::default();
+        let recorder = ExecutionRecorder::new("http-clock", json!({}), JsonlSink(m.clone()));
+        let transport = Transport {
+            recorder: Some(recorder.clone()),
+            ..Default::default()
+        };
+        let mut options = BitbankOptions::default();
+        options.http_url = BitbankHttpUrl::None;
+        options.request_config.url_prefix = format!("http://{addr}");
+        options.request_config.max_try = 1;
+        for path in ["/user/spot/order", "/user/spot/cancel_order"] {
+            transport
+                .request(
+                    &options,
+                    Method::POST,
+                    path,
+                    None::<&()>,
+                    Some(json!({"order_id":42})),
+                )
+                .await
+                .unwrap();
+        }
+        server.join().unwrap();
+        recorder.finish().unwrap();
+        let records = read_records(std::io::Cursor::new(m.0.lock().unwrap().clone())).unwrap();
+        let attempts: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind == "http_finished")
+            .collect();
+        assert_eq!(attempts.len(), 2);
+        for r in attempts {
+            let start: ClockObservation =
+                serde_json::from_value(r.data["request_clock"].clone()).unwrap();
+            let response: ClockObservation =
+                serde_json::from_value(r.data["response_clock"].clone()).unwrap();
+            assert!(response.monotonic_us >= start.monotonic_us);
+            assert!(
+                response.unix_us as u64
+                    <= r.data["timing"]["completed_at_unix_us"].as_u64().unwrap()
+            );
+            let interval = private_offset(&records, r, 1000).unwrap();
+            assert!(interval.lower_us <= 0 && interval.upper_us >= 0);
+        }
+    }
+    #[test]
+    fn response_clock_precedes_inner_handler() {
+        struct Slow;
+        impl RequestHandler<()> for Slow {
+            type Successful = ();
+            type Unsuccessful = ();
+            type BuildError = ();
+            fn build_request(
+                &self,
+                b: RequestBuilder,
+                _: &Option<()>,
+                _: u8,
+            ) -> Result<Request, ()> {
+                b.build().map_err(|_| ())
+            }
+            fn handle_response(&self, _: StatusCode, _: HeaderMap, _: Bytes) -> Result<(), ()> {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                Ok(())
+            }
+        }
+        let handler = Observed {
+            inner: Slow,
+            response_clock: Mutex::new(None),
+            status: Mutex::new(None),
+            code: Mutex::new(None),
+        };
+        handler
+            .handle_response(StatusCode::OK, HeaderMap::new(), Bytes::from_static(b"{}"))
+            .unwrap();
+        assert!(
+            ClockObservation::now().monotonic_us
+                - handler.response_clock.lock().unwrap().unwrap().monotonic_us
+                >= 10000
+        );
     }
 }
