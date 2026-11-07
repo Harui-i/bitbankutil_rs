@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::{Amount, Price, Quantity, Rate, literal};
 mod support;
 use bitbankutil_rs::{
     bitbank_bot::{BotContext, BotEvent, BotRunner, BotStrategy},
@@ -10,14 +11,13 @@ use bitbankutil_rs::{
     replay::{CapturePayload, CaptureRecord, run_replay},
     trading_venue::{AccountSnapshot, TradingVenue},
 };
-use rust_decimal::Decimal;
 use serde_json::json;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use support::TestDiagnostics;
 
-fn engine(base: i64, quote: i64, fee: Decimal) -> PaperExecutionEngine {
+fn engine(base: i32, quote: i32, fee: Rate) -> PaperExecutionEngine {
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
-    config.fee_schedule = PaperFeeSchedule::new(fee, Decimal::ZERO);
+    config.fee_schedule = PaperFeeSchedule::new(fee, literal("0"));
     PaperExecutionEngine::new(
         config,
         PaperClock::Replay { now_ms: 1000 },
@@ -35,10 +35,10 @@ fn engine(base: i64, quote: i64, fee: Decimal) -> PaperExecutionEngine {
     .map(|engine| seeded_engine(engine, 1000))
     .unwrap()
 }
-fn order(side: OrderSide, amount: Decimal) -> DesiredLimitOrder {
+fn order(side: OrderSide, amount: Quantity) -> DesiredLimitOrder {
     DesiredLimitOrder::limit("btc_jpy".into(), side, amount, 100.into())
 }
-fn trade(id: i64, time: i64, amount: Decimal, side: OrderSide) -> MarketTrade {
+fn trade(id: i64, time: i64, amount: Quantity, side: OrderSide) -> MarketTrade {
     MarketTrade {
         transaction_id: id,
         executed_at: time,
@@ -63,7 +63,7 @@ fn receive(e: &mut PaperExecutionEngine, trades: Vec<MarketTrade>) {
 fn balance(e: &PaperExecutionEngine, asset: &str) -> BalanceSnapshot {
     e.balances().into_iter().find(|b| b.asset == asset).unwrap()
 }
-fn fills(events: &[PaperEvent]) -> Vec<(OrderId, Decimal, Decimal, i64)> {
+fn fills(events: &[PaperEvent]) -> Vec<(OrderId, Quantity, Amount, i64)> {
     events
         .iter()
         .filter_map(|event| match event {
@@ -82,7 +82,7 @@ fn fills(events: &[PaperEvent]) -> Vec<(OrderId, Decimal, Decimal, i64)> {
 #[test]
 fn cancellation_retains_pre_cancel_fills_without_funding_replacement_twice() {
     for side in [OrderSide::Buy, OrderSide::Sell] {
-        for fee in [Decimal::new(1, 2), Decimal::new(-1, 2)] {
+        for fee in [literal("0.01"), literal("-0.01")] {
             let mut e = engine(1, 101, fee);
             e.place_order(order(side, 1.into())).unwrap();
             e.advance_replay_time(1200).unwrap();
@@ -96,7 +96,7 @@ fn cancellation_retains_pre_cancel_fills_without_funding_replacement_twice() {
             } else {
                 OrderSide::Buy
             };
-            let t = trade(1, 1100, Decimal::new(4, 1), opposite);
+            let t = trade(1, 1100, literal("0.4"), opposite);
             receive(&mut e, vec![t.clone(), t.clone()]);
             receive(
                 &mut e,
@@ -110,32 +110,34 @@ fn cancellation_retains_pre_cancel_fills_without_funding_replacement_twice() {
                 fills(&events),
                 [(
                     OrderId(1),
-                    Decimal::new(4, 1),
-                    fee * Decimal::from(40),
+                    literal("0.4"),
+                    Price::from(40).fee(Quantity::ONE, fee).unwrap(),
                     1100
                 )]
             );
             assert!(
-                matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == Decimal::new(6, 1))
+                matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == literal("0.6"))
             );
-            assert_eq!(balance(&e, "btc").locked_amount, Decimal::ZERO);
-            assert_eq!(balance(&e, "jpy").locked_amount, Decimal::ZERO);
+            assert_eq!(balance(&e, "btc").locked_amount, literal("0"));
+            assert_eq!(balance(&e, "jpy").locked_amount, literal("0"));
             let expected_base = if side == OrderSide::Buy {
-                Decimal::new(14, 1)
+                literal("1.4")
             } else {
-                Decimal::new(6, 1)
+                literal("0.6")
             };
-            let expected_quote = Decimal::from(101)
-                + if side == OrderSide::Buy {
-                    Decimal::from(-40)
+            let expected_quote = Amount::from(101)
+                .checked_add(if side == OrderSide::Buy {
+                    Amount::from(-40)
                 } else {
-                    Decimal::from(40)
-                }
-                - fee * Decimal::from(40);
+                    literal("40")
+                })
+                .unwrap()
+                .checked_sub(Price::from(40).fee(Quantity::ONE, fee).unwrap())
+                .unwrap();
             assert_eq!(balance(&e, "btc").free_amount, expected_base);
             assert_eq!(balance(&e, "jpy").free_amount, expected_quote);
             e.advance_replay_time(1250).unwrap();
-            e.place_order(order(side, Decimal::new(5, 1))).unwrap();
+            e.place_order(order(side, literal("0.5"))).unwrap();
             let before = e.balances();
             receive(&mut e, vec![t]); // 境界より古い既知の重複は正常に無視。
             e.cancel_orders("btc_jpy", vec![OrderId(1)]);
@@ -144,7 +146,7 @@ fn cancellation_retains_pre_cancel_fills_without_funding_replacement_twice() {
             assert!(
                 e.balances()
                     .iter()
-                    .all(|b| b.free_amount >= Decimal::ZERO && b.locked_amount >= Decimal::ZERO)
+                    .all(|b| b.free_amount >= literal("0") && b.locked_amount >= literal("0"))
             );
         }
     }
@@ -154,8 +156,8 @@ fn cancellation_retains_pre_cancel_fills_without_funding_replacement_twice() {
 fn delayed_and_out_of_order_trades_have_identical_fills_fees_and_markouts() {
     let input = [
         trade(10, 1000, 1.into(), OrderSide::Buy), // 開始同msは対象外
-        trade(11, 1100, Decimal::new(4, 1), OrderSide::Buy),
-        trade(12, 1150, Decimal::new(2, 1), OrderSide::Buy),
+        trade(11, 1100, literal("0.4"), OrderSide::Buy),
+        trade(12, 1150, literal("0.2"), OrderSide::Buy),
         trade(13, 1200, 1.into(), OrderSide::Buy), // 取消同msは対象外
         trade(14, 1250, 1.into(), OrderSide::Buy),
     ]; // B開始同msも対象外
@@ -164,7 +166,7 @@ fn delayed_and_out_of_order_trades_have_identical_fills_fees_and_markouts() {
         vec![vec![0, 1], vec![2, 3, 4]],
         vec![vec![], vec![4, 2, 0, 3, 1, 1]],
     ] {
-        let mut e = engine(2, 0, Decimal::new(1, 2));
+        let mut e = engine(2, 0, literal("0.01"));
         e.place_order(order(OrderSide::Sell, 1.into())).unwrap();
         e.advance_replay_time(1190).unwrap();
         receive(
@@ -185,21 +187,42 @@ fn delayed_and_out_of_order_trades_have_identical_fills_fees_and_markouts() {
         assert_eq!(filled.len(), 2);
         assert!(filled.iter().all(|f| f.0 == OrderId(1)));
         assert_eq!(e.open_orders()[0].order_id, OrderId(2));
-        assert_eq!(e.open_orders()[0].remaining_amount, Decimal::ONE);
+        assert_eq!(e.open_orders()[0].remaining_amount, literal("1"));
         assert!(
-            matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == Decimal::new(4, 1))
+            matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == literal("0.4"))
         );
-        let qty: Decimal = filled.iter().map(|f| f.1).sum();
-        let notional = qty * Decimal::from(100);
-        let fees: Decimal = filled.iter().map(|f| f.2).sum();
+        let qty = filled
+            .iter()
+            .try_fold(Quantity::ZERO, |n, f| n.checked_add(f.1))
+            .unwrap();
+        let notional = Price::from(100).notional(qty).unwrap();
+        let fees = filled
+            .iter()
+            .try_fold(Amount::ZERO, |n, f| n.checked_add(f.2))
+            .unwrap();
         // 同一期間・同一開始残高で、約定代金・数量・手数料・評価損益と約定後の値動きを比較。
         let marks: Vec<_> = [98, 103, 105]
             .into_iter()
-            .map(|price| qty * (Decimal::from(100) - Decimal::from(price)) - fees)
+            .map(|price| {
+                Price::from(100)
+                    .checked_sub(Price::from(price))
+                    .unwrap()
+                    .notional(qty)
+                    .unwrap()
+                    .checked_sub(fees)
+                    .unwrap()
+            })
             .collect();
-        let pnl = balance(&e, "jpy").onhand_amount
-            + balance(&e, "btc").onhand_amount * Decimal::from(105)
-            - Decimal::from(210);
+        let pnl = balance(&e, "jpy")
+            .onhand_amount
+            .checked_add(
+                Price::from(105)
+                    .notional(balance(&e, "btc").onhand_amount.to_quantity().unwrap())
+                    .unwrap(),
+            )
+            .unwrap()
+            .checked_sub(Amount::from(210))
+            .unwrap();
         results.push((
             filled,
             notional,
@@ -216,67 +239,61 @@ fn delayed_and_out_of_order_trades_have_identical_fills_fees_and_markouts() {
 
 #[test]
 fn full_fill_reports_zero_cancel_remainder_and_reuses_only_unspent_funds() {
-    let mut e = engine(1, 0, Decimal::ZERO);
+    let mut e = engine(1, 0, literal("0"));
     e.place_order(order(OrderSide::Sell, 1.into())).unwrap();
     e.advance_replay_time(1200).unwrap();
     e.cancel_orders("btc_jpy", vec![OrderId(1)]);
     receive(&mut e, vec![trade(1, 1100, 1.into(), OrderSide::Buy)]);
     let events = e.advance_trade_watermark(1200).unwrap();
     assert!(
-        matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == Decimal::ZERO)
+        matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == literal("0"))
     );
     assert!(e.place_order(order(OrderSide::Sell, 1.into())).is_err());
-    assert_eq!(balance(&e, "btc").onhand_amount, Decimal::ZERO);
-    assert_eq!(balance(&e, "jpy").free_amount, Decimal::from(100));
+    assert_eq!(balance(&e, "btc").onhand_amount, literal("0"));
+    assert_eq!(balance(&e, "jpy").free_amount, literal("100"));
 }
 
 #[test]
 fn partial_fill_known_before_cancel_and_late_fill_share_original_interval() {
-    let mut e = engine(1, 0, Decimal::ZERO);
+    let mut e = engine(1, 0, literal("0"));
     e.place_order(order(OrderSide::Sell, 1.into())).unwrap();
-    receive(
-        &mut e,
-        vec![trade(1, 1050, Decimal::new(2, 1), OrderSide::Buy)],
-    );
+    receive(&mut e, vec![trade(1, 1050, literal("0.2"), OrderSide::Buy)]);
     e.advance_trade_watermark(1050).unwrap();
     e.advance_replay_time(1200).unwrap();
     e.cancel_orders("btc_jpy", vec![OrderId(1)]);
-    receive(
-        &mut e,
-        vec![trade(2, 1100, Decimal::new(3, 1), OrderSide::Buy)],
-    );
+    receive(&mut e, vec![trade(2, 1100, literal("0.3"), OrderSide::Buy)]);
     let events = e.advance_trade_watermark(1200).unwrap();
-    assert_eq!(fills(&events)[0].1, Decimal::new(3, 1));
+    assert_eq!(fills(&events)[0].1, literal("0.3"));
     assert!(
-        matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == Decimal::new(5, 1))
+        matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == literal("0.5"))
     );
-    assert_eq!(balance(&e, "btc").free_amount, Decimal::new(5, 1));
-    assert_eq!(balance(&e, "jpy").free_amount, Decimal::from(50));
+    assert_eq!(balance(&e, "btc").free_amount, literal("0.5"));
+    assert_eq!(balance(&e, "jpy").free_amount, literal("50"));
 }
 
 #[test]
 fn unknown_tail_book_time_gap_and_watermark_violation_are_not_final_profit() {
-    let mut e = engine(1, 0, Decimal::ZERO);
+    let mut e = engine(1, 0, literal("0"));
     e.place_order(order(OrderSide::Sell, 1.into())).unwrap();
     e.advance_replay_time(1200).unwrap();
     e.cancel_orders("btc_jpy", vec![OrderId(1)]);
     e.apply_market_event(&MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             9000,
         ),
     });
     assert_eq!(e.settlement_status().pending_cancellations, 1);
     assert!(e.settlement_status().unsettled);
-    assert_eq!(balance(&e, "btc").locked_amount, Decimal::ONE);
+    assert_eq!(balance(&e, "btc").locked_amount, literal("1"));
     e.mark_incomplete("transport_closed; missing transactions");
     assert!(e.advance_trade_watermark(9000).is_err());
     assert!(e.place_order(order(OrderSide::Sell, 1.into())).is_err());
-    assert_eq!(balance(&e, "btc").locked_amount, Decimal::ONE);
+    assert_eq!(balance(&e, "btc").locked_amount, literal("1"));
 
-    let mut e = engine(1, 0, Decimal::ZERO);
+    let mut e = engine(1, 0, literal("0"));
     e.advance_trade_watermark(1100).unwrap();
     assert!(e.advance_trade_watermark(1099).is_err());
     receive(&mut e, vec![trade(2, 1050, 1.into(), OrderSide::Buy)]);
@@ -284,7 +301,7 @@ fn unknown_tail_book_time_gap_and_watermark_violation_are_not_final_profit() {
     assert_eq!(e.settlement_status().issues.len(), 1);
     assert!(e.advance_trade_watermark(1200).is_err());
 
-    let mut e = engine(1, 0, Decimal::ZERO);
+    let mut e = engine(1, 0, literal("0"));
     receive(&mut e, vec![trade(1, 1100, 1.into(), OrderSide::Buy)]);
     receive(&mut e, vec![trade(1, 1101, 1.into(), OrderSide::Buy)]);
     assert!(e.advance_trade_watermark(1200).is_err());
@@ -292,7 +309,7 @@ fn unknown_tail_book_time_gap_and_watermark_violation_are_not_final_profit() {
 
 #[test]
 fn equal_millisecond_trades_use_transaction_id_order() {
-    let mut e = engine(1, 0, Decimal::ZERO);
+    let mut e = engine(1, 0, literal("0"));
     e.place_order(order(OrderSide::Sell, 1.into())).unwrap();
     receive(
         &mut e,
@@ -349,7 +366,7 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
                         .unwrap()
                         .balances[1]
                         .free_amount,
-                    Decimal::from(99)
+                    literal("99")
                 );
             }
             _ => {}
@@ -367,7 +384,7 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
     }
 }
 async fn strategy_path(replay: bool) -> (Vec<(i64, AccountSnapshot)>, Vec<PaperEvent>) {
-    let venue = PaperTradingVenue::new(engine(2, 0, Decimal::new(1, 2)));
+    let venue = PaperTradingVenue::new(engine(2, 0, literal("0.01")));
     // 最初の接続時刻より前から時計を開始する。
     let observations = Arc::new(Mutex::new(Vec::new()));
     let mut runner = BotRunner::new(
@@ -464,7 +481,7 @@ async fn strategy_path(replay: bool) -> (Vec<(i64, AccountSnapshot)>, Vec<PaperE
     );
     assert_eq!(
         fills(&events),
-        [(OrderId(1), Decimal::ONE, Decimal::ONE, 1100)]
+        [(OrderId(1), literal("1"), literal("1"), 1100)]
     );
     assert_eq!(
         observations.last().unwrap().1.open_orders[0].order_id,
@@ -481,7 +498,7 @@ async fn paper_and_backtest_strategy_paths_preserve_receive_order_and_do_not_pee
 
 #[test]
 fn explicit_delay_assumption_settles_only_safe_prefix_and_flags_excess_delay() {
-    let mut e = engine(1, 0, Decimal::ZERO)
+    let mut e = engine(1, 0, literal("0"))
         .with_max_trade_delay_ms(300)
         .unwrap();
     e.place_order(order(OrderSide::Sell, 1.into())).unwrap();
@@ -502,7 +519,7 @@ fn explicit_delay_assumption_settles_only_safe_prefix_and_flags_excess_delay() {
     });
     assert_eq!(
         fills(&events),
-        [(OrderId(1), Decimal::ONE, Decimal::ZERO, 1100)]
+        [(OrderId(1), literal("1"), literal("0"), 1100)]
     );
     assert_eq!(e.settlement_status().pending_cancellations, 0);
     assert!(e.settlement_status().unsettled); // 有限待機では末尾を証明できない。
@@ -514,7 +531,7 @@ fn explicit_delay_assumption_settles_only_safe_prefix_and_flags_excess_delay() {
     assert!(e.advance_trade_watermark(1501).is_err());
 }
 
-struct ObserveBalances(Arc<Mutex<Vec<Decimal>>>);
+struct ObserveBalances(Arc<Mutex<Vec<Amount>>>);
 impl BotStrategy<PaperTradingVenue> for ObserveBalances {
     type CustomEvent = ();
     type Error = String;
@@ -551,7 +568,7 @@ async fn configured_settlement_updates_account_before_strategy_and_records_uncon
         bitbankutil_rs::execution_recording::timestamp_ms()
     ));
     let recorder = ExecutionRecorder::new("shutdown", json!({}), JsonlSink::open(&path).unwrap());
-    let initial = engine(1, 0, Decimal::ZERO);
+    let initial = engine(1, 0, literal("0"));
     let mut e = PaperExecutionEngine::new(
         initial.config().clone(),
         PaperClock::Replay { now_ms: 1000 },
@@ -592,7 +609,7 @@ async fn configured_settlement_updates_account_before_strategy_and_records_uncon
         .unwrap();
     assert_eq!(
         *observations.lock().unwrap(),
-        [Decimal::ZERO, Decimal::from(100)]
+        [literal("0"), literal("100")]
     );
     let runtime = BitbankBotBuilder::new(ObserveBalances(observations), venue).spawn();
     runtime.shutdown().await.unwrap();
@@ -610,13 +627,10 @@ async fn configured_settlement_updates_account_before_strategy_and_records_uncon
 
 #[test]
 fn cancellation_cannot_rewrite_an_already_sealed_millisecond() {
-    let mut e = engine(1, 0, Decimal::ZERO);
+    let mut e = engine(1, 0, literal("0"));
     e.place_order(order(OrderSide::Sell, 1.into())).unwrap();
     e.advance_replay_time(1100).unwrap();
-    receive(
-        &mut e,
-        vec![trade(1, 1100, Decimal::new(4, 1), OrderSide::Buy)],
-    );
+    receive(&mut e, vec![trade(1, 1100, literal("0.4"), OrderSide::Buy)]);
     e.advance_trade_watermark(1100).unwrap();
     e.cancel_orders("btc_jpy", vec![OrderId(1)]);
     assert!(e.drain_events().iter().any(|event| matches!(
@@ -626,22 +640,22 @@ fn cancellation_cannot_rewrite_an_already_sealed_millisecond() {
             ..
         }
     )));
-    assert_eq!(balance(&e, "btc").locked_amount, Decimal::new(6, 1));
+    assert_eq!(balance(&e, "btc").locked_amount, literal("0.6"));
     receive(&mut e, vec![trade(2, 1101, 1.into(), OrderSide::Buy)]);
     let events = e.advance_trade_watermark(1101).unwrap();
     assert!(fills(&events).is_empty());
     assert!(
-        matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == Decimal::new(6, 1))
+        matches!(events.last(), Some(PaperEvent::OrderCancelled { order, .. }) if order.remaining_amount == literal("0.6"))
     );
-    assert_eq!(balance(&e, "jpy").free_amount, Decimal::from(40));
-    assert_eq!(balance(&e, "btc").free_amount, Decimal::new(6, 1));
+    assert_eq!(balance(&e, "jpy").free_amount, literal("40"));
+    assert_eq!(balance(&e, "btc").free_amount, literal("0.6"));
 }
 
 #[tokio::test]
 async fn paper_runtime_delivers_market_after_known_disconnect_without_releasing_funds() {
     use bitbankutil_rs::bitbank_bot::BitbankBotBuilder;
-    let mut e = engine(1, 0, Decimal::ZERO);
-    e.place_order(order(OrderSide::Sell, Decimal::ONE)).unwrap();
+    let mut e = engine(1, 0, literal("0"));
+    e.place_order(order(OrderSide::Sell, literal("1"))).unwrap();
     e.advance_replay_time(1200).unwrap();
     e.cancel_orders("btc_jpy", vec![OrderId(1)]);
     e.mark_incomplete("transport_closed");
@@ -655,8 +669,8 @@ async fn paper_runtime_delivers_market_after_known_disconnect_without_releasing_
         .send(BotEvent::Market(MarketEvent::DepthUpdated {
             pair: "btc_jpy".into(),
             depth: MarketDepthSnapshot::new(
-                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+                std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
                 1300,
             ),
         }))
@@ -665,19 +679,19 @@ async fn paper_runtime_delivers_market_after_known_disconnect_without_releasing_
     sender
         .send(BotEvent::Market(MarketEvent::Transactions {
             pair: "btc_jpy".into(),
-            transactions: vec![trade(1, 1100, Decimal::ONE, OrderSide::Buy)],
+            transactions: vec![trade(1, 1100, literal("1"), OrderSide::Buy)],
         }))
         .await
         .unwrap();
     runtime.shutdown().await.unwrap();
-    assert_eq!(*observations.lock().unwrap(), Vec::<Decimal>::new());
+    assert_eq!(*observations.lock().unwrap(), Vec::<Amount>::new());
     assert_eq!(
         venue.account_snapshot("btc_jpy").await.unwrap().balances,
         before
     );
     assert!(
         venue
-            .place_order(order(OrderSide::Sell, Decimal::ONE).into())
+            .place_order(order(OrderSide::Sell, literal("1")).into())
             .await
             .is_err()
     );
@@ -699,8 +713,8 @@ fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExe
     engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             exchange_ms,
         ),
     });

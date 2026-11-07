@@ -433,6 +433,7 @@ pub(crate) async fn operation<T: Serialize>(
             Err(error) => {
                 use crate::trading_venue::TradingVenueError;
                 let (category, details) = match error {
+                    TradingVenueError::Numeric(e)=>("numeric",json!(e)),
                     TradingVenueError::Bitbank(_) => ("bitbank", Value::Null),
                     TradingVenueError::Parse(e) => ("parse", json!(e)),
                     TradingVenueError::Paper(e) => ("paper", json!(e)),
@@ -452,6 +453,7 @@ pub(crate) async fn operation<T: Serialize>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::book_units::*;
     // 合成の時刻/資金fixture用。注文をspread内に置き、先行数量を0にする。
     fn seeded_engine(
         mut engine: crate::paper_execution::PaperExecutionEngine,
@@ -460,8 +462,8 @@ pub(crate) mod tests {
         engine.apply_market_event(&crate::market_event::MarketEvent::DepthUpdated {
             pair: "btc_jpy".into(),
             depth: crate::market_event::MarketDepthSnapshot::new(
-                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+                std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
                 exchange_ms,
             ),
         });
@@ -529,7 +531,7 @@ pub(crate) mod tests {
         let r = ExecutionRecorder::new("test", json!({}), JsonlSink(memory.clone()));
         use crate::{order_domain::*, paper_execution::*, trading_venue::TradingVenue};
         let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
-        config.fee_schedule.maker_fee_rate_quote = rust_decimal::Decimal::new(1, 3);
+        config.fee_schedule.maker_fee_rate_quote = literal("0.001");
         let engine = PaperExecutionEngine::new(
             config,
             crate::paper_execution::PaperClock::Replay { now_ms: 0 },
@@ -580,7 +582,7 @@ pub(crate) mod tests {
                 .find(|b| b.asset == "jpy")
                 .unwrap()
                 .free_amount,
-            rust_decimal::Decimal::new(8999, 1)
+            literal("899.9")
         );
         assert!(v.account_snapshot("other").await.is_err());
         r.finish().unwrap();
@@ -609,10 +611,7 @@ pub(crate) mod tests {
             .iter()
             .find(|r| r.data["event"].get("OrderFilled").is_some())
             .unwrap();
-        assert_eq!(
-            fill.data["event"]["OrderFilled"]["fee_amount_quote"],
-            "0.100"
-        );
+        assert_eq!(fill.data["event"]["OrderFilled"]["fee_amount_quote"], "0.1");
         assert_eq!(
             fill.data["event"]["OrderFilled"]["trade"]["transaction_id"],
             77
@@ -690,7 +689,8 @@ pub(crate) mod tests {
                     "btc_jpy".into(),
                     venue.clone(),
                 )
-                .await;
+                .await
+                .unwrap();
                 let account = venue.account_snapshot("btc_jpy").await.unwrap();
                 assert_eq!(account.open_orders.len(), 2);
                 place_wanna_orders(
@@ -835,7 +835,7 @@ pub(crate) mod tests {
                             "btc_jpy".into(),
                             OrderSide::Buy,
                             1.into(),
-                            (10000 + index as i64).into()
+                            (10000 + index as i32).into()
                         ))
                         .is_err()
                 );
@@ -851,7 +851,7 @@ pub(crate) mod tests {
                     assert_eq!(first.price, 10050.into());
                     assert_eq!(
                         last.price,
-                        (10000 + PAPER_EVENT_HISTORY_LIMIT as i64 + 49).into()
+                        (10000 + PAPER_EVENT_HISTORY_LIMIT as i32 + 49).into()
                     );
                 }
                 _ => panic!("expected rejected orders"),
@@ -1027,7 +1027,7 @@ pub(crate) mod tests {
                 ExecutionRecorder::with_profile("invariant", json!({}), p, JsonlSink(m.clone()))
             });
             let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
-            config.fee_schedule.maker_fee_rate_quote = rust_decimal::Decimal::new(1, 3);
+            config.fee_schedule.maker_fee_rate_quote = literal("0.001");
             let balances = [("btc", 0), ("jpy", 1000)]
                 .into_iter()
                 .map(|(asset, n)| BalanceSnapshot {
@@ -1102,18 +1102,18 @@ pub(crate) mod tests {
                 assert_eq!(audit.len(), 5); // accepted, partial fill, cancel pending, cancelled, rejected
                 assert_eq!(
                     audit[1].data["event"]["OrderFilled"]["fee_amount_quote"],
-                    "0.100"
+                    "0.1"
                 );
-                assert_eq!(audit[0].data["balances"][1]["locked_amount"], "200.200");
+                assert_eq!(audit[0].data["balances"][1]["locked_amount"], "200.2");
                 assert_eq!(
                     audit[3].data["balances"][1]["locked_amount"]
                         .as_str()
                         .unwrap()
-                        .parse::<rust_decimal::Decimal>()
+                        .parse::<Amount>()
                         .unwrap(),
-                    rust_decimal::Decimal::ZERO
+                    Amount::ZERO
                 );
-                assert_eq!(audit[3].data["balances"][1]["free_amount"], "899.900");
+                assert_eq!(audit[3].data["balances"][1]["free_amount"], "899.9");
                 assert!(records.last().is_some_and(|r| r.kind == "run_finished"));
                 assert!(
                     records

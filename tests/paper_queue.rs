@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::{Amount, Price, Quantity, literal};
 mod support;
 use bitbankutil_rs::{
     execution_recording::{ExecutionRecorder, JsonlSink},
@@ -6,7 +7,6 @@ use bitbankutil_rs::{
     paper_execution::*,
     trading_venue::{TradingVenue, TradingVenueError},
 };
-use rust_decimal::Decimal;
 use std::{future::Future, task::Poll};
 use support::TestDiagnostics;
 
@@ -36,17 +36,17 @@ fn engine(delta: i64, recording: bool) -> PaperExecutionEngine {
     .unwrap();
     e
 }
-fn book(time: i64, bid: i64, bid_q: f64, ask: i64, ask_q: f64) -> MarketEvent {
+fn book(time: i64, bid: i32, bid_q: Quantity, ask: i32, ask_q: Quantity) -> MarketEvent {
     MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: MarketDepthSnapshot::new(
-            [(Decimal::from(110), 1.0), (Decimal::from(ask), ask_q)].into(),
-            [(Decimal::from(90), 1.0), (Decimal::from(bid), bid_q)].into(),
+            [(literal("110"), literal("1.0")), (Price::from(ask), ask_q)].into(),
+            [(literal("90"), literal("1.0")), (Price::from(bid), bid_q)].into(),
             time,
         ),
     }
 }
-fn order(side: OrderSide, price: i64, amount: i64) -> DesiredLimitOrder {
+fn order(side: OrderSide, price: i32, amount: i32) -> DesiredLimitOrder {
     let mut o = DesiredLimitOrder::limit("btc_jpy".into(), side, amount.into(), price.into());
     o.post_only = Some(true);
     o
@@ -56,8 +56,8 @@ fn trade(
     delta: i64,
     time: i64,
     side: OrderSide,
-    price: i64,
-    amount: i64,
+    price: i32,
+    amount: i32,
     id: i64,
 ) -> Vec<PaperEvent> {
     e.advance_replay_time(time + 50 - delta).unwrap();
@@ -73,7 +73,7 @@ fn trade(
     });
     e.advance_trade_watermark(time).unwrap()
 }
-fn fills(events: Vec<PaperEvent>) -> Vec<(OrderId, Decimal)> {
+fn fills(events: Vec<PaperEvent>) -> Vec<(OrderId, Quantity)> {
     events
         .into_iter()
         .filter_map(|e| match e {
@@ -90,7 +90,7 @@ fn equal_price_consumes_shared_external_queue_once_then_own_fifo() {
     for delta in [-250, 0, 250] {
         for recording in [false, true] {
             let mut e = engine(delta, recording);
-            e.apply_market_event(&book(1000, 99, 10.0, 101, 10.0));
+            e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("10.0")));
             e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
             assert!(fills(trade(&mut e, delta, 1100, OrderSide::Sell, 99, 6, 1)).is_empty());
             assert_eq!(
@@ -113,7 +113,7 @@ fn equal_price_consumes_shared_external_queue_once_then_own_fifo() {
         }
     }
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 10.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("10.0")));
     e.place_order(order(OrderSide::Buy, 99, 2)).unwrap();
     e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
     assert_eq!(
@@ -126,7 +126,7 @@ fn equal_price_consumes_shared_external_queue_once_then_own_fifo() {
 #[test]
 fn sell_queue_price_priority_and_price_through_keep_public_volume_cap() {
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 10.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("10.0")));
     e.place_order(order(OrderSide::Sell, 101, 2)).unwrap();
     e.place_order(order(OrderSide::Sell, 100, 3)).unwrap();
     // Through the better-priced order; total self volume is still only four.
@@ -144,14 +144,14 @@ fn sell_queue_price_priority_and_price_through_keep_public_volume_cap() {
 #[test]
 fn depth_decrease_and_trade_do_not_double_consume_and_additions_stay_behind() {
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 10.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("10.0")));
     e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
     e.advance_replay_time(1050).unwrap();
-    e.apply_market_event(&book(1050, 99, 4.0, 101, 10.0));
+    e.apply_market_event(&book(1050, 99, literal("4.0"), 101, literal("10.0")));
     assert!(fills(trade(&mut e, 0, 1060, OrderSide::Sell, 99, 6, 1)).is_empty());
     // Cancellation did not improve rank. Replenishment joins after the existing own order.
     e.advance_replay_time(1120).unwrap();
-    e.apply_market_event(&book(1120, 99, 10.0, 101, 10.0));
+    e.apply_market_event(&book(1120, 99, literal("10.0"), 101, literal("10.0")));
     e.place_order(order(OrderSide::Buy, 99, 2)).unwrap();
     assert_eq!(
         fills(trade(&mut e, 0, 1200, OrderSide::Sell, 99, 7, 2)),
@@ -167,7 +167,7 @@ fn depth_decrease_and_trade_do_not_double_consume_and_additions_stay_behind() {
 #[test]
 fn late_pre_activation_trade_does_not_advance_new_order_queue() {
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 10.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("10.0")));
     e.advance_replay_time(1200).unwrap();
     e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
     assert!(fills(trade(&mut e, 0, 1150, OrderSide::Sell, 99, 10, 1)).is_empty());
@@ -181,7 +181,7 @@ fn late_pre_activation_trade_does_not_advance_new_order_queue() {
 #[test]
 fn cancellation_reentry_loses_rank_and_duplicate_trade_is_ignored() {
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 1.0, 101, 1.0));
+    e.apply_market_event(&book(1000, 99, literal("1.0"), 101, literal("1.0")));
     e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
     e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
     assert_eq!(
@@ -207,7 +207,7 @@ fn post_only_crossing_rejects_entire_order_without_locking_funds() {
         (OrderSide::Sell, 98),
     ] {
         let mut e = engine(0, false);
-        e.apply_market_event(&book(1000, 99, 0.1, 101, 0.1));
+        e.apply_market_event(&book(1000, 99, literal("0.1"), 101, literal("0.1")));
         let before = e.balances();
         assert_eq!(
             e.place_order(order(side, price, 10)),
@@ -228,7 +228,7 @@ fn unsupported_or_missing_evidence_is_persistent_evaluation_uncertainty() {
             PaperModelUnavailable::MissingBook
         ))
     ));
-    e.apply_market_event(&book(1000, 99, 1.0, 101, 1.0));
+    e.apply_market_event(&book(1000, 99, literal("1.0"), 101, literal("1.0")));
     e.place_order(order(OrderSide::Buy, 99, 1)).unwrap();
     e.advance_trade_watermark(2000).unwrap();
     assert!(!e.settlement_status().model_issues.is_empty());
@@ -247,7 +247,7 @@ fn unsupported_or_missing_evidence_is_persistent_evaluation_uncertainty() {
         (OrderSide::Buy, 101, PaperModelUnavailable::UnsupportedTaker),
     ] {
         let mut e = engine(0, false);
-        e.apply_market_event(&book(1000, 99, 1.0, 101, 1.0));
+        e.apply_market_event(&book(1000, 99, literal("1.0"), 101, literal("1.0")));
         let mut o = order(side, price, 1);
         o.post_only = Some(false);
         assert_eq!(
@@ -286,7 +286,7 @@ fn unknown_mode_can_require_observation_and_observed_non_normal_overrides_assump
         None,
     )
     .unwrap();
-    e.apply_market_event(&book(1000, 99, 1.0, 101, 1.0));
+    e.apply_market_event(&book(1000, 99, literal("1.0"), 101, literal("1.0")));
     assert!(matches!(
         e.place_order(order(OrderSide::Buy, 99, 1)),
         Err(PaperExecutionError::ExecutionModelUnavailable(
@@ -307,10 +307,10 @@ fn unknown_mode_can_require_observation_and_observed_non_normal_overrides_assump
 #[test]
 fn invalid_and_out_of_order_books_never_become_zero_queue_success() {
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 1.0));
-    e.apply_market_event(&book(900, 98, 1.0, 99, 1.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("1.0")));
+    e.apply_market_event(&book(900, 98, literal("1.0"), 99, literal("1.0")));
     assert_eq!(e.settlement_status().book.unwrap().exchange_at_ms, 1000);
-    e.apply_market_event(&book(1050, 99, f64::NAN, 101, 1.0));
+    e.apply_market_event(&book(1050, 99, Quantity::from(-1), 101, literal("1.0")));
     assert!(e.place_order(order(OrderSide::Buy, 99, 1)).is_err());
     assert!(e.settlement_status().book.is_none());
     assert!(!e.settlement_status().model_issues.is_empty());
@@ -324,7 +324,7 @@ fn invalid_and_out_of_order_books_never_become_zero_queue_success() {
 #[test]
 fn incomplete_snapshot_invalidates_existing_book_even_without_exchange_timestamp() {
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 1.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("1.0")));
     e.apply_market_event(&MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: MarketDepthSnapshot::empty(),
@@ -342,7 +342,7 @@ fn incomplete_snapshot_invalidates_existing_book_even_without_exchange_timestamp
 #[tokio::test]
 async fn post_only_is_checked_at_effective_time_and_rejection_arrives_after_response_delay() {
     let mut e = engine(0, true);
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 10.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("10.0")));
     let venue = PaperTradingVenue::with_latency(
         e,
         PaperLatencyConfig {
@@ -364,7 +364,7 @@ async fn post_only_is_checked_at_effective_time_and_rejection_arrives_after_resp
     .await;
     venue.advance_replay_time(1050).unwrap();
     venue
-        .on_market_event(&book(1050, 98, 1.0, 99, 0.1))
+        .on_market_event(&book(1050, 98, literal("1.0"), 99, literal("0.1")))
         .unwrap();
     venue.process_internal_events(1100).unwrap();
     assert_eq!(venue.engine().lock().unwrap().balances(), before);
@@ -381,7 +381,7 @@ async fn post_only_is_checked_at_effective_time_and_rejection_arrives_after_resp
 #[test]
 fn opposing_own_orders_are_not_silently_treated_as_maker_liquidity() {
     let mut e = engine(0, false);
-    e.apply_market_event(&book(1000, 99, 1.0, 101, 1.0));
+    e.apply_market_event(&book(1000, 99, literal("1.0"), 101, literal("1.0")));
     e.place_order(order(OrderSide::Sell, 100, 2)).unwrap();
     let balances = e.balances();
     assert_eq!(
@@ -404,7 +404,7 @@ async fn realtime_and_replay_share_positive_queue_and_uncertainty_metadata() {
             PaperExecutionEngine::new(c, PaperClock::Realtime, engine(0, false).balances(), None)
                 .unwrap();
         let now = bitbankutil_rs::execution_recording::timestamp_ms() as i64 + delta;
-        e.apply_market_event(&book(now, 99, 10.0, 101, 10.0));
+        e.apply_market_event(&book(now, 99, literal("10.0"), 101, literal("10.0")));
         let v = PaperTradingVenue::new(e);
         v.place_order(order(OrderSide::Buy, 99, 3).into())
             .await
@@ -439,7 +439,7 @@ async fn realtime_and_replay_share_positive_queue_and_uncertainty_metadata() {
             v.advance_trade_watermark(time).unwrap();
             assert_eq!(
                 v.known_account_snapshot().open_orders[0].remaining_amount,
-                Decimal::from(if id == 1 { 3 } else { 2 })
+                Quantity::from(if id == 1 { 3 } else { 2 })
             );
         }
         // Once a missing-book decision occurred, query metadata explains the permanent uncertainty.
@@ -459,7 +459,9 @@ async fn realtime_and_replay_share_positive_queue_and_uncertainty_metadata() {
 #[test]
 fn same_ms_trade_does_not_advance_queue_and_missing_pair_book_does_not_admit() {
     let mut e = engine(0, false);
-    let MarketEvent::DepthUpdated { depth, .. } = book(1000, 99, 10.0, 101, 10.0) else {
+    let MarketEvent::DepthUpdated { depth, .. } =
+        book(1000, 99, literal("10.0"), 101, literal("10.0"))
+    else {
         unreachable!()
     };
     e.apply_market_event(&MarketEvent::DepthUpdated {
@@ -467,7 +469,7 @@ fn same_ms_trade_does_not_advance_queue_and_missing_pair_book_does_not_admit() {
         depth,
     });
     assert!(e.place_order(order(OrderSide::Buy, 99, 1)).is_err());
-    e.apply_market_event(&book(1000, 99, 10.0, 101, 10.0));
+    e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("10.0")));
     e.place_order(order(OrderSide::Buy, 99, 1)).unwrap();
     assert!(fills(trade(&mut e, 0, 1000, OrderSide::Sell, 99, 100, 1)).is_empty());
     assert!(fills(trade(&mut e, 0, 1100, OrderSide::Sell, 99, 10, 2)).is_empty());
@@ -479,12 +481,12 @@ fn same_ms_trade_does_not_advance_queue_and_missing_pair_book_does_not_admit() {
 
 #[test]
 fn external_quantity_behind_last_active_order_is_consumed_before_future_order() {
-    fn path(delayed: bool, depth_decrement: bool) -> Vec<(OrderId, Decimal)> {
+    fn path(delayed: bool, depth_decrement: bool) -> Vec<(OrderId, Quantity)> {
         let mut e = engine(0, false);
-        e.apply_market_event(&book(1000, 99, 10.0, 101, 1.0));
+        e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("1.0")));
         e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
         e.advance_replay_time(1050).unwrap();
-        e.apply_market_event(&book(1050, 100, 5.0, 101, 1.0));
+        e.apply_market_event(&book(1050, 100, literal("5.0"), 101, literal("1.0")));
         let event = MarketEvent::Transactions {
             pair: "btc_jpy".into(),
             transactions: vec![MarketTrade {
@@ -505,7 +507,7 @@ fn external_quantity_behind_last_active_order_is_consumed_before_future_order() 
         }
         e.advance_replay_time(1150).unwrap();
         if depth_decrement {
-            e.apply_market_event(&book(1150, 99, 10.0, 101, 1.0));
+            e.apply_market_event(&book(1150, 99, literal("10.0"), 101, literal("1.0")));
         }
         e.advance_replay_time(1200).unwrap();
         e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
@@ -519,7 +521,7 @@ fn external_quantity_behind_last_active_order_is_consumed_before_future_order() 
         }
         fills(trade(&mut e, 0, 1300, OrderSide::Sell, 100, 1, 2))
     }
-    let expected = vec![(OrderId(2), Decimal::ONE)];
+    let expected = vec![(OrderId(2), literal("1"))];
     for depth_decrement in [false, true] {
         assert_eq!(path(false, depth_decrement), expected);
         assert_eq!(path(true, depth_decrement), expected);
@@ -528,9 +530,9 @@ fn external_quantity_behind_last_active_order_is_consumed_before_future_order() 
 
 #[test]
 fn idle_level_consumes_external_trades_and_preserves_fees_across_watermark_timing() {
-    fn path(delayed: bool) -> (Vec<(OrderId, Decimal)>, Vec<BalanceSnapshot>, Decimal) {
+    fn path(delayed: bool) -> (Vec<(OrderId, Quantity)>, Vec<BalanceSnapshot>, Amount) {
         let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
-        config.fee_schedule = PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO);
+        config.fee_schedule = PaperFeeSchedule::new(literal("0.001"), literal("0"));
         let mut e = PaperExecutionEngine::new(
             config,
             PaperClock::Replay { now_ms: 1000 },
@@ -538,10 +540,10 @@ fn idle_level_consumes_external_trades_and_preserves_fees_across_watermark_timin
             None,
         )
         .unwrap();
-        e.apply_market_event(&book(1000, 99, 10.0, 101, 1.0));
+        e.apply_market_event(&book(1000, 99, literal("10.0"), 101, literal("1.0")));
         e.place_order(order(OrderSide::Buy, 100, 1)).unwrap();
         e.advance_replay_time(1050).unwrap();
-        e.apply_market_event(&book(1050, 100, 5.0, 101, 1.0));
+        e.apply_market_event(&book(1050, 100, literal("5.0"), 101, literal("1.0")));
         let events =
             [(1100, 1, 1), (1150, 5, 2)].map(|(time, amount, id)| MarketEvent::Transactions {
                 pair: "btc_jpy".into(),
@@ -580,14 +582,15 @@ fn idle_level_consumes_external_trades_and_preserves_fees_across_watermark_timin
                 } => Some(fee_amount_quote),
                 _ => None,
             })
-            .sum();
+            .try_fold(Amount::ZERO, |n, fee| n.checked_add(fee))
+            .unwrap();
         (final_fills, e.balances(), fees)
     }
     let immediate = path(false);
     let delayed = path(true);
     assert_eq!(immediate, delayed);
-    assert_eq!(immediate.0, [(OrderId(2), Decimal::ONE)]);
-    assert_eq!(immediate.2, Decimal::new(2, 1));
+    assert_eq!(immediate.0, [(OrderId(2), literal("1"))]);
+    assert_eq!(immediate.2, literal("0.2"));
 }
 
 // 0.2.3の同一シナリオから採取した注文・約定・手数料・残高・拒否理由との比較。
@@ -602,7 +605,7 @@ fn history_execution_matches_023_trace() {
                 config.time_model = PaperTimeModel::FixedOffset {
                     exchange_minus_local_ms: delta,
                 };
-                config.fee_schedule = PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO);
+                config.fee_schedule = PaperFeeSchedule::new(literal("0.001"), literal("0"));
                 let mut e = PaperExecutionEngine::new(
                     config,
                     PaperClock::Replay {
@@ -618,7 +621,7 @@ fn history_execution_matches_023_trace() {
                     }),
                 )
                 .unwrap();
-                e.apply_market_event(&book(1000, 99, 3.0, 101, 4.0));
+                e.apply_market_event(&book(1000, 99, literal("3.0"), 101, literal("4.0")));
                 let mut rejected = vec![format!(
                     "{:?}",
                     e.place_order(order(OrderSide::Buy, 101, 1))
@@ -626,9 +629,13 @@ fn history_execution_matches_023_trace() {
                 e.place_order(order(OrderSide::Buy, 99, 3)).unwrap();
                 e.place_order(order(OrderSide::Buy, 98, 2)).unwrap();
                 e.place_order(order(OrderSide::Sell, 101, 2)).unwrap();
-                for (t, q) in [(1030, 8.0), (1050, 1.0), (1070, 6.0)] {
+                for (t, q) in [
+                    (1030, literal("8.0")),
+                    (1050, literal("1.0")),
+                    (1070, literal("6.0")),
+                ] {
                     e.advance_replay_time(t - delta).unwrap();
-                    e.apply_market_event(&book(t, 99, q, 101, 4.0));
+                    e.apply_market_event(&book(t, 99, q, 101, literal("4.0")));
                 }
                 e.advance_replay_time(1100 - delta).unwrap();
                 e.cancel_orders("btc_jpy", vec![OrderId(1)]);
@@ -663,10 +670,10 @@ fn history_execution_matches_023_trace() {
                 e.advance_trade_watermark(1150).unwrap();
                 // 空価格へ再受付。表示減少・再増加も経て、遅着済み数量を復活させない。
                 e.advance_replay_time(1250 - delta).unwrap();
-                e.apply_market_event(&book(1250, 99, 1.0, 101, 4.0));
+                e.apply_market_event(&book(1250, 99, literal("1.0"), 101, literal("4.0")));
                 e.place_order(order(OrderSide::Buy, 99, 2)).unwrap();
                 e.advance_replay_time(1270 - delta).unwrap();
-                e.apply_market_event(&book(1270, 99, 3.0, 101, 4.0));
+                e.apply_market_event(&book(1270, 99, literal("3.0"), 101, literal("4.0")));
                 trade(&mut e, delta, 1300, OrderSide::Sell, 99, 3, 100);
                 rejected.push(format!(
                     "{:?}",

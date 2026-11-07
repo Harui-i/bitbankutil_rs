@@ -7,6 +7,8 @@
 
 詳しい利用方法は [APIドキュメント](https://docs.rs/bitbankutil_rs) を参照してください。
 
+価格・数量・率・残高は専用の固定小数点整数型で扱います。型と精度・移行方法は[数値型ガイド](docs/numeric-types.md)を参照してください。
+
 ## Examples
 
 ### bitbankのPrivate APIを利用した処理(現在の残高の取得など)

@@ -2,6 +2,8 @@ pub mod bitbank_bot;
 pub mod bitbank_private;
 pub mod bitbank_public;
 pub mod bitbank_structs;
+#[doc = include_str!("../docs/numeric-types.md")]
+pub mod book_units;
 pub mod market_event;
 pub mod order_domain;
 pub mod order_manager;
@@ -11,35 +13,35 @@ pub mod trading_venue;
 pub mod websocket_handler;
 
 pub mod depth {
+    use crate::book_units::{Price, Quantity};
     use core::fmt;
-    use rust_decimal::prelude::*;
     use std::collections::BTreeMap;
     pub trait Depth {
-        fn asks(&self) -> &BTreeMap<Decimal, f64>;
-        fn bids(&self) -> &BTreeMap<Decimal, f64>;
+        fn asks(&self) -> &BTreeMap<Price, Quantity>;
+        fn bids(&self) -> &BTreeMap<Price, Quantity>;
 
-        fn best_ask(&self) -> Option<(&Decimal, &f64)> {
+        fn best_ask(&self) -> Option<(&Price, &Quantity)> {
             self.asks().iter().next()
         }
 
-        fn best_bid(&self) -> Option<(&Decimal, &f64)> {
+        fn best_bid(&self) -> Option<(&Price, &Quantity)> {
             self.bids().iter().next_back()
         }
 
-        fn kth_best_ask(&self, k: usize) -> Option<(&Decimal, &f64)> {
+        fn kth_best_ask(&self, k: usize) -> Option<(&Price, &Quantity)> {
             self.asks().iter().nth(k)
         }
 
-        fn kth_best_bid(&self, k: usize) -> Option<(&Decimal, &f64)> {
+        fn kth_best_bid(&self, k: usize) -> Option<(&Price, &Quantity)> {
             self.bids().iter().nth_back(k)
         }
 
         // 最小価格pを返す。ここで、Sum_{bestask <= price <= p} (amount) >= rである。
         // 直感的に考えると、サイズrの成行買い注文を実行したときの最高価格である。
-        fn r_depth_ask_price(&self, r: f64) -> Option<&Decimal> {
-            let mut sum = f64::zero();
+        fn r_depth_ask_price(&self, r: f64) -> Option<&Price> {
+            let mut sum = 0.0;
             for (price, amount) in self.asks().iter() {
-                sum += amount;
+                sum += amount.to_f64();
                 if sum >= r {
                     return Some(price);
                 }
@@ -50,10 +52,10 @@ pub mod depth {
 
         // 最大価格pを返す。ここで、Sum_{p <= price <= bestbid} (amount) >= rである。
         // 直感的に考えると、サイズrの成行売り注文を実行したときの最低価格である。
-        fn r_depth_bid_price(&self, r: f64) -> Option<&Decimal> {
-            let mut sum = f64::zero();
+        fn r_depth_bid_price(&self, r: f64) -> Option<&Price> {
+            let mut sum = 0.0;
             for (price, amount) in self.bids().iter().rev() {
-                sum += amount;
+                sum += amount.to_f64();
                 if sum >= r {
                     return Some(price);
                 }
@@ -64,10 +66,10 @@ pub mod depth {
 
         // 最小価格pを返す。ここで、Sum_{bestask <= price <= p} (amount * price) >= sである。
         // 直感的に考えると、サイズs（ドル建て）の成行買い注文を実行したときの最高価格である。
-        fn s_depth_ask_price(&self, s: f64) -> Option<&Decimal> {
-            let mut sum = f64::zero();
+        fn s_depth_ask_price(&self, s: f64) -> Option<&Price> {
+            let mut sum = 0.0;
             for (price, amount) in self.asks().iter() {
-                sum += price.to_f64().unwrap() * *amount;
+                sum += price.to_f64() * amount.to_f64();
                 if sum >= s {
                     return Some(price);
                 }
@@ -78,10 +80,10 @@ pub mod depth {
 
         // 最大価格pを返す。ここで、Sum_{p <= price <= bestbid} (amount * price) >= sである。
         // 直感的に考えると、サイズs（ドル建て）の成行売り注文を実行したときの最低価格である。
-        fn s_depth_bid_price(&self, s: f64) -> Option<&Decimal> {
-            let mut sum = f64::zero();
+        fn s_depth_bid_price(&self, s: f64) -> Option<&Price> {
+            let mut sum = 0.0;
             for (price, amount) in self.bids().iter().rev() {
-                sum += price.to_f64().unwrap() * *amount;
+                sum += price.to_f64() * amount.to_f64();
                 if sum >= s {
                     return Some(price);
                 }
@@ -95,8 +97,8 @@ pub mod depth {
             let ask_price = self.r_depth_ask_price(r)?;
             let best_ask_price = self.best_ask()?.0;
 
-            let ask_price_f64 = ask_price.to_f64().unwrap();
-            let best_ask_price_f64 = best_ask_price.to_f64().unwrap();
+            let ask_price_f64 = ask_price.to_f64();
+            let best_ask_price_f64 = best_ask_price.to_f64();
 
             Some(ask_price_f64.ln() - best_ask_price_f64.ln())
         }
@@ -106,8 +108,8 @@ pub mod depth {
             let bid_price = self.r_depth_bid_price(r)?;
             let best_bid_price = self.best_bid()?.0;
 
-            let bid_price_f64 = bid_price.to_f64().unwrap();
-            let best_bid_price_f64 = best_bid_price.to_f64().unwrap();
+            let bid_price_f64 = bid_price.to_f64();
+            let best_bid_price_f64 = best_bid_price.to_f64();
 
             Some(bid_price_f64.ln() - best_bid_price_f64.ln())
         }
@@ -117,8 +119,8 @@ pub mod depth {
             let ask_price = self.s_depth_ask_price(s)?;
             let best_ask_price = self.best_ask()?.0;
 
-            let ask_price = ask_price.to_f64().unwrap();
-            let best_ask_price = best_ask_price.to_f64().unwrap();
+            let ask_price = ask_price.to_f64();
+            let best_ask_price = best_ask_price.to_f64();
 
             Some(ask_price.ln() - best_ask_price.ln())
         }
@@ -128,15 +130,19 @@ pub mod depth {
             let bid_price = self.s_depth_bid_price(s)?;
             let best_bid_price = self.best_bid()?.0;
 
-            let bid_price = bid_price.to_f64().unwrap();
-            let best_bid_price = best_bid_price.to_f64().unwrap();
+            let bid_price = bid_price.to_f64();
+            let best_bid_price = best_bid_price.to_f64();
 
             Some(bid_price.ln() - best_bid_price.ln())
         }
 
-        fn bidask_spread(&self) -> Option<Decimal> {
+        fn bidask_spread(&self) -> Option<Price> {
             if self.best_ask().is_some() && self.best_bid().is_some() {
-                Some(self.best_ask().unwrap().0 - self.best_bid().unwrap().0)
+                self.best_ask()
+                    .unwrap()
+                    .0
+                    .checked_sub(*self.best_bid().unwrap().0)
+                    .ok()
             } else {
                 None
             }
@@ -146,7 +152,7 @@ pub mod depth {
             if self.best_ask().is_some() && self.best_bid().is_some() {
                 let ask = self.best_ask().unwrap().1;
                 let bid = self.best_bid().unwrap().1;
-                Some(bid - ask)
+                Some(bid.to_f64() - ask.to_f64())
             } else {
                 None
             }
@@ -167,7 +173,11 @@ pub mod depth {
                 write!(
                     f,
                     "spread: {:.4}",
-                    self.best_ask().unwrap().0 - self.best_bid().unwrap().0
+                    self.best_ask()
+                        .unwrap()
+                        .0
+                        .checked_sub(*self.best_bid().unwrap().0)
+                        .map_err(|_| fmt::Error)?
                 )?;
             }
 
@@ -175,7 +185,11 @@ pub mod depth {
                 write!(
                     f,
                     ", second-best spread: {:.4}",
-                    self.kth_best_ask(2).unwrap().0 - self.kth_best_bid(2).unwrap().0
+                    self.kth_best_ask(2)
+                        .unwrap()
+                        .0
+                        .checked_sub(*self.kth_best_bid(2).unwrap().0)
+                        .map_err(|_| fmt::Error)?
                 )?;
             }
 
@@ -192,7 +206,7 @@ pub mod depth {
 }
 
 pub mod bybit {
-    use rust_decimal::prelude::*;
+    use crate::book_units::{Price, Quantity};
     use serde::Deserialize;
     use serde_json::Number;
 
@@ -204,15 +218,13 @@ pub mod bybit {
     #[allow(dead_code, non_snake_case)]
     #[derive(Deserialize, Debug)]
     pub struct BybitTransactionDatum {
-        pub BT: bool,  // ブロック取引かどうか
-        pub S: String, // サイド
-        pub T: i64,    // タイムスタンプ
-        pub i: String, // 取引ID
-        #[serde(with = "rust_decimal::serde::float")]
-        pub p: Decimal, // 価格
-        pub s: String, // シンボル
-        #[serde(with = "rust_decimal::serde::float")]
-        pub v: Decimal, // 取引サイズ
+        pub BT: bool,    // ブロック取引かどうか
+        pub S: String,   // サイド
+        pub T: i64,      // タイムスタンプ
+        pub i: String,   // 取引ID
+        pub p: Price,    // 価格
+        pub s: String,   // シンボル
+        pub v: Quantity, // 取引サイズ
     }
 
     #[allow(dead_code, non_snake_case)]
@@ -247,16 +259,16 @@ pub mod bybit {
     }
 
     pub struct BybitDepth {
-        asks: BTreeMap<Decimal, f64>,
-        bids: BTreeMap<Decimal, f64>,
+        asks: BTreeMap<Price, Quantity>,
+        bids: BTreeMap<Price, Quantity>,
     }
 
     impl Depth for BybitDepth {
-        fn asks(&self) -> &BTreeMap<Decimal, f64> {
+        fn asks(&self) -> &BTreeMap<Price, Quantity> {
             &self.asks
         }
 
-        fn bids(&self) -> &BTreeMap<Decimal, f64> {
+        fn bids(&self) -> &BTreeMap<Price, Quantity> {
             &self.bids
         }
     }
@@ -265,6 +277,45 @@ pub mod bybit {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             writeln!(f)?;
             self.format_depth(Some(20), f)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn bybit_updates_are_exact_and_invalid_batches_are_atomic() {
+            let mut book = BybitDepth::new();
+            let data = |a: serde_json::Value, b: serde_json::Value| {
+                serde_json::from_value::<BybitOrderbookData>(
+                    serde_json::json!({"s":"XRPUSDT","a":a,"b":b,"u":1,"seq":1}),
+                )
+                .unwrap()
+            };
+            book.update(data(
+                serde_json::json!([["101", "90000000000.00000001"]]),
+                serde_json::json!([["100", "1"]]),
+            ))
+            .unwrap();
+            assert_eq!(
+                book.asks()[&Price::from(101)].units(),
+                9_000_000_000_000_000_001
+            );
+            let before = book.asks().clone();
+            assert!(
+                book.update(data(
+                    serde_json::json!([["101", "0"]]),
+                    serde_json::json!([["100", "0.000000001"]])
+                ))
+                .is_err()
+            );
+            assert_eq!(book.asks(), &before);
+            book.update(data(
+                serde_json::json!([["101", "0"]]),
+                serde_json::json!([]),
+            ))
+            .unwrap();
+            assert!(book.asks().is_empty());
         }
     }
 
@@ -282,28 +333,40 @@ pub mod bybit {
             }
         }
 
-        pub fn update(&mut self, data: BybitOrderbookData) {
-            for ask in data.a.iter() {
-                let price = &ask[0].parse::<Decimal>().unwrap();
-                let size = ask[1].parse::<f64>().unwrap();
-
-                if size.is_zero() {
-                    self.asks.remove(price);
-                } else {
-                    self.asks.insert(*price, size);
+        pub fn update(
+            &mut self,
+            data: BybitOrderbookData,
+        ) -> Result<(), crate::book_units::NumericError> {
+            fn parse(
+                levels: Vec<Vec<String>>,
+            ) -> Result<Vec<(Price, Quantity)>, crate::book_units::NumericError> {
+                levels
+                    .into_iter()
+                    .map(|level| {
+                        if level.len() != 2 {
+                            return Err(crate::book_units::NumericError::Invalid);
+                        }
+                        let price: Price = level[0].parse()?;
+                        let quantity: Quantity = level[1].parse()?;
+                        if price <= Price::ZERO || quantity < Quantity::ZERO {
+                            return Err(crate::book_units::NumericError::Invalid);
+                        }
+                        Ok((price, quantity))
+                    })
+                    .collect()
+            }
+            let asks = parse(data.a)?;
+            let bids = parse(data.b)?;
+            for (map, levels) in [(&mut self.asks, asks), (&mut self.bids, bids)] {
+                for (price, quantity) in levels {
+                    if quantity.is_zero() {
+                        map.remove(&price);
+                    } else {
+                        map.insert(price, quantity);
+                    }
                 }
             }
-
-            for bid in data.b.iter() {
-                let price = &bid[0].parse::<Decimal>().unwrap();
-                let size = bid[1].parse::<f64>().unwrap();
-
-                if size.is_zero() {
-                    self.bids.remove(price);
-                } else {
-                    self.bids.insert(*price, size);
-                }
-            }
+            Ok(())
         }
     }
 }

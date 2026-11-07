@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::literal;
 mod support;
 use bitbankutil_rs::{
     bitbank_bot::{BotContext, BotEvent, BotRunner, BotStrategy},
@@ -463,8 +464,8 @@ fn seeded_engine(
     engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             exchange_ms,
         ),
     });

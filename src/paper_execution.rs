@@ -1,9 +1,8 @@
+use crate::book_units::{Amount, Price, Quantity, Rate, literal};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
 };
-
-use rust_decimal::Decimal;
 
 use crate::{
     market_event::{MarketEvent, MarketTrade},
@@ -77,12 +76,12 @@ impl PaperExecutionConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperFeeSchedule {
-    pub maker_fee_rate_quote: Decimal,
-    pub taker_fee_rate_quote: Decimal,
+    pub maker_fee_rate_quote: Rate,
+    pub taker_fee_rate_quote: Rate,
 }
 
 impl PaperFeeSchedule {
-    pub fn new(maker_fee_rate_quote: Decimal, taker_fee_rate_quote: Decimal) -> Self {
+    pub fn new(maker_fee_rate_quote: Rate, taker_fee_rate_quote: Rate) -> Self {
         Self {
             maker_fee_rate_quote,
             taker_fee_rate_quote,
@@ -95,9 +94,9 @@ impl PaperFeeSchedule {
         }
 
         if pair == "btc_jpy" {
-            Ok(Self::new(Decimal::ZERO, Decimal::new(1, 3)))
+            Ok(Self::new(literal("0"), literal("0.001")))
         } else {
-            Ok(Self::new(Decimal::new(-2, 4), Decimal::new(12, 4)))
+            Ok(Self::new(literal("-0.0002"), literal("0.0012")))
         }
     }
 }
@@ -125,15 +124,16 @@ pub enum PaperEvent {
     OrderFilled {
         order_id: OrderId,
         order: DesiredLimitOrder,
-        price: Decimal,
-        amount: Decimal,
-        fee_amount_quote: Decimal,
+        price: Price,
+        amount: Quantity,
+        fee_amount_quote: Amount,
         trade: MarketTrade,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaperRejectReason {
+    Numeric(crate::book_units::NumericError),
     PostOnlyWouldTakeLiquidity,
     ExecutionModelUnavailable(PaperModelUnavailable),
     PairMismatch {
@@ -141,19 +141,20 @@ pub enum PaperRejectReason {
         actual: String,
     },
     NonPositiveOrder {
-        amount: Decimal,
-        price: Decimal,
+        amount: Quantity,
+        price: Price,
     },
     InsufficientFunds {
         asset: String,
-        required: Decimal,
-        free: Decimal,
+        required: Amount,
+        free: Amount,
     },
     UnsupportedPair(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum PaperExecutionError {
+    Numeric(crate::book_units::NumericError),
     PostOnlyWouldTakeLiquidity,
     ExecutionModelUnavailable(PaperModelUnavailable),
     InvalidClock,
@@ -164,13 +165,13 @@ pub enum PaperExecutionError {
         actual: String,
     },
     NonPositiveOrder {
-        amount: Decimal,
-        price: Decimal,
+        amount: Quantity,
+        price: Price,
     },
     InsufficientFunds {
         asset: String,
-        required: Decimal,
-        free: Decimal,
+        required: Amount,
+        free: Amount,
     },
     MissingBalance(String),
     UnsupportedPair(String),
@@ -294,6 +295,9 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::MissingBalance(quote_asset));
         }
 
+        for balance in balances.values() {
+            balance.free_amount.checked_add(balance.locked_amount)?;
+        }
         let engine = Self {
             config,
             simulation_active: false,
@@ -362,7 +366,7 @@ impl PaperExecutionEngine {
             return Err(PaperExecutionError::from(reason));
         }
 
-        if order.amount <= Decimal::ZERO || order.price <= Decimal::ZERO {
+        if order.amount <= Quantity::ZERO || order.price <= Price::ZERO {
             let reason = PaperRejectReason::NonPositiveOrder {
                 amount: order.amount,
                 price: order.price,
@@ -405,7 +409,7 @@ impl PaperExecutionEngine {
             .max(self.watermark_ms.unwrap_or(i64::MIN));
         if self.open_orders.values().any(|existing| {
             existing.side != order.side
-                && existing.remaining_amount > Decimal::ZERO
+                && existing.remaining_amount > Quantity::ZERO
                 && self
                     .cancel_at
                     .get(&existing.order_id)
@@ -430,6 +434,12 @@ impl PaperExecutionEngine {
             });
             return Err(reason.into());
         }
+        let next_order_id = self
+            .config
+            .next_order_id
+            .0
+            .checked_add(1)
+            .ok_or(crate::book_units::NumericError::Overflow)?;
         let lock_result = self.lock_funds_for_order(&order);
         if let Err(err) = lock_result {
             self.record_event(PaperEvent::OrderRejected {
@@ -442,7 +452,7 @@ impl PaperExecutionEngine {
         self.observe_operation_time(exchange_now);
         let order_id = self.config.next_order_id;
         self.effective_after.insert(order_id, self.time_floor);
-        self.config.next_order_id = OrderId(self.config.next_order_id.0 + 1);
+        self.config.next_order_id = OrderId(next_order_id);
         self.queue_model.accept(&order, order_id, self.time_floor);
         if let Some(recorder) = &self.recorder {
             recorder.record_lazy("paper_queue_admission", || serde_json::json!({
@@ -616,7 +626,7 @@ impl PaperExecutionEngine {
                     ));
                     continue;
                 }
-                if trade.amount <= Decimal::ZERO || trade.price <= Decimal::ZERO {
+                if trade.amount <= Quantity::ZERO || trade.price <= Price::ZERO {
                     self.mark_incomplete(format!("invalid trade {}", trade.transaction_id));
                     continue;
                 }
@@ -656,47 +666,98 @@ impl PaperExecutionEngine {
             .first_key_value()
             .is_some_and(|(key, _)| key.0 <= through_ms)
         {
-            let (_, trade) = self.buffered_trades.pop_first().unwrap();
-            let allocations =
+            let trade = self.buffered_trades.first_key_value().unwrap().1.clone();
+            let plan =
                 self.queue_model
-                    .allocations(&trade, &self.open_orders, &self.cancel_at);
+                    .plan_allocations(&trade, &self.open_orders, &self.cancel_at);
+            let allocations = plan.fills.clone();
+            let mut balances = self.balances.clone();
+            let mut orders = self.open_orders.clone();
+            let mut staged = Vec::new();
+            for &(id, quantity) in &allocations {
+                let order = orders.remove(&id).expect("allocated order");
+                let (order, event) = settle_fill(
+                    &mut balances,
+                    &self.base_asset,
+                    &self.quote_asset,
+                    order,
+                    trade.clone(),
+                    quantity,
+                    self.config.fee_schedule.maker_fee_rate_quote,
+                )?;
+                if order.remaining_amount > Quantity::ZERO || self.cancel_at.contains_key(&id) {
+                    orders.insert(id, order);
+                }
+                staged.push(event);
+            }
+            self.buffered_trades.pop_first();
+            self.queue_model.commit_allocations(plan);
+            self.balances = balances;
+            self.open_orders = orders;
+            for (id, _) in &allocations {
+                if !self.open_orders.contains_key(id) {
+                    self.queue_model.remove(*id);
+                    self.effective_after.remove(id);
+                    self.cancel_at.remove(id);
+                }
+            }
             self.record_queue(false);
             if let Some(recorder) = &self.recorder {
-                recorder.record_lazy("paper_queue_trade", || serde_json::json!({"trade":trade,"allocations":allocations,"reason":"same_price_fifo_or_price_through_public_volume_cap"}));
+                recorder.record_lazy("paper_queue_trade",||serde_json::json!({"trade":trade,"allocations":allocations,"reason":"same_price_fifo_or_price_through_public_volume_cap"}));
             }
-            for (order_id, amount) in allocations {
-                let order = self.open_orders.remove(&order_id).unwrap();
-                let event = self.fill_open_order(order, trade.clone(), amount);
-                if !self.open_orders.contains_key(&order_id) {
-                    self.queue_model.remove(order_id);
-                }
+            for event in staged {
                 self.record_event(event.clone());
                 events.push(event);
             }
         }
+        events.extend(self.finalize_cancellations(through_ms)?);
         self.watermark_ms = Some(through_ms);
-        events.extend(self.finalize_cancellations());
         self.record_settlement();
         Ok(events)
     }
 
-    fn finalize_cancellations(&mut self) -> Vec<PaperEvent> {
+    fn finalize_cancellations(
+        &mut self,
+        through_ms: i64,
+    ) -> Result<Vec<PaperEvent>, PaperExecutionError> {
         if !self.settlement_issues.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let ids: Vec<_> = self
             .cancel_at
             .iter()
-            .filter(|(_, t)| self.watermark_ms.is_some_and(|w| **t <= w))
+            .filter(|(_, t)| **t <= through_ms)
             .map(|(id, _)| *id)
             .collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut balances = self.balances.clone();
+        for id in &ids {
+            if let Some(order) = self.open_orders.get(id) {
+                let asset = if order.side == OrderSide::Buy {
+                    &self.quote_asset
+                } else {
+                    &self.base_asset
+                };
+                move_locked_to_free(
+                    &mut balances,
+                    asset,
+                    locked_amount_for_open_order(
+                        order,
+                        self.config.fee_schedule.maker_fee_rate_quote,
+                    )?,
+                )?;
+            }
+        }
+        self.watermark_ms = Some(through_ms);
+        self.balances = balances;
         let mut events = Vec::new();
         for id in ids {
             self.cancel_at.remove(&id);
             self.effective_after.remove(&id);
             if let Some(order) = self.open_orders.remove(&id) {
                 self.queue_model.remove(id);
-                self.unlock_funds_for_open_order(&order);
                 let event = PaperEvent::OrderCancelled {
                     order_id: id,
                     order,
@@ -705,7 +766,7 @@ impl PaperExecutionEngine {
                 events.push(event);
             }
         }
-        events
+        Ok(events)
     }
 
     /// 有限遅延を仮定して自動確定する場合だけ明示設定する。既定では自動確定しない。
@@ -878,19 +939,17 @@ impl PaperExecutionEngine {
 
     fn lock_funds_for_order(&mut self, order: &DesiredLimitOrder) -> Result<(), PaperRejectReason> {
         let (asset, required) = match order.side {
-            OrderSide::Buy => {
-                let notional = order.amount * order.price;
-                let fee =
-                    positive_quote_fee(notional, self.config.fee_schedule.maker_fee_rate_quote);
-                (self.quote_asset.clone(), notional + fee)
-            }
-            OrderSide::Sell => (self.base_asset.clone(), order.amount),
+            OrderSide::Buy => (
+                self.quote_asset.clone(),
+                required_quote(
+                    order.price,
+                    order.amount,
+                    self.config.fee_schedule.maker_fee_rate_quote,
+                )?,
+            ),
+            OrderSide::Sell => (self.base_asset.clone(), order.amount.to_amount()),
         };
-
-        let balance = self
-            .balances
-            .get_mut(&asset)
-            .expect("paper engine balances were validated at construction");
+        let balance = self.balances.get(&asset).expect("validated balance");
         if balance.free_amount < required {
             return Err(PaperRejectReason::InsufficientFunds {
                 asset,
@@ -898,76 +957,12 @@ impl PaperExecutionEngine {
                 free: balance.free_amount,
             });
         }
-
-        balance.free_amount -= required;
-        balance.locked_amount += required;
-        balance.onhand_amount = balance.free_amount + balance.locked_amount;
+        let mut next = balance.clone();
+        next.free_amount = next.free_amount.checked_sub(required)?;
+        next.locked_amount = next.locked_amount.checked_add(required)?;
+        next.onhand_amount = next.free_amount.checked_add(next.locked_amount)?;
+        self.balances.insert(asset, next);
         Ok(())
-    }
-
-    fn unlock_funds_for_open_order(&mut self, order: &OpenOrder) {
-        let asset = match order.side {
-            OrderSide::Buy => self.quote_asset.clone(),
-            OrderSide::Sell => self.base_asset.clone(),
-        };
-        let amount =
-            locked_amount_for_open_order(order, self.config.fee_schedule.maker_fee_rate_quote);
-        move_locked_to_free(&mut self.balances, &asset, amount);
-    }
-
-    fn fill_open_order(
-        &mut self,
-        mut open_order: OpenOrder,
-        trade: MarketTrade,
-        fill_amount: Decimal,
-    ) -> PaperEvent {
-        let mut order = open_order
-            .to_desired_limit_order()
-            .expect("paper engine only stores limit orders with prices");
-        order.amount = fill_amount;
-        let notional = fill_amount * order.price;
-        let fee_amount_quote = notional * self.config.fee_schedule.maker_fee_rate_quote;
-
-        match order.side {
-            OrderSide::Buy => {
-                let locked_amount = notional
-                    + positive_quote_fee(notional, self.config.fee_schedule.maker_fee_rate_quote);
-                decrease_locked(&mut self.balances, &self.quote_asset, locked_amount);
-                add_free(&mut self.balances, &self.base_asset, fill_amount);
-                if fee_amount_quote < Decimal::ZERO {
-                    add_free(&mut self.balances, &self.quote_asset, -fee_amount_quote);
-                }
-            }
-            OrderSide::Sell => {
-                decrease_locked(&mut self.balances, &self.base_asset, fill_amount);
-                add_free(
-                    &mut self.balances,
-                    &self.quote_asset,
-                    notional - fee_amount_quote,
-                );
-            }
-        }
-
-        open_order.remaining_amount -= fill_amount;
-        let order_id = open_order.order_id;
-        let price = open_order
-            .price
-            .expect("paper engine limit order must have price");
-        if open_order.remaining_amount > Decimal::ZERO || self.cancel_at.contains_key(&order_id) {
-            self.open_orders.insert(order_id, open_order);
-        } else {
-            self.effective_after.remove(&order_id);
-            self.cancel_at.remove(&order_id);
-        }
-
-        PaperEvent::OrderFilled {
-            order_id,
-            order,
-            price,
-            amount: fill_amount,
-            fee_amount_quote,
-            trade,
-        }
     }
 
     fn record_event(&mut self, event: PaperEvent) {
@@ -1006,56 +1001,113 @@ fn parse_jpy_pair(pair: &str) -> Result<(String, String), PaperExecutionError> {
     Ok((base.to_owned(), "jpy".to_owned()))
 }
 
-fn locked_amount_for_open_order(order: &OpenOrder, maker_fee_rate_quote: Decimal) -> Decimal {
+fn required_quote(
+    price: Price,
+    quantity: Quantity,
+    rate: Rate,
+) -> Result<Amount, crate::book_units::NumericError> {
+    price
+        .notional(quantity)?
+        .checked_add(price.fee(quantity, rate)?.max(Amount::ZERO))
+}
+fn locked_amount_for_open_order(
+    order: &OpenOrder,
+    rate: Rate,
+) -> Result<Amount, crate::book_units::NumericError> {
     match order.side {
-        OrderSide::Buy => {
-            let notional = order.remaining_amount
-                * order
-                    .price
-                    .expect("paper engine limit order must have price");
-            notional + positive_quote_fee(notional, maker_fee_rate_quote)
-        }
-        OrderSide::Sell => order.remaining_amount,
+        OrderSide::Buy => required_quote(
+            order.price.expect("limit price"),
+            order.remaining_amount,
+            rate,
+        ),
+        OrderSide::Sell => Ok(order.remaining_amount.to_amount()),
     }
 }
-
-fn positive_quote_fee(notional: Decimal, fee_rate: Decimal) -> Decimal {
-    let fee = notional * fee_rate;
-    if fee > Decimal::ZERO {
-        fee
-    } else {
-        Decimal::ZERO
-    }
-}
-
 fn move_locked_to_free(
     balances: &mut BTreeMap<String, BalanceSnapshot>,
     asset: &str,
-    amount: Decimal,
-) {
-    decrease_locked(balances, asset, amount);
-    add_free(balances, asset, amount);
+    amount: Amount,
+) -> Result<(), crate::book_units::NumericError> {
+    decrease_locked(balances, asset, amount)?;
+    add_free(balances, asset, amount)
 }
-
-fn decrease_locked(balances: &mut BTreeMap<String, BalanceSnapshot>, asset: &str, amount: Decimal) {
-    let balance = balances
-        .get_mut(asset)
-        .expect("paper engine balance must exist");
-    balance.locked_amount -= amount;
-    balance.onhand_amount = balance.free_amount + balance.locked_amount;
+fn decrease_locked(
+    balances: &mut BTreeMap<String, BalanceSnapshot>,
+    asset: &str,
+    amount: Amount,
+) -> Result<(), crate::book_units::NumericError> {
+    let b = balances.get_mut(asset).expect("validated balance");
+    b.locked_amount = b.locked_amount.checked_sub(amount)?;
+    b.onhand_amount = b.free_amount.checked_add(b.locked_amount)?;
+    Ok(())
 }
-
-fn add_free(balances: &mut BTreeMap<String, BalanceSnapshot>, asset: &str, amount: Decimal) {
-    let balance = balances
-        .get_mut(asset)
-        .expect("paper engine balance must exist");
-    balance.free_amount += amount;
-    balance.onhand_amount = balance.free_amount + balance.locked_amount;
+fn add_free(
+    balances: &mut BTreeMap<String, BalanceSnapshot>,
+    asset: &str,
+    amount: Amount,
+) -> Result<(), crate::book_units::NumericError> {
+    let b = balances.get_mut(asset).expect("validated balance");
+    b.free_amount = b.free_amount.checked_add(amount)?;
+    b.onhand_amount = b.free_amount.checked_add(b.locked_amount)?;
+    Ok(())
+}
+fn settle_fill(
+    balances: &mut BTreeMap<String, BalanceSnapshot>,
+    base: &str,
+    quote: &str,
+    mut open: OpenOrder,
+    trade: MarketTrade,
+    quantity: Quantity,
+    rate: Rate,
+) -> Result<(OpenOrder, PaperEvent), crate::book_units::NumericError> {
+    let mut order = open.to_desired_limit_order().expect("limit order");
+    order.amount = quantity;
+    let price = order.price;
+    let notional = price.notional(quantity)?;
+    let fee = price.fee(quantity, rate)?;
+    match order.side {
+        OrderSide::Buy => {
+            decrease_locked(
+                balances,
+                quote,
+                notional.checked_add(fee.max(Amount::ZERO))?,
+            )?;
+            add_free(balances, base, quantity.to_amount())?;
+            if fee < Amount::ZERO {
+                add_free(balances, quote, fee.checked_neg()?)?;
+            }
+        }
+        OrderSide::Sell => {
+            decrease_locked(balances, base, quantity.to_amount())?;
+            add_free(balances, quote, notional.checked_sub(fee)?)?;
+        }
+    }
+    open.remaining_amount = open.remaining_amount.checked_sub(quantity)?;
+    let event = PaperEvent::OrderFilled {
+        order_id: open.order_id,
+        order,
+        price,
+        amount: quantity,
+        fee_amount_quote: fee,
+        trade,
+    };
+    Ok((open, event))
+}
+impl From<crate::book_units::NumericError> for PaperRejectReason {
+    fn from(e: crate::book_units::NumericError) -> Self {
+        Self::Numeric(e)
+    }
+}
+impl From<crate::book_units::NumericError> for PaperExecutionError {
+    fn from(e: crate::book_units::NumericError) -> Self {
+        Self::Numeric(e)
+    }
 }
 
 impl From<PaperRejectReason> for PaperExecutionError {
     fn from(value: PaperRejectReason) -> Self {
         match value {
+            PaperRejectReason::Numeric(e) => Self::Numeric(e),
             PaperRejectReason::PostOnlyWouldTakeLiquidity => Self::PostOnlyWouldTakeLiquidity,
             PaperRejectReason::ExecutionModelUnavailable(reason) => {
                 Self::ExecutionModelUnavailable(reason)
@@ -1082,6 +1134,7 @@ impl From<PaperRejectReason> for PaperExecutionError {
 
 #[cfg(test)]
 mod tests {
+    use crate::book_units::*;
     #[test]
     fn recording_without_diagnostics_does_not_clone_queue() {
         use crate::execution_recording::{ExecutionRecorder, JsonlSink, RecordingProfile};
@@ -1123,16 +1176,16 @@ mod tests {
 
     use super::*;
 
-    fn balance(asset: &str, free_amount: Decimal) -> BalanceSnapshot {
+    fn balance(asset: &str, free_amount: Amount) -> BalanceSnapshot {
         BalanceSnapshot {
             asset: asset.to_owned(),
             free_amount,
-            locked_amount: Decimal::ZERO,
+            locked_amount: literal("0"),
             onhand_amount: free_amount,
         }
     }
 
-    fn engine_with_balances(btc_free: Decimal, jpy_free: Decimal) -> PaperExecutionEngine {
+    fn engine_with_balances(btc_free: Amount, jpy_free: Amount) -> PaperExecutionEngine {
         let mut engine = PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
             crate::paper_execution::PaperClock::Replay { now_ms: 0 },
@@ -1148,16 +1201,101 @@ mod tests {
         engine.apply_market_event(&MarketEvent::DepthUpdated {
             pair: engine.config.pair.clone(),
             depth: crate::market_event::MarketDepthSnapshot::new(
-                [(Decimal::from(1_000_000_000u64), 1.0)].into(),
-                [(Decimal::new(1, 8), 1.0)].into(),
+                [(literal("1000000000"), literal("1.0"))].into(),
+                [(literal("0.00000001"), literal("1.0"))].into(),
                 0,
             ),
         });
     }
 
     #[test]
+    fn numeric_order_failure_does_not_lock_funds_or_advance_operation_state() {
+        let mut e = engine_with_balances(Amount::ONE, Amount::MAX);
+        let before = e.balances();
+        let floor = e.time_floor;
+        let id = e.config.next_order_id;
+        let order = DesiredLimitOrder::limit(
+            "btc_jpy".into(),
+            OrderSide::Buy,
+            literal("100000000"),
+            literal("100000000"),
+        );
+        assert_eq!(
+            e.place_order(order),
+            Err(PaperExecutionError::Numeric(NumericError::Overflow))
+        );
+        assert_eq!(e.balances(), before);
+        assert!(e.open_orders.is_empty());
+        assert_eq!(e.time_floor, floor);
+        assert_eq!(e.config.next_order_id, id);
+        assert_eq!(e.queue_diagnostics().live_orders, 0);
+    }
+    #[test]
+    fn numeric_fill_failure_keeps_account_orders_fifo_and_buffered_trade() {
+        let mut e = engine_with_balances(Amount::ONE, Amount::MAX);
+        e.config.fee_schedule.maker_fee_rate_quote = literal("-0.0002");
+        e.place_order(DesiredLimitOrder::limit(
+            "btc_jpy".into(),
+            OrderSide::Sell,
+            Quantity::ONE,
+            100.into(),
+        ))
+        .unwrap();
+        e.advance_replay_time(1000).unwrap();
+        e.apply_market_event(&MarketEvent::Transactions {
+            pair: "btc_jpy".into(),
+            transactions: vec![MarketTrade {
+                amount: Quantity::ONE,
+                price: 100.into(),
+                side: OrderSide::Buy,
+                transaction_id: 1,
+                executed_at: 1000,
+            }],
+        });
+        let balances = e.balances();
+        let orders = e.open_orders.clone();
+        let queue = e.queue_model.state();
+        let watermark = e.watermark_ms;
+        assert_eq!(
+            e.advance_trade_watermark(1000),
+            Err(PaperExecutionError::Numeric(NumericError::Overflow))
+        );
+        assert_eq!(e.balances(), balances);
+        assert_eq!(e.open_orders, orders);
+        assert_eq!(e.queue_model.state(), queue);
+        assert_eq!(e.watermark_ms, watermark);
+        assert_eq!(e.buffered_trades.len(), 1);
+    }
+    #[test]
+    fn numeric_cancel_failure_keeps_pending_cancellation_and_queue() {
+        let mut e = engine_with_balances(Amount::ONE, Amount::ZERO);
+        e.place_order(DesiredLimitOrder::limit(
+            "btc_jpy".into(),
+            OrderSide::Sell,
+            Quantity::ONE,
+            100.into(),
+        ))
+        .unwrap();
+        e.balances.get_mut("btc").unwrap().free_amount = Amount::MAX;
+        e.cancel_orders("btc_jpy", vec![OrderId(1)]);
+        let balances = e.balances();
+        let orders = e.open_orders.clone();
+        let queue = e.queue_model.state();
+        let pending = e.cancel_at.clone();
+        assert_eq!(
+            e.advance_trade_watermark(1000),
+            Err(PaperExecutionError::Numeric(NumericError::Overflow))
+        );
+        assert_eq!(e.balances(), balances);
+        assert_eq!(e.open_orders, orders);
+        assert_eq!(e.queue_model.state(), queue);
+        assert_eq!(e.cancel_at, pending);
+        assert_eq!(e.watermark_ms, None);
+    }
+
+    #[test]
     fn utc_rollback_does_not_reverse_operation_floor_or_sealed_boundary() {
-        let mut engine = engine_with_balances(Decimal::ONE, Decimal::ZERO);
+        let mut engine = engine_with_balances(literal("1"), literal("0"));
         // Realtimeの読み取り後と同じ境界へ、補正前後の取引所時計サンプルを渡す。
         assert_eq!(engine.observe_operation_time(1200), 1200);
         assert_eq!(engine.observe_operation_time(1100), 1200);
@@ -1165,17 +1303,17 @@ mod tests {
         assert_eq!(engine.observe_operation_time(1150), 1300);
         // 逆行したローカル時計での取消も最初の未確定ms以降。
         engine
-            .place_order(order(OrderSide::Sell, Decimal::ONE, Decimal::ONE))
+            .place_order(order(OrderSide::Sell, literal("1"), literal("1")))
             .unwrap();
         engine.cancel_orders("btc_jpy", vec![OrderId(1)]);
         assert_eq!(engine.cancel_at[&OrderId(1)], 1301);
     }
 
-    fn order(side: OrderSide, amount: Decimal, price: Decimal) -> DesiredLimitOrder {
+    fn order(side: OrderSide, amount: Quantity, price: Price) -> DesiredLimitOrder {
         DesiredLimitOrder::limit("btc_jpy".to_owned(), side, amount, price)
     }
 
-    fn trade(side: OrderSide, amount: Decimal, price: Decimal, transaction_id: i64) -> MarketTrade {
+    fn trade(side: OrderSide, amount: Quantity, price: Price, transaction_id: i64) -> MarketTrade {
         MarketTrade {
             amount,
             executed_at: 1_710_000_000_000,
@@ -1204,35 +1342,25 @@ mod tests {
     fn bitbank_default_fee_depends_on_pair() {
         assert_eq!(
             PaperFeeSchedule::bitbank_spot_default("btc_jpy").unwrap(),
-            PaperFeeSchedule::new(Decimal::ZERO, Decimal::new(1, 3))
+            PaperFeeSchedule::new(literal("0"), literal("0.001"))
         );
         assert_eq!(
             PaperFeeSchedule::bitbank_spot_default("eth_jpy").unwrap(),
-            PaperFeeSchedule::new(Decimal::new(-2, 4), Decimal::new(12, 4))
+            PaperFeeSchedule::new(literal("-0.0002"), literal("0.0012"))
         );
     }
 
     #[test]
     fn place_buy_order_locks_quote_balance() {
-        let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(1_000_000, 0));
+        let mut engine = engine_with_balances(literal("0"), literal("1000000"));
 
         let placed = engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
             .unwrap();
 
         assert_eq!(placed.order_id, Some(OrderId(1)));
-        assert_eq!(
-            balance_of(&engine, "jpy").free_amount,
-            Decimal::new(500_000, 0)
-        );
-        assert_eq!(
-            balance_of(&engine, "jpy").locked_amount,
-            Decimal::new(500_000, 0)
-        );
+        assert_eq!(balance_of(&engine, "jpy").free_amount, literal("500000"));
+        assert_eq!(balance_of(&engine, "jpy").locked_amount, literal("500000"));
         assert_eq!(engine.open_orders().len(), 1);
         assert!(matches!(
             engine.drain_events().as_slice(),
@@ -1245,28 +1373,20 @@ mod tests {
 
     #[test]
     fn place_sell_order_locks_base_balance() {
-        let mut engine = engine_with_balances(Decimal::new(2, 1), Decimal::ZERO);
+        let mut engine = engine_with_balances(literal("0.2"), literal("0"));
 
         engine
-            .place_order(order(
-                OrderSide::Sell,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Sell, literal("0.1"), literal("5000000")))
             .unwrap();
 
-        assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(1, 1));
-        assert_eq!(balance_of(&engine, "btc").locked_amount, Decimal::new(1, 1));
+        assert_eq!(balance_of(&engine, "btc").free_amount, literal("0.1"));
+        assert_eq!(balance_of(&engine, "btc").locked_amount, literal("0.1"));
     }
 
     #[test]
     fn insufficient_funds_rejects_order_and_records_event() {
-        let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(100_000, 0));
-        let order = order(
-            OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
-        );
+        let mut engine = engine_with_balances(literal("0"), literal("100000"));
+        let order = order(OrderSide::Buy, literal("0.1"), literal("5000000"));
 
         let result = engine.place_order(order.clone());
 
@@ -1287,44 +1407,25 @@ mod tests {
     #[test]
     fn non_positive_amount_or_price_rejects_order_without_changing_balances() {
         for invalid_order in [
-            order(OrderSide::Buy, Decimal::ZERO, Decimal::new(5_000_000, 0)),
-            order(
-                OrderSide::Buy,
-                Decimal::new(-1, 1),
-                Decimal::new(5_000_000, 0),
-            ),
-            order(OrderSide::Buy, Decimal::new(1, 1), Decimal::ZERO),
-            order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(-5_000_000, 0),
-            ),
-            order(OrderSide::Sell, Decimal::ZERO, Decimal::new(5_000_000, 0)),
-            order(
-                OrderSide::Sell,
-                Decimal::new(-1, 1),
-                Decimal::new(5_000_000, 0),
-            ),
-            order(OrderSide::Sell, Decimal::new(1, 1), Decimal::ZERO),
-            order(
-                OrderSide::Sell,
-                Decimal::new(1, 1),
-                Decimal::new(-5_000_000, 0),
-            ),
+            order(OrderSide::Buy, literal("0"), literal("5000000")),
+            order(OrderSide::Buy, literal("-0.1"), literal("5000000")),
+            order(OrderSide::Buy, literal("0.1"), literal("0")),
+            order(OrderSide::Buy, literal("0.1"), literal("-5000000")),
+            order(OrderSide::Sell, literal("0"), literal("5000000")),
+            order(OrderSide::Sell, literal("-0.1"), literal("5000000")),
+            order(OrderSide::Sell, literal("0.1"), literal("0")),
+            order(OrderSide::Sell, literal("0.1"), literal("-5000000")),
         ] {
-            let mut engine = engine_with_balances(Decimal::new(1, 0), Decimal::new(1_000_000, 0));
+            let mut engine = engine_with_balances(literal("1"), literal("1000000"));
 
             let result = engine.place_order(invalid_order);
 
             assert!(result.is_err());
             assert!(engine.open_orders().is_empty());
-            assert_eq!(
-                balance_of(&engine, "btc"),
-                balance("btc", Decimal::new(1, 0))
-            );
+            assert_eq!(balance_of(&engine, "btc"), balance("btc", literal("1")));
             assert_eq!(
                 balance_of(&engine, "jpy"),
-                balance("jpy", Decimal::new(1_000_000, 0))
+                balance("jpy", literal("1000000"))
             );
             assert!(matches!(
                 engine.drain_events().as_slice(),
@@ -1338,13 +1439,9 @@ mod tests {
 
     #[test]
     fn cancel_order_unlocks_balance_and_missing_id_succeeds() {
-        let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(1_000_000, 0));
+        let mut engine = engine_with_balances(literal("0"), literal("1000000"));
         engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
             .unwrap();
         engine.drain_events();
 
@@ -1352,11 +1449,8 @@ mod tests {
         engine.advance_trade_watermark(0).unwrap();
 
         assert!(engine.open_orders().is_empty());
-        assert_eq!(
-            balance_of(&engine, "jpy").free_amount,
-            Decimal::new(1_000_000, 0)
-        );
-        assert_eq!(balance_of(&engine, "jpy").locked_amount, Decimal::ZERO);
+        assert_eq!(balance_of(&engine, "jpy").free_amount, literal("1000000"));
+        assert_eq!(balance_of(&engine, "jpy").locked_amount, literal("0"));
         assert!(matches!(
             engine.drain_events().as_slice(),
             [
@@ -1371,30 +1465,23 @@ mod tests {
 
     #[test]
     fn buy_trade_fills_sell_order_and_updates_balances() {
-        let mut engine = engine_with_balances(Decimal::new(1, 1), Decimal::ZERO);
+        let mut engine = engine_with_balances(literal("0.1"), literal("0"));
         engine
-            .place_order(order(
-                OrderSide::Sell,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Sell, literal("0.1"), literal("5000000")))
             .unwrap();
         engine.drain_events();
 
         engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_100_000, 0),
+            literal("0.1"),
+            literal("5100000"),
             10,
         )]));
         let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
         assert!(engine.open_orders().is_empty());
-        assert_eq!(balance_of(&engine, "btc").locked_amount, Decimal::ZERO);
-        assert_eq!(
-            balance_of(&engine, "jpy").free_amount,
-            Decimal::new(500_000, 0)
-        );
+        assert_eq!(balance_of(&engine, "btc").locked_amount, literal("0"));
+        assert_eq!(balance_of(&engine, "jpy").free_amount, literal("500000"));
         assert!(matches!(
             events.as_slice(),
             [PaperEvent::OrderFilled {
@@ -1403,39 +1490,32 @@ mod tests {
                 amount,
                 fee_amount_quote,
                 ..
-            }] if *price == Decimal::new(5_000_000, 0)
-                && *amount == Decimal::new(1, 1)
-                && *fee_amount_quote == Decimal::ZERO
+            }] if *price == literal("5000000")
+                && *amount == literal("0.1")
+                && *fee_amount_quote == literal("0")
         ));
     }
 
     #[test]
     fn sell_trade_fills_buy_order_and_updates_balances() {
-        let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(1_000_000, 0));
+        let mut engine = engine_with_balances(literal("0"), literal("1000000"));
         engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
             .unwrap();
         engine.drain_events();
 
         engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
-            Decimal::new(1, 1),
-            Decimal::new(4_900_000, 0),
+            literal("0.1"),
+            literal("4900000"),
             11,
         )]));
         let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
         assert!(engine.open_orders().is_empty());
-        assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(1, 1));
-        assert_eq!(balance_of(&engine, "jpy").locked_amount, Decimal::ZERO);
-        assert_eq!(
-            balance_of(&engine, "jpy").free_amount,
-            Decimal::new(500_000, 0)
-        );
+        assert_eq!(balance_of(&engine, "btc").free_amount, literal("0.1"));
+        assert_eq!(balance_of(&engine, "jpy").locked_amount, literal("0"));
+        assert_eq!(balance_of(&engine, "jpy").free_amount, literal("500000"));
         assert_eq!(events.len(), 1);
     }
 
@@ -1444,60 +1524,49 @@ mod tests {
         let mut engine = PaperExecutionEngine::new(
             PaperExecutionConfig {
                 pair: "btc_jpy".to_owned(),
-                fee_schedule: PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::ZERO),
+                fee_schedule: PaperFeeSchedule::new(literal("0.001"), literal("0")),
                 next_order_id: OrderId(1),
                 time_model: PaperTimeModel::default(),
                 assume_normal_mode: true,
             },
             crate::paper_execution::PaperClock::Replay { now_ms: 0 },
             vec![
-                balance("btc", Decimal::ZERO),
-                balance("jpy", Decimal::new(1_000_000, 0)),
+                balance("btc", literal("0")),
+                balance("jpy", literal("1000000")),
             ],
             None,
         )
         .unwrap();
         seed_book(&mut engine);
         engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
             .unwrap();
         engine.drain_events();
 
         engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
+            literal("0.1"),
+            literal("5000000"),
             12,
         )]));
         let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
 
-        assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(1, 1));
-        assert_eq!(balance_of(&engine, "jpy").locked_amount, Decimal::ZERO);
-        assert_eq!(
-            balance_of(&engine, "jpy").free_amount,
-            Decimal::new(499_500, 0)
-        );
+        assert_eq!(balance_of(&engine, "btc").free_amount, literal("0.1"));
+        assert_eq!(balance_of(&engine, "jpy").locked_amount, literal("0"));
+        assert_eq!(balance_of(&engine, "jpy").free_amount, literal("499500"));
         assert!(matches!(
             events.as_slice(),
             [PaperEvent::OrderFilled {
                 fee_amount_quote, ..
-            }] if *fee_amount_quote == Decimal::new(500, 0)
+            }] if *fee_amount_quote == literal("500")
         ));
     }
 
     #[test]
     fn trade_does_not_fill_when_pair_side_or_price_do_not_match() {
-        let mut engine = engine_with_balances(Decimal::new(1, 1), Decimal::new(1_000_000, 0));
+        let mut engine = engine_with_balances(literal("0.1"), literal("1000000"));
         engine
-            .place_order(order(
-                OrderSide::Sell,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Sell, literal("0.1"), literal("5000000")))
             .unwrap();
         engine.drain_events();
 
@@ -1505,8 +1574,8 @@ mod tests {
             engine
                 .apply_market_event(&transactions(vec![trade(
                     OrderSide::Sell,
-                    Decimal::new(1, 1),
-                    Decimal::new(5_100_000, 0),
+                    literal("0.1"),
+                    literal("5100000"),
                     12,
                 )]))
                 .is_empty()
@@ -1515,8 +1584,8 @@ mod tests {
             engine
                 .apply_market_event(&transactions(vec![trade(
                     OrderSide::Buy,
-                    Decimal::new(1, 1),
-                    Decimal::new(4_900_000, 0),
+                    literal("0.1"),
+                    literal("4900000"),
                     13,
                 )]))
                 .is_empty()
@@ -1527,8 +1596,8 @@ mod tests {
                     pair: "eth_jpy".to_owned(),
                     transactions: vec![trade(
                         OrderSide::Buy,
-                        Decimal::new(1, 1),
-                        Decimal::new(5_100_000, 0),
+                        literal("0.1"),
+                        literal("5100000"),
                         14,
                     )],
                 })
@@ -1542,10 +1611,7 @@ mod tests {
         let mut engine = PaperExecutionEngine::new(
             PaperExecutionConfig::bitbank_spot_default("eth_jpy").unwrap(),
             crate::paper_execution::PaperClock::Replay { now_ms: 0 },
-            vec![
-                balance("eth", Decimal::new(1, 0)),
-                balance("jpy", Decimal::ZERO),
-            ],
+            vec![balance("eth", literal("1")), balance("jpy", literal("0"))],
             None,
         )
         .unwrap();
@@ -1554,67 +1620,47 @@ mod tests {
             .place_order(DesiredLimitOrder::limit(
                 "eth_jpy".to_owned(),
                 OrderSide::Sell,
-                Decimal::new(1, 0),
-                Decimal::new(500_000, 0),
+                literal("1"),
+                literal("500000"),
             ))
             .unwrap();
         engine.drain_events();
 
         engine.apply_market_event(&MarketEvent::Transactions {
             pair: "eth_jpy".to_owned(),
-            transactions: vec![trade(
-                OrderSide::Buy,
-                Decimal::new(1, 0),
-                Decimal::new(500_000, 0),
-                20,
-            )],
+            transactions: vec![trade(OrderSide::Buy, literal("1"), literal("500000"), 20)],
         });
 
         let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
-        assert_eq!(
-            balance_of(&engine, "jpy").free_amount,
-            Decimal::new(500_100, 0)
-        );
+        assert_eq!(balance_of(&engine, "jpy").free_amount, literal("500100"));
         assert!(matches!(
             events.as_slice(),
             [PaperEvent::OrderFilled {
                 fee_amount_quote, ..
-            }] if *fee_amount_quote == Decimal::new(-100, 0)
+            }] if *fee_amount_quote == literal("-100")
         ));
     }
 
     #[test]
     fn fills_multiple_orders_by_price_then_order_id() {
-        let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(2_000_000, 0));
+        let mut engine = engine_with_balances(literal("0"), literal("2000000"));
         engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(4_900_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("4900000")))
             .unwrap();
         seed_book(&mut engine);
         engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
             .unwrap();
         seed_book(&mut engine);
         engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
             .unwrap();
         engine.drain_events();
 
         engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
-            Decimal::new(3, 1),
-            Decimal::new(4_800_000, 0),
+            literal("0.3"),
+            literal("4800000"),
             30,
         )]));
         let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
@@ -1631,16 +1677,14 @@ mod tests {
 
     #[tokio::test]
     async fn paper_trading_venue_places_and_cancels() {
-        let executor = PaperTradingVenue::new(engine_with_balances(
-            Decimal::ZERO,
-            Decimal::new(1_000_000, 0),
-        ));
+        let executor =
+            PaperTradingVenue::new(engine_with_balances(literal("0"), literal("1000000")));
 
         let placed = executor
             .place_order(PlacementRequest::from(order(
                 OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
+                literal("0.1"),
+                literal("5000000"),
             )))
             .await
             .unwrap();
@@ -1675,13 +1719,9 @@ mod tests {
 
     #[test]
     fn all_paper_events_can_be_drained() {
-        let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(1_000_000, 0));
+        let mut engine = engine_with_balances(literal("0"), literal("1000000"));
         engine
-            .place_order(order(
-                OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
-            ))
+            .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
             .unwrap();
 
         assert_eq!(engine.drain_events().len(), 1);
@@ -1690,22 +1730,18 @@ mod tests {
 
     #[test]
     fn trade_amount_caps_fill_and_leaves_remaining_open_order_amount() {
-        let mut engine = engine_with_balances(Decimal::ZERO, Decimal::new(1_500_000, 0));
+        let mut engine = engine_with_balances(literal("0"), literal("1500000"));
         for _ in 0..3 {
             engine
-                .place_order(order(
-                    OrderSide::Buy,
-                    Decimal::new(1, 1),
-                    Decimal::new(5_000_000, 0),
-                ))
+                .place_order(order(OrderSide::Buy, literal("0.1"), literal("5000000")))
                 .unwrap();
         }
         engine.drain_events();
 
         engine.apply_market_event(&transactions(vec![trade(
             OrderSide::Sell,
-            Decimal::new(8, 2),
-            Decimal::new(5_000_000, 0),
+            literal("0.08"),
+            literal("5000000"),
             40,
         )]));
         let events = engine.advance_trade_watermark(1_710_000_000_000).unwrap();
@@ -1718,8 +1754,8 @@ mod tests {
                 fee_amount_quote,
                 ..
             }] if *order_id == OrderId(1)
-                && *amount == Decimal::new(8, 2)
-                && *fee_amount_quote == Decimal::ZERO
+                && *amount == literal("0.08")
+                && *fee_amount_quote == literal("0")
         ));
         assert_eq!(
             engine.open_orders(),
@@ -1729,8 +1765,8 @@ mod tests {
                     pair: "btc_jpy".to_owned(),
                     side: OrderSide::Buy,
                     order_type: OrderType::Limit,
-                    remaining_amount: Decimal::new(2, 2),
-                    price: Some(Decimal::new(5_000_000, 0)),
+                    remaining_amount: literal("0.02"),
+                    price: Some(literal("5000000")),
                     post_only: Some(true),
                 },
                 OpenOrder {
@@ -1738,8 +1774,8 @@ mod tests {
                     pair: "btc_jpy".to_owned(),
                     side: OrderSide::Buy,
                     order_type: OrderType::Limit,
-                    remaining_amount: Decimal::new(1, 1),
-                    price: Some(Decimal::new(5_000_000, 0)),
+                    remaining_amount: literal("0.1"),
+                    price: Some(literal("5000000")),
                     post_only: Some(true),
                 },
                 OpenOrder {
@@ -1747,16 +1783,13 @@ mod tests {
                     pair: "btc_jpy".to_owned(),
                     side: OrderSide::Buy,
                     order_type: OrderType::Limit,
-                    remaining_amount: Decimal::new(1, 1),
-                    price: Some(Decimal::new(5_000_000, 0)),
+                    remaining_amount: literal("0.1"),
+                    price: Some(literal("5000000")),
                     post_only: Some(true),
                 },
             ]
         );
-        assert_eq!(balance_of(&engine, "btc").free_amount, Decimal::new(8, 2));
-        assert_eq!(
-            balance_of(&engine, "jpy").locked_amount,
-            Decimal::new(1_100_000, 0)
-        );
+        assert_eq!(balance_of(&engine, "btc").free_amount, literal("0.08"));
+        assert_eq!(balance_of(&engine, "jpy").locked_amount, literal("1100000"));
     }
 }

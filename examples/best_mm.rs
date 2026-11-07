@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::{Amount, Price, Quantity, literal};
 use std::env;
 use std::time::Duration;
 
@@ -14,31 +15,30 @@ use bitbankutil_rs::paper_execution::{
 use bitbankutil_rs::trading_venue::{BitbankTradingVenue, TradingVenue};
 use crypto_botters::generic_api_client::websocket::WebSocketConfig;
 use log::LevelFilter;
-use rust_decimal::prelude::*;
 
 struct MyBot {
     bot_config: MyBotConfig,
     depth: MarketDepthSnapshot,
     last_updated: u128,
-    last_bestbid: Decimal,
-    last_bestask: Decimal,
+    last_bestbid: Price,
+    last_bestask: Price,
 }
 
 struct MyBotConfig {
     pair: String,
-    tick_size: Decimal,
+    tick_size: Price,
     refresh_cycle: u128,
-    lot: Decimal,
-    max_lot: Decimal,
+    lot: Quantity,
+    max_lot: Quantity,
 }
 
 impl MyBot {
     fn new(
         pair: String,
-        tick_size: Decimal,
+        tick_size: Price,
         refresh_cycle: u128,
-        lot: Decimal,
-        max_lot: Decimal,
+        lot: Quantity,
+        max_lot: Quantity,
     ) -> MyBot {
         MyBot {
             bot_config: MyBotConfig {
@@ -50,12 +50,16 @@ impl MyBot {
             },
             depth: MarketDepthSnapshot::empty(),
             last_updated: 0,
-            last_bestbid: Decimal::zero(),
-            last_bestask: Decimal::zero(),
+            last_bestbid: literal("0"),
+            last_bestask: literal("0"),
         }
     }
 
-    async fn update_orders<V: TradingVenue>(&mut self, venue: &V, now: u128) {
+    async fn update_orders<V: TradingVenue>(
+        &mut self,
+        venue: &V,
+        now: u128,
+    ) -> Result<(), bitbankutil_rs::book_units::NumericError> {
         let now_inst = std::time::Instant::now();
 
         assert!(self.last_updated <= now);
@@ -68,7 +72,7 @@ impl MyBot {
 
             if !self.depth.is_complete() {
                 log::info!("depth is not complete");
-                return;
+                return Ok(());
             }
 
             // APIの呼び出し頻度が高くなりすぎないように、ここで `self.last_updated` を更新する
@@ -79,7 +83,7 @@ impl MyBot {
                 Ok(account) => account,
                 Err(err) => {
                     log::error!("account snapshot failed: {:?}", err);
-                    return;
+                    return Ok(());
                 }
             };
             let current_orders = account.open_orders;
@@ -90,35 +94,39 @@ impl MyBot {
                 .find(|asset| asset.asset == asset_name)
             else {
                 log::error!("account snapshot is missing {}", asset_name);
-                return;
+                return Ok(());
             };
             let Some(jpy_balance_snapshot) =
                 account.balances.iter().find(|asset| asset.asset == "jpy")
             else {
                 log::error!("account snapshot is missing jpy");
-                return;
+                return Ok(());
             };
             log::debug!("active orders: {:?}", current_orders);
 
-            let mut btc_locked_jpy_amount: Decimal = Decimal::zero();
+            let mut btc_locked_jpy_amount: Amount = literal("0");
             // このペアのロックされたjpyを計算する
             for current_order in &current_orders {
                 if current_order.order_type == OrderType::Limit
                     && current_order.side == OrderSide::Buy
                 {
-                    btc_locked_jpy_amount +=
-                        current_order.price.expect("limit order must have a price")
-                            * current_order.remaining_amount;
+                    btc_locked_jpy_amount = btc_locked_jpy_amount.checked_add(
+                        current_order
+                            .price
+                            .expect("limit order must have a price")
+                            .notional(current_order.remaining_amount)?,
+                    )?;
                 }
             }
 
             let btc_free_amount = btc_balance_snapshot.free_amount;
             let btc_locked_amount = btc_balance_snapshot.locked_amount;
-            let btc_amount = btc_free_amount + btc_locked_amount;
-            let btc_amount_remainder =
-                btc_amount - (btc_amount / self.bot_config.lot).floor() * self.bot_config.lot;
+            let btc_amount = btc_free_amount
+                .checked_add(btc_locked_amount)?
+                .to_quantity()?;
+            let btc_amount_remainder = btc_amount.checked_remainder(self.bot_config.lot)?;
             let jpy_free_amount = jpy_balance_snapshot.free_amount;
-            let jpy_amount = jpy_free_amount + btc_locked_jpy_amount;
+            let jpy_amount = jpy_free_amount.checked_add(btc_locked_jpy_amount)?;
 
             log::debug!(
                 "btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}",
@@ -150,27 +158,29 @@ impl MyBot {
             });
 
             let sell_price = {
-                if has_bestask_order || best_ask_price - self.bot_config.tick_size == best_bid_price
+                if has_bestask_order
+                    || best_ask_price.checked_sub(self.bot_config.tick_size)? == best_bid_price
                 {
                     best_ask_price
                 } else {
-                    best_ask_price - self.bot_config.tick_size
+                    best_ask_price.checked_sub(self.bot_config.tick_size)?
                 }
             };
 
             let buy_price = {
-                if has_bestbid_order || best_bid_price + self.bot_config.tick_size == best_ask_price
+                if has_bestbid_order
+                    || best_bid_price.checked_add(self.bot_config.tick_size)? == best_ask_price
                 {
                     best_bid_price
                 } else {
-                    best_bid_price + self.bot_config.tick_size
+                    best_bid_price.checked_add(self.bot_config.tick_size)?
                 }
             };
 
-            log::debug!("target spread: {}", sell_price - buy_price);
+            log::debug!("target spread: {}", sell_price.checked_sub(buy_price)?);
 
-            let can_buy = jpy_amount >= buy_price * self.bot_config.lot
-                && btc_amount + self.bot_config.lot <= self.bot_config.max_lot;
+            let can_buy = jpy_amount >= buy_price.notional(self.bot_config.lot)?
+                && btc_amount.checked_add(self.bot_config.lot)? <= self.bot_config.max_lot;
             let can_sell = btc_amount >= self.bot_config.lot;
 
             let mut wanna_place_orders = Vec::new();
@@ -188,13 +198,16 @@ impl MyBot {
                 wanna_place_orders.push(DesiredLimitOrder::limit(
                     self.bot_config.pair.clone(),
                     OrderSide::Sell,
-                    self.bot_config.lot + btc_amount_remainder,
+                    self.bot_config.lot.checked_add(btc_amount_remainder)?,
                     sell_price,
                 ));
             }
 
             log::debug!("wanna_place_orders: {:?}", wanna_place_orders);
-            log::info!("evaluated asset: {}", btc_amount * sell_price + jpy_amount);
+            log::info!(
+                "evaluated asset: {}",
+                sell_price.notional(btc_amount)?.checked_add(jpy_amount)?
+            );
             bitbankutil_rs::order_manager::place_wanna_orders_concurrent(
                 wanna_place_orders,
                 current_orders,
@@ -203,12 +216,13 @@ impl MyBot {
                 self.bot_config.pair.clone(),
                 venue.clone(),
             )
-            .await;
+            .await?;
         }
         log::debug!(
             "update_orders has finished within {} ms",
             now_inst.elapsed().as_millis()
         );
+        Ok(())
     }
 }
 
@@ -227,7 +241,9 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
         match event {
             MarketEvent::Transactions { transactions, .. } => {
                 log::debug!("transaction updated: {:?}", transactions);
-                self.update_orders(ctx.venue(), ctx.now_ms() as u128).await;
+                self.update_orders(ctx.venue(), ctx.now_ms() as u128)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
             MarketEvent::DepthUpdated { depth, .. } => {
                 log::debug!("depth updated");
@@ -239,8 +255,12 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
                     if bestask != self.last_bestask || bestbid != self.last_bestbid {
                         log::debug!(
                             "best ask diff: {}, best bid diff: {}",
-                            bestask - self.last_bestask,
-                            bestbid - self.last_bestbid
+                            bestask
+                                .checked_sub(self.last_bestask)
+                                .map_err(|e| e.to_string())?,
+                            bestbid
+                                .checked_sub(self.last_bestbid)
+                                .map_err(|e| e.to_string())?
                         );
                         self.last_bestask = bestask;
                         self.last_bestbid = bestbid;
@@ -249,7 +269,9 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
 
                 self.depth = depth;
                 if self.depth.is_complete() {
-                    self.update_orders(ctx.venue(), ctx.now_ms() as u128).await;
+                    self.update_orders(ctx.venue(), ctx.now_ms() as u128)
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
             }
             MarketEvent::CircuitBreakInfo { info, .. } => {
@@ -265,10 +287,10 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
 fn spawn_bot<V: TradingVenue>(
     venue: V,
     pair: String,
-    tick_size: Decimal,
+    tick_size: Price,
     refresh_cycle: u128,
-    lot: Decimal,
-    max_lot: Decimal,
+    lot: Quantity,
+    max_lot: Quantity,
     websocket_config: WebSocketConfig,
 ) -> BitbankBotRuntime<std::convert::Infallible> {
     let bot = MyBot::new(pair.clone(), tick_size, refresh_cycle, lot, max_lot);
@@ -280,8 +302,8 @@ fn spawn_bot<V: TradingVenue>(
 
 fn paper_venue(
     pair: &str,
-    base_initial: Decimal,
-    jpy_initial: Decimal,
+    base_initial: Amount,
+    jpy_initial: Amount,
     lookahead_ms: i64,
 ) -> Result<
     (
@@ -290,7 +312,7 @@ fn paper_venue(
     ),
     String,
 > {
-    if base_initial < Decimal::ZERO || jpy_initial < Decimal::ZERO {
+    if base_initial < literal("0") || jpy_initial < literal("0") {
         return Err("paper initial balances must be non-negative".to_owned());
     }
     let config =
@@ -302,13 +324,13 @@ fn paper_venue(
         BalanceSnapshot {
             asset: base_asset.to_owned(),
             free_amount: base_initial,
-            locked_amount: Decimal::ZERO,
+            locked_amount: literal("0"),
             onhand_amount: base_initial,
         },
         BalanceSnapshot {
             asset: "jpy".to_owned(),
             free_amount: jpy_initial,
-            locked_amount: Decimal::ZERO,
+            locked_amount: literal("0"),
             onhand_amount: jpy_initial,
         },
     ];
@@ -352,11 +374,11 @@ async fn main() {
     }
 
     let pair = args[2].clone();
-    let tick_size: Decimal = args[3].parse().expect("invalid tick size");
+    let tick_size: Price = args[3].parse().expect("invalid tick size");
     let refresh_cycle: u128 = args[4].parse().expect("invalid refresh cycle");
-    let lot: Decimal = args[5].parse().expect("invalid lot");
-    let max_lot: Decimal = args[6].parse().expect("invalid max lot");
-    assert!(tick_size > Decimal::ZERO && lot > Decimal::ZERO && lot <= max_lot);
+    let lot: Quantity = args[5].parse().expect("invalid lot");
+    let max_lot: Quantity = args[6].parse().expect("invalid max lot");
+    assert!(tick_size > literal("0") && lot > literal("0") && lot <= max_lot);
 
     let mut websocket_config = WebSocketConfig::default();
     websocket_config.refresh_after = Duration::from_secs(3600);
@@ -381,8 +403,8 @@ async fn main() {
             (runtime, None)
         }
         Some("--paper") => {
-            let base_initial: Decimal = args[7].parse().expect("invalid base initial balance");
-            let jpy_initial: Decimal = args[8].parse().expect("invalid JPY initial balance");
+            let base_initial: Amount = args[7].parse().expect("invalid base initial balance");
+            let jpy_initial: Amount = args[8].parse().expect("invalid JPY initial balance");
             let lookahead_ms = args[9].parse().expect("invalid max trade delay");
             let (venue, engine) = paper_venue(&pair, base_initial, jpy_initial, lookahead_ms)
                 .expect("invalid paper setup");

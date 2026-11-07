@@ -1,12 +1,12 @@
 //! 独立プロセスで旧/新QueueModelを測る合成benchmark。docs/queue-history.md参照。
 #![allow(dead_code)]
-pub use bitbankutil_rs::order_domain;
+use bitbankutil_rs::book_units::{Price, Quantity, literal};
+pub use bitbankutil_rs::{bitbank_bot, book_units, order_domain};
 use bitbankutil_rs::{
     depth, market_event,
-    market_event::{MarketDepthSnapshot, MarketTrade},
+    market_event::{MarketDepthSnapshot, MarketEvent, MarketTrade},
     order_domain::{DesiredLimitOrder, OpenOrder, OrderId, OrderSide},
 };
-use rust_decimal::Decimal;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     collections::BTreeMap,
@@ -111,12 +111,16 @@ fn measure(label: &str, f: impl FnOnce()) {
     let peak = PEAK.load(Relaxed);
     println!("{label},{elapsed:.3},{count},{bytes},{live},{peak}");
 }
-fn depth(t: i64, p: i64, q: f64) -> MarketDepthSnapshot {
-    MarketDepthSnapshot::new([(1_000_000.into(), 1.0)].into(), [(p.into(), q)].into(), t)
+fn depth(t: i64, p: i32, q: Quantity) -> MarketDepthSnapshot {
+    MarketDepthSnapshot::new(
+        [(1_000_000.into(), literal("1.0"))].into(),
+        [(Price::from(p as i32), q)].into(),
+        t,
+    )
 }
 fn run<Q: Model>(n: i64, churn: i64) {
     let mut q = Q::default();
-    q.book(&depth(0, 100, 1.0), 0);
+    q.book(&depth(0, 100, literal("1.0")), 0);
     q.accept(
         &DesiredLimitOrder::limit(
             "btc_jpy".into(),
@@ -133,9 +137,25 @@ fn run<Q: Model>(n: i64, churn: i64) {
             let p = 100 + i;
             for j in 0..churn {
                 let t = (i * churn + j) * 3 + 1;
-                q.book(&depth(t, p, if j % 2 == 0 { 2.0 } else { 1.0 }), t);
+                q.book(
+                    &depth(
+                        t,
+                        p as i32,
+                        if j % 2 == 0 {
+                            literal("2.0")
+                        } else {
+                            literal("1.0")
+                        },
+                    ),
+                    t,
+                );
                 q.accept(
-                    &DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 1.into(), p.into()),
+                    &DesiredLimitOrder::limit(
+                        "btc_jpy".into(),
+                        OrderSide::Buy,
+                        1.into(),
+                        Price::from(p as i32),
+                    ),
                     OrderId(2),
                     t,
                 );
@@ -144,7 +164,7 @@ fn run<Q: Model>(n: i64, churn: i64) {
                     transaction_id: t,
                     executed_at: t + 1,
                     side: OrderSide::Sell,
-                    price: p.into(),
+                    price: Price::from(p as i32),
                     amount: 100.into(),
                 });
             }
@@ -154,12 +174,25 @@ fn run<Q: Model>(n: i64, churn: i64) {
     measure("observe_book_200", || {
         for j in 0..200 {
             q.book(
-                &depth(t + j, 100 + n, if j % 2 == 0 { 1.0 } else { 2.0 }),
+                &depth(
+                    t + j,
+                    (100 + n) as i32,
+                    if j % 2 == 0 {
+                        literal("1.0")
+                    } else {
+                        literal("2.0")
+                    },
+                ),
                 t + j,
             );
         }
     });
-    let o = DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 1.into(), (100 + n).into());
+    let o = DesiredLimitOrder::limit(
+        "btc_jpy".into(),
+        OrderSide::Buy,
+        1.into(),
+        Price::from((100 + n) as i32),
+    );
     measure("accept_remove_200", || {
         for j in 0..200 {
             q.accept(&o, OrderId(2), t + 200 + j);

@@ -1,4 +1,5 @@
 //! cargo bench --bench recording -- <disabled|financial|full|periodic|delta|counters> [updates] [levels]
+use bitbankutil_rs::book_units::{Price, Quantity, literal};
 use bitbankutil_rs::{
     execution_recording::*, market_event::*, order_domain::*, paper_execution::*,
 };
@@ -91,12 +92,18 @@ fn main() {
         .map(|i| MarketEvent::DepthUpdated {
             pair: "btc_jpy".into(),
             depth: MarketDepthSnapshot::new(
-                (0..levels).map(|p| ((20000 + p).into(), 1.0)).collect(),
+                (0..levels)
+                    .map(|p| (Price::from((20000 + p) as i32), literal("1.0")))
+                    .collect(),
                 (0..levels)
                     .map(|p| {
                         (
-                            (10000 - p).into(),
-                            if p == 0 { 1.0 + (i % 2) as f64 } else { 1.0 },
+                            Price::from((10000 - p) as i32),
+                            if p == 0 {
+                                Quantity::from(1 + (i % 2) as i32)
+                            } else {
+                                Quantity::ONE
+                            },
                         )
                     })
                     .collect(),

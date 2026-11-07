@@ -1,12 +1,14 @@
 use crate::bitbank_structs::{
     BitbankCircuitBreakInfo, BitbankDepth, BitbankTickerResponse, BitbankTransactionDatum,
+    DepthDelta, SharedDepthLevels,
 };
+use crate::book_units::{Price, Quantity};
 use crate::depth::Depth;
 use crate::order_domain::{OrderSide, ParseOrderError};
-use rust_decimal::Decimal;
 use serde_json::Number;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketTicker {
@@ -37,9 +39,9 @@ impl From<BitbankTickerResponse> for MarketTicker {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MarketTrade {
-    pub amount: Decimal,
+    pub amount: Quantity,
     pub executed_at: i64,
-    pub price: Decimal,
+    pub price: Price,
     pub side: OrderSide,
     pub transaction_id: i64,
 }
@@ -58,23 +60,27 @@ impl TryFrom<BitbankTransactionDatum> for MarketTrade {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MarketDepthSnapshot {
-    asks: BTreeMap<Decimal, f64>,
-    bids: BTreeMap<Decimal, f64>,
+    asks: SharedDepthLevels,
+    bids: SharedDepthLevels,
+    revision: Arc<()>,
+    changes: Option<DepthDelta>,
     last_timestamp: i64,
     is_complete: bool,
 }
 
 impl MarketDepthSnapshot {
     pub fn new(
-        asks: BTreeMap<Decimal, f64>,
-        bids: BTreeMap<Decimal, f64>,
+        asks: crate::book_units::Levels,
+        bids: crate::book_units::Levels,
         last_timestamp: i64,
     ) -> Self {
         Self {
-            asks,
-            bids,
+            asks: Arc::new(asks),
+            bids: Arc::new(bids),
+            revision: Arc::new(()),
+            changes: None,
             last_timestamp,
             is_complete: true,
         }
@@ -82,11 +88,25 @@ impl MarketDepthSnapshot {
 
     pub fn empty() -> Self {
         Self {
-            asks: BTreeMap::new(),
-            bids: BTreeMap::new(),
+            asks: Arc::new(crate::book_units::Levels::new()),
+            bids: Arc::new(crate::book_units::Levels::new()),
+            revision: Arc::new(()),
+            changes: None,
             last_timestamp: 0,
             is_complete: false,
         }
+    }
+
+    /// 直前の板から継続した更新なら変更価格だけを返す。
+    /// 要素は(side, 10^-8単位の価格, 10^-8単位の数量)。数量0は削除。
+    /// 全体板・接続切替・更新の取りこぼしではNoneを返すため全体を再同期する。
+    pub fn changes_since(&self, previous: &Self) -> Option<&[(OrderSide, Price, Quantity)]> {
+        if Arc::ptr_eq(&self.revision, &previous.revision) {
+            return Some(&[]);
+        }
+        self.changes.as_ref().and_then(|delta| {
+            Arc::ptr_eq(&delta.previous, &previous.revision).then_some(delta.levels.as_ref())
+        })
     }
 
     pub fn last_timestamp(&self) -> i64 {
@@ -98,13 +118,27 @@ impl MarketDepthSnapshot {
     }
 }
 
+impl PartialEq for MarketDepthSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.asks == other.asks
+            && self.bids == other.bids
+            && self.last_timestamp == other.last_timestamp
+            && self.is_complete == other.is_complete
+    }
+}
+
 impl Depth for MarketDepthSnapshot {
-    fn asks(&self) -> &BTreeMap<Decimal, f64> {
+    fn asks(&self) -> &BTreeMap<Price, Quantity> {
         &self.asks
     }
-
-    fn bids(&self) -> &BTreeMap<Decimal, f64> {
+    fn bids(&self) -> &BTreeMap<Price, Quantity> {
         &self.bids
+    }
+    fn best_ask(&self) -> Option<(&Price, &Quantity)> {
+        self.asks.first_key_value()
+    }
+    fn best_bid(&self) -> Option<(&Price, &Quantity)> {
+        self.bids.last_key_value()
     }
 }
 
@@ -118,8 +152,10 @@ impl fmt::Display for MarketDepthSnapshot {
 impl From<&BitbankDepth> for MarketDepthSnapshot {
     fn from(depth: &BitbankDepth) -> Self {
         Self {
-            asks: depth.asks().clone(),
-            bids: depth.bids().clone(),
+            asks: depth.asks.clone(),
+            bids: depth.bids.clone(),
+            revision: depth.revision.clone(),
+            changes: depth.changes.clone(),
             last_timestamp: depth.last_timestamp(),
             is_complete: depth.is_complete(),
         }

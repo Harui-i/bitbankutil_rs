@@ -1,8 +1,9 @@
-use rust_decimal::prelude::*;
+use crate::book_units::{Price, Quantity};
 use serde::Deserialize;
 use serde_json::Number;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::depth::Depth;
 
@@ -400,13 +401,11 @@ pub struct BitbankTransactionsData {
 #[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankTransactionDatum {
     /// 約定数量。
-    #[serde(with = "rust_decimal::serde::float")]
-    pub amount: Decimal,
+    pub amount: Quantity,
     /// 約定時刻（Unixタイムスタンプ、ミリ秒）。
     pub executed_at: i64,
     /// 約定価格。
-    #[serde(with = "rust_decimal::serde::float")]
-    pub price: Decimal,
+    pub price: Price,
     /// "buy" または "sell"。
     pub side: String,
     /// 約定ID。
@@ -478,6 +477,14 @@ pub struct BitbankDepthWhole {
     pub(crate) sequenceId: String,
 }
 
+pub(crate) type SharedDepthLevels = Arc<crate::book_units::Levels>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct DepthDelta {
+    pub previous: Arc<()>,
+    pub levels: Arc<[(crate::order_domain::OrderSide, Price, Quantity)]>,
+}
+
 /// 板情報（差分と全体の統合管理）。
 #[derive(Debug, Clone)]
 pub struct BitbankDepth {
@@ -486,23 +493,30 @@ pub struct BitbankDepth {
     last_whole: Option<u64>,
     last_diff: Option<u64>,
     /// 価格、数量。
-    asks: BTreeMap<Decimal, f64>,
+    pub(crate) asks: SharedDepthLevels,
     /// 価格、数量。
-    bids: BTreeMap<Decimal, f64>,
+    pub(crate) bids: SharedDepthLevels,
 
     /// 全体板を受信済みか。
     is_complete: bool,
     /// 最後に反映したタイムスタンプ。
     last_timestamp: i64,
+    pub(crate) revision: Arc<()>,
+    pub(crate) changes: Option<DepthDelta>,
 }
 
 impl Depth for BitbankDepth {
-    fn asks(&self) -> &BTreeMap<Decimal, f64> {
+    fn asks(&self) -> &BTreeMap<Price, Quantity> {
         &self.asks
     }
-
-    fn bids(&self) -> &BTreeMap<Decimal, f64> {
+    fn bids(&self) -> &BTreeMap<Price, Quantity> {
         &self.bids
+    }
+    fn best_ask(&self) -> Option<(&Price, &Quantity)> {
+        self.asks.first_key_value()
+    }
+    fn best_bid(&self) -> Option<(&Price, &Quantity)> {
+        self.bids.last_key_value()
     }
 }
 
@@ -526,10 +540,12 @@ impl BitbankDepth {
             diff_buffer: BTreeMap::new(),
             last_whole: None,
             last_diff: None,
-            asks: BTreeMap::new(),
-            bids: BTreeMap::new(),
+            asks: Arc::new(crate::book_units::Levels::new()),
+            bids: Arc::new(crate::book_units::Levels::new()),
             last_timestamp: 0,
             is_complete: false,
+            revision: Arc::new(()),
+            changes: None,
         }
     }
 
@@ -540,17 +556,33 @@ impl BitbankDepth {
     pub fn last_timestamp(&self) -> i64 {
         self.last_timestamp
     }
-
     pub fn insert_diff(&mut self, diff: BitbankDepthDiff) -> Result<(), String> {
         let seq = diff.s.parse::<u64>().map_err(|e| e.to_string())?;
-        Self::validate_levels(&diff.a, false)?;
-        Self::validate_levels(&diff.b, false)?;
+        let asks = Self::parse_levels(&diff.a, false)?;
+        let bids = Self::parse_levels(&diff.b, false)?;
         if self.last_whole.is_some_and(|s| seq <= s) || self.diff_buffer.contains_key(&seq) {
             return Ok(());
         }
         if !self.last_diff.is_some_and(|s| seq < s) {
-            Self::apply_levels(&mut self.asks, &diff.a);
-            Self::apply_levels(&mut self.bids, &diff.b);
+            let previous = self.revision.clone();
+            let mut changes = Vec::with_capacity(diff.a.len() + diff.b.len());
+            for (side, levels) in [
+                (crate::order_domain::OrderSide::Sell, &asks),
+                (crate::order_domain::OrderSide::Buy, &bids),
+            ] {
+                changes.extend(levels.iter().map(|&(price, amount)| (side, price, amount)));
+            }
+            if !asks.is_empty() {
+                Self::apply_levels(Arc::make_mut(&mut self.asks), &asks);
+            }
+            if !bids.is_empty() {
+                Self::apply_levels(Arc::make_mut(&mut self.bids), &bids);
+            }
+            self.revision = Arc::new(());
+            self.changes = Some(DepthDelta {
+                previous,
+                levels: changes.into(),
+            });
             self.last_timestamp = self.last_timestamp.max(diff.t);
             self.last_diff = Some(seq);
         }
@@ -559,16 +591,18 @@ impl BitbankDepth {
     }
     pub fn update_whole(&mut self, whole: BitbankDepthWhole) -> Result<(), String> {
         let seq = whole.sequenceId.parse::<u64>().map_err(|e| e.to_string())?;
-        Self::validate_levels(&whole.asks, true)?;
-        Self::validate_levels(&whole.bids, true)?;
+        let asks = Self::parse_levels(&whole.asks, true)?;
+        let bids = Self::parse_levels(&whole.bids, true)?;
         if self.last_whole.is_some_and(|s| seq <= s) {
             return Ok(());
         }
         self.diff_buffer.retain(|s, _| *s > seq);
-        self.asks.clear();
-        self.bids.clear();
-        Self::apply_levels(&mut self.asks, &whole.asks);
-        Self::apply_levels(&mut self.bids, &whole.bids);
+        self.asks = Arc::new(crate::book_units::Levels::new());
+        self.bids = Arc::new(crate::book_units::Levels::new());
+        Self::apply_levels(Arc::make_mut(&mut self.asks), &asks);
+        Self::apply_levels(Arc::make_mut(&mut self.bids), &bids);
+        self.revision = Arc::new(());
+        self.changes = None;
         self.last_timestamp = self.last_timestamp.max(whole.timestamp);
         self.last_whole = Some(seq);
         self.last_diff = Some(self.last_diff.unwrap_or(seq).max(seq));
@@ -576,28 +610,30 @@ impl BitbankDepth {
         self.is_complete = true;
         Ok(())
     }
-    fn validate_levels(levels: &[Vec<String>], whole: bool) -> Result<(), String> {
+    fn parse_levels(levels: &[Vec<String>], whole: bool) -> Result<Vec<(Price, Quantity)>, String> {
+        let mut parsed = Vec::with_capacity(levels.len());
         for level in levels {
             if level.len() != 2 {
                 return Err("invalid price level".into());
             }
-            let price = level[0].parse::<Decimal>().map_err(|e| e.to_string())?;
-            let amount = level[1].parse::<f64>().map_err(|e| e.to_string())?;
-            if price <= Decimal::ZERO
-                || !amount.is_finite()
-                || amount < 0.0
-                || (whole && amount == 0.0)
+            let price = level[0].parse::<Price>().map_err(|e| e.to_string())?;
+            let amount = level[1].parse::<Quantity>().map_err(|e| e.to_string())?;
+            if price <= Price::ZERO
+                || amount < Quantity::ZERO
+                || (whole && amount == Quantity::ZERO)
             {
                 return Err("invalid price or amount".into());
             }
+            parsed.push((price, amount));
         }
-        Ok(())
+        Ok(parsed)
     }
-    fn apply_levels(book: &mut BTreeMap<Decimal, f64>, levels: &[Vec<String>]) {
-        for level in levels {
-            let price = level[0].parse::<Decimal>().expect("validated price");
-            let amount = level[1].parse::<f64>().expect("validated amount");
-            if amount == 0.0 {
+    fn apply_levels(book: &mut crate::book_units::Levels, levels: &[(Price, Quantity)]) {
+        if levels.is_empty() {
+            return;
+        }
+        for &(price, amount) in levels {
+            if amount == Quantity::ZERO {
                 book.remove(&price);
             } else {
                 book.insert(price, amount);
@@ -607,8 +643,14 @@ impl BitbankDepth {
 
     fn process_diff_buffer(&mut self) {
         for diff in self.diff_buffer.values() {
-            Self::apply_levels(&mut self.asks, &diff.a);
-            Self::apply_levels(&mut self.bids, &diff.b);
+            Self::apply_levels(
+                Arc::make_mut(&mut self.asks),
+                &Self::parse_levels(&diff.a, false).expect("validated buffered asks"),
+            );
+            Self::apply_levels(
+                Arc::make_mut(&mut self.bids),
+                &Self::parse_levels(&diff.b, false).expect("validated buffered bids"),
+            );
             self.last_timestamp = self.last_timestamp.max(diff.t);
         }
     }

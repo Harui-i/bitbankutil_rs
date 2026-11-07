@@ -1,9 +1,9 @@
+use bitbankutil_rs::book_units::{Amount, literal};
 mod support;
 use bitbankutil_rs::{
     bitbank_bot::*, execution_recording::*, market_event::*, order_domain::*, paper_execution::*,
     replay::*, trading_venue::*,
 };
-use rust_decimal::Decimal;
 use std::{
     io,
     sync::{
@@ -24,7 +24,7 @@ impl EventSink for Records {
         Ok(())
     }
 }
-fn order(price: i64) -> DesiredLimitOrder {
+fn order(price: i32) -> DesiredLimitOrder {
     DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Sell, 1.into(), price.into())
 }
 fn venue(clock: PaperClock, delta: i64, recorder: Option<ExecutionRecorder>) -> PaperTradingVenue {
@@ -57,7 +57,7 @@ fn engine(
     config.time_model = PaperTimeModel::FixedOffset {
         exchange_minus_local_ms: delta,
     };
-    config.fee_schedule = PaperFeeSchedule::new(Decimal::ZERO, Decimal::ZERO);
+    config.fee_schedule = PaperFeeSchedule::new(literal("0"), literal("0"));
     let mut engine = PaperExecutionEngine::new(
         config,
         clock,
@@ -89,7 +89,7 @@ fn trade(executed_at: i64) -> MarketEvent {
         }],
     }
 }
-fn balance(s: &AccountSnapshot, asset: &str) -> Decimal {
+fn balance(s: &AccountSnapshot, asset: &str) -> Amount {
     s.balances
         .iter()
         .find(|b| b.asset == asset)
@@ -131,8 +131,8 @@ async fn individual_samples_are_frozen_and_old_query_cannot_overwrite_new_notifi
         v.process_internal_events(1080 - delta).unwrap();
         let result = query.await.unwrap();
         assert_eq!(result.open_orders[0].order_id, OrderId(1));
-        assert_eq!(balance(&result, "btc"), Decimal::from(2));
-        assert_eq!(balance(&result, "jpy"), Decimal::from(100));
+        assert_eq!(balance(&result, "btc"), literal("2"));
+        assert_eq!(balance(&result, "jpy"), literal("100"));
         assert_eq!(v.known_account_snapshot(), newer);
         let m = result.query.unwrap();
         assert_eq!(
@@ -172,16 +172,13 @@ async fn late_trade_does_not_rewrite_sample_and_uncertainty_survives_final_water
     v.process_internal_events(1080).unwrap();
     let sampled = query.await.unwrap();
     assert_eq!(sampled.open_orders.len(), 1);
-    assert_eq!(balance(&sampled, "jpy"), Decimal::ZERO);
+    assert_eq!(balance(&sampled, "jpy"), literal("0"));
     assert!(sampled.query.as_ref().unwrap().orders.unsettled);
     v.advance_replay_time(1090).unwrap();
     v.on_market_event(&trade(1010)).unwrap();
     v.advance_trade_watermark(1200).unwrap();
-    assert_eq!(balance(&sampled, "jpy"), Decimal::ZERO);
-    assert_eq!(
-        balance(&v.known_account_snapshot(), "jpy"),
-        Decimal::from(100)
-    );
+    assert_eq!(balance(&sampled, "jpy"), literal("0"));
+    assert_eq!(balance(&v.known_account_snapshot(), "jpy"), literal("100"));
     let status = v.paper_settlement_status().unwrap();
     assert!(status.unsettled);
     assert_eq!(status.uncertain_query_observations, 2);
@@ -564,7 +561,7 @@ async fn real_market_applies_once_during_query_and_same_ms_sampling_is_after_mar
     let samples = snapshots.lock().unwrap();
     let s = &samples[0];
     assert_eq!(s.open_orders[0].order_id, OrderId(1)); // 1020に採取。
-    assert_eq!(balance(s, "jpy"), Decimal::from(100)); // 1030の確定後に採取。
+    assert_eq!(balance(s, "jpy"), literal("100")); // 1030の確定後に採取。
     assert_eq!(s.query.as_ref().unwrap().balances.watermark_ms, Some(1030));
     let events = v.engine().lock().unwrap().drain_events();
     assert_eq!(
@@ -659,8 +656,8 @@ fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExe
     engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             exchange_ms,
         ),
     });
