@@ -8,7 +8,7 @@ pub(super) enum Endpoint {
     Balances,
 }
 impl Endpoint {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Orders => "orders_query",
             Self::Balances => "balances_query",
@@ -17,15 +17,15 @@ impl Endpoint {
 }
 
 #[derive(Debug)]
-enum Values {
+pub(super) enum Values {
     Orders(Vec<OpenOrder>),
     Balances(Vec<BalanceSnapshot>),
 }
 
 #[derive(Debug)]
 pub(super) struct Part {
-    values: Values,
-    observation: AccountObservation,
+    pub(super) values: Values,
+    pub(super) observation: AccountObservation,
 }
 
 #[derive(Debug)]
@@ -36,12 +36,12 @@ pub(super) enum QueryEvent {
         endpoint: Endpoint,
         requested: i64,
         response_delay: i64,
-        reply: oneshot::Sender<Result<Part, TradingVenueError>>,
+        reply: Reply<Part>,
     },
     Response {
         id: u64,
         result: Result<Part, TradingVenueError>,
-        reply: oneshot::Sender<Result<Part, TradingVenueError>>,
+        reply: Reply<Part>,
     },
 }
 
@@ -51,52 +51,18 @@ impl PaperTradingVenue {
         pair: &str,
         endpoint: Endpoint,
     ) -> Result<oneshot::Receiver<Result<Part, TradingVenueError>>, TradingVenueError> {
-        let mut s = self
-            .state
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?;
-        let latency = match endpoint {
-            Endpoint::Orders => s.latency.orders_query,
-            Endpoint::Balances => s.latency.balances_query,
-        };
-        let (now, sample_at, response_at) = self.request_times(latency)?;
-        let id = s
-            .operation
-            .checked_add(1)
-            .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
         let (tx, rx) = oneshot::channel();
-        s.operation = id;
-        let info = PendingOperation::Query {
-            id,
-            kind: endpoint.name(),
-            pair: pair.into(),
-            requested: now,
-            sample: sample_at,
-            response: response_at,
-            sampled: None,
-        };
-        record(
-            &self.engine.lock().unwrap(),
-            "paper_query_requested",
-            || info.json(),
-        );
-        s.operations.insert(id, info);
-        let enqueued = s.enqueue(
-            sample_at,
-            Internal::Query(QueryEvent::Sample {
-                id,
-                pair: pair.into(),
-                endpoint,
-                requested: now,
-                response_delay: latency.response_ms,
-                reply: tx,
-            }),
-        );
-        if let Err(error) = enqueued {
-            s.operations.remove(&id);
-            return Err(error);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            let engine = self
+                .engine
+                .lock()
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            enqueue_query(&mut state, &engine, pair, endpoint, |_| Reply::Async(tx))?;
         }
-        drop(s);
         self.drive_now()?;
         Ok(rx)
     }
@@ -254,7 +220,7 @@ pub(super) fn process(
                 "observation":result.as_ref().ok().map(|p|&p.observation)})
             });
             state.operations.remove(&id);
-            let _ = reply.send(result);
+            reply.send(result, state);
         }
     }
     Ok(())

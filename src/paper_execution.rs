@@ -1019,8 +1019,8 @@ impl PaperExecutionEngine {
 
 mod latency;
 pub use latency::{
-    PaperDiagnosticSnapshot, PaperDiagnostics, PaperLatencyConfig, PaperOperationLatency,
-    PaperTradingVenue,
+    OwnedPaperExecution, PaperDiagnosticSnapshot, PaperDiagnostics, PaperLatencyConfig,
+    PaperOperationLatency, PaperTradingVenue,
 };
 mod queue;
 pub use queue::{

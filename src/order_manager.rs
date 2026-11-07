@@ -43,10 +43,10 @@ pub struct OrderPlan {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ConcurrentOrderPlan {
-    cancels: Vec<OrderId>,
-    first_placements: BTreeSet<DesiredLimitOrder>,
-    second_placements: BTreeSet<DesiredLimitOrder>,
+pub struct ConcurrentOrderPlan {
+    pub cancels: Vec<OrderId>,
+    pub first_placements: BTreeSet<DesiredLimitOrder>,
+    pub second_placements: BTreeSet<DesiredLimitOrder>,
 }
 
 pub fn plan_orders(
@@ -80,7 +80,7 @@ pub fn plan_orders(
     }
 }
 
-fn plan_concurrent_orders_from_open_orders(
+pub fn plan_concurrent_orders_from_open_orders(
     wanna_place_orders: Vec<DesiredLimitOrder>,
     current_orders: Vec<OpenOrder>,
     btc_free_amount: Amount,

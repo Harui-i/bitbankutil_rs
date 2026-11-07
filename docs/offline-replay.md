@@ -120,3 +120,20 @@ cargo test --locked --test simulation
 テストはpost-onlyの新旧の差、二重の板復元、通知・照会、同ms取消、時計差、遅着・内容衝突、
 最短sourceの終了境界、仮想実時間のPaperとバックテストの一致を確認します。
 実履歴での損益改善を保証するテストではありません。
+
+## 実験: 同期イベント・コマンド戦略
+
+`EventStrategy::on_event`は同期的に`Request`を出力する。口座照会・発注・取消の結果は、要求IDを持つ後続の`StrategyEvent::Response`として受け取る。`true`を返す間は新しい市場配送を保留するため、従来のasyncハンドラーの応答待ちを明示的な状態として表現できる。内部市場・注文の有効化・約定の確定は、その間も進む。
+
+`EventRunner`は`OwnedPaperExecution`を単独所有する。市場配送ごとのFuture、共有context、waker、取引所へのMutex経由のアクセスは不要になる。注文・照会の登録と処理、採取値の凍結、市場順序、先読み、終了判定はasync版と共通。要求の登録と完了は同じではなく、設定されたentry/response遅延を維持する。
+
+best_mmの比較実行（引数は`--backtest`と同じ）:
+
+```sh
+cargo run --release --example best_mm -- --backtest-commands \
+  xrp_jpy 0.001 1000 10 1000 500 1000000 60000 MANIFEST 7
+```
+
+初回の解析・compileと反復実行時間を分けて出力する。戦略の注文判断と注文計画は通常のbest_mmと共有する。
+
+これはバックテスト用の実験API。実時計のライブ運用、実行記録の出力、戦略からの予約イベント・派生イベントの登録はまだ提供していない。記録付きengineは構築時に拒否する。新しいランナーは反復ごとに作り直す。未完了の要求IDは一意にし、応答待ちは戦略の状態で管理する。

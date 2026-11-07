@@ -3,7 +3,7 @@ use super::*;
 use std::task::Waker;
 use tokio::sync::oneshot;
 mod query;
-use query::QueryEvent;
+use query::{Endpoint, QueryEvent};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PaperOperationLatency {
@@ -50,24 +50,24 @@ enum Internal {
         id: u64,
         order: DesiredLimitOrder,
         response_at: i64,
-        reply: oneshot::Sender<Result<PlacedOrder, TradingVenueError>>,
+        reply: Reply<PlacedOrder>,
     },
     Cancel {
         id: u64,
         pair: String,
         orders: Vec<OrderId>,
         response_at: i64,
-        reply: oneshot::Sender<Result<(), TradingVenueError>>,
+        reply: Reply<()>,
     },
     PlaceResponse {
         id: u64,
         result: Result<PlacedOrder, TradingVenueError>,
-        reply: oneshot::Sender<Result<PlacedOrder, TradingVenueError>>,
+        reply: Reply<PlacedOrder>,
     },
     CancelResponse {
         id: u64,
         result: Result<(), TradingVenueError>,
-        reply: oneshot::Sender<Result<(), TradingVenueError>>,
+        reply: Reply<()>,
     },
     Publish {
         id: u64,
@@ -168,6 +168,7 @@ pub(super) struct State {
     sequence: u64,
     operation: u64,
     operations: BTreeMap<u64, PendingOperation>,
+    completed: VecDeque<Completion>,
     /// ローカル口座は取引所の状態遷移の一貫したprefixを通知する。
     publication_floor: i64,
     waker: Option<Waker>,
@@ -187,6 +188,7 @@ impl State {
             sequence: 0,
             operation: 0,
             operations: BTreeMap::new(),
+            completed: VecDeque::new(),
             publication_floor: i64::MIN,
             waker: None,
             worker_running: false,
@@ -583,71 +585,22 @@ impl PaperTradingVenue {
         });
     }
 
-    fn request_times(
-        &self,
-        latency: PaperOperationLatency,
-    ) -> Result<(i64, i64, i64), TradingVenueError> {
-        let e = self
-            .engine
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?;
-        let now = local_now(&e)?;
-        let entry = add(now, latency.entry_ms)?;
-        let response = add(entry, latency.response_ms)?;
-        e.config
-            .time_model
-            .local_to_exchange_ms(entry)
-            .map_err(TradingVenueError::Paper)?;
-        Ok((now, entry, response))
-    }
-
     fn submit_place(
         &self,
         order: DesiredLimitOrder,
     ) -> Result<oneshot::Receiver<Result<PlacedOrder, TradingVenueError>>, TradingVenueError> {
-        let mut s = self
-            .state
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?;
-        let (now, entry, response) = self.request_times(s.latency.placement)?;
-        let id = s
-            .operation
-            .checked_add(1)
-            .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
         let (tx, rx) = oneshot::channel();
-        s.operation = id;
-        let info = PendingOperation::Place {
-            id,
-            requested: now,
-            effective: entry,
-            exchange: self
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            let engine = self
                 .engine
                 .lock()
-                .unwrap()
-                .config
-                .time_model
-                .local_to_exchange_ms(entry)
-                .ok(),
-            response,
-            order: order.clone(),
-            accepted: None,
-        };
-        record(
-            &self.engine.lock().unwrap(),
-            "paper_operation_requested",
-            || info.json(),
-        );
-        s.operations.insert(id, info);
-        s.enqueue(
-            entry,
-            Internal::Place {
-                id,
-                order,
-                response_at: response,
-                reply: tx,
-            },
-        )?;
-        drop(s);
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            enqueue_place(&mut state, &engine, order, Reply::Async(tx))?;
+        }
         self.drive_now()?;
         Ok(rx)
     }
@@ -657,49 +610,18 @@ impl PaperTradingVenue {
         pair: String,
         orders: Vec<OrderId>,
     ) -> Result<oneshot::Receiver<Result<(), TradingVenueError>>, TradingVenueError> {
-        let mut s = self
-            .state
-            .lock()
-            .map_err(|_| TradingVenueError::StatePoisoned)?;
-        let (now, entry, response) = self.request_times(s.latency.cancellation)?;
-        let id = s
-            .operation
-            .checked_add(1)
-            .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
         let (tx, rx) = oneshot::channel();
-        s.operation = id;
-        let info = PendingOperation::Cancel {
-            id,
-            requested: now,
-            effective: entry,
-            exchange: self
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            let engine = self
                 .engine
                 .lock()
-                .unwrap()
-                .config
-                .time_model
-                .local_to_exchange_ms(entry)
-                .ok(),
-            response,
-            orders: orders.clone(),
-        };
-        record(
-            &self.engine.lock().unwrap(),
-            "paper_operation_requested",
-            || info.json(),
-        );
-        s.operations.insert(id, info);
-        s.enqueue(
-            entry,
-            Internal::Cancel {
-                id,
-                pair,
-                orders,
-                response_at: response,
-                reply: tx,
-            },
-        )?;
-        drop(s);
+                .map_err(|_| TradingVenueError::StatePoisoned)?;
+            enqueue_cancel(&mut state, &engine, pair, orders, Reply::Async(tx))?;
+        }
         self.drive_now()?;
         Ok(rx)
     }
@@ -804,127 +726,7 @@ impl TradingVenue for PaperTradingVenue {
             .engine
             .lock()
             .map_err(|_| TradingVenueError::StatePoisoned)?;
-        if let PaperClock::Replay { now_ms } = e.clock {
-            if local_ms < now_ms {
-                return Err(TradingVenueError::Paper(PaperExecutionError::InvalidClock));
-            }
-        }
-        while s
-            .events
-            .first_key_value()
-            .is_some_and(|(key, _)| key.0 <= local_ms)
-        {
-            let ((at, priority, _), scheduled) = s.events.pop_first().unwrap();
-            let mut context = scheduled.context;
-            let event = scheduled.event;
-            if let PaperClock::Replay { now_ms } = e.clock {
-                e.advance_replay_time(at.max(now_ms))
-                    .map_err(TradingVenueError::Paper)?;
-            }
-            let executed = local_now(&e)?;
-            if s.simulation_active && priority > 0 {
-                settle_simulation(&mut s, &mut e, executed)?;
-            }
-            context.event_time_ms = Some(executed);
-            // 内部イベントはその実行時刻を明示する。元要求の共有時計に上書きさせない。
-            context.replay_clock = None;
-            crate::execution_recording::sync_scope(
-                context,
-                || -> Result<(), TradingVenueError> {
-                    match event {
-                        Internal::Query(event) => query::process(&mut s, &mut e, event, executed)?,
-                        Internal::Place {
-                            id,
-                            order,
-                            response_at,
-                            reply,
-                        } => {
-                            let result = e.place_order(order).map_err(TradingVenueError::Paper);
-                            let accepted_id = result.as_ref().ok().and_then(|v| v.order_id);
-                            if let Some(PendingOperation::Place { accepted, .. }) =
-                                s.operations.get_mut(&id)
-                            {
-                                *accepted = Some(accepted_id);
-                            }
-                            record(&e, "paper_operation_effective", || {
-                                serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
-                                    "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),
-                                    "order_id":accepted_id,"effective_exchange_ms":accepted_id.and_then(|id|e.effective_after.get(&id).copied()),"success":result.is_ok()})
-                            });
-                            let response_at =
-                                response_at.max(add(executed, s.latency.placement.response_ms)?);
-                            if result.is_ok() {
-                                s.publish(&e, response_at, id)?;
-                            }
-                            s.enqueue(response_at, Internal::PlaceResponse { id, result, reply })?;
-                        }
-                        Internal::Cancel {
-                            id,
-                            pair,
-                            orders,
-                            response_at,
-                            reply,
-                        } => {
-                            let result = if pair != e.config.pair {
-                                Err(TradingVenueError::Paper(
-                                    PaperExecutionError::PairMismatch {
-                                        expected: e.config.pair.clone(),
-                                        actual: pair,
-                                    },
-                                ))
-                            } else {
-                                e.cancel_orders(&pair, orders);
-                                Ok(())
-                            };
-                            record(&e, "paper_operation_effective", || {
-                                serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
-                        "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),"success":result.is_ok()})
-                            });
-                            let response_at =
-                                response_at.max(add(executed, s.latency.cancellation.response_ms)?);
-                            if result.is_ok() {
-                                s.publish(&e, response_at, id)?;
-                            }
-                            s.enqueue(response_at, Internal::CancelResponse { id, result, reply })?;
-                        }
-                        Internal::PlaceResponse { id, result, reply } => {
-                            record(
-                                &e,
-                                "paper_operation_response",
-                                || serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,"success":result.is_ok()}),
-                            );
-                            s.operations.remove(&id);
-                            let _ = reply.send(result);
-                        }
-                        Internal::CancelResponse { id, result, reply } => {
-                            record(&e, "paper_operation_response", || {
-                                serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
-                        "success":result.is_ok(),"meaning":"acceptance_ack","settlement_pending":!e.cancel_at.is_empty()})
-                            });
-                            s.operations.remove(&id);
-                            let _ = reply.send(result);
-                        }
-                        Internal::Publish { id, snapshot } => {
-                            s.local = snapshot;
-                            record(
-                                &e,
-                                "paper_local_state",
-                                || serde_json::json!({"operation_id":id,"local_ms":executed,"scheduled_local_ms":at,"account":s.local}),
-                            );
-                        }
-                    }
-                    Ok(())
-                },
-            )?;
-        }
-        if s.simulation_active {
-            settle_simulation(&mut s, &mut e, local_ms)?;
-        }
-        if matches!(e.clock, PaperClock::Replay { .. }) {
-            e.advance_replay_time(local_ms)
-                .map_err(TradingVenueError::Paper)?;
-        }
-        Ok(())
+        process_events(&mut s, &mut e, local_ms)
     }
     fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
         self.engine.lock().unwrap().recorder.clone()
@@ -1101,4 +903,302 @@ impl PaperTradingVenue {
         }
         self.drive_now()
     }
+}
+
+fn process_events(
+    s: &mut State,
+    e: &mut PaperExecutionEngine,
+    local_ms: i64,
+) -> Result<(), TradingVenueError> {
+    if let PaperClock::Replay { now_ms } = e.clock {
+        if local_ms < now_ms {
+            return Err(TradingVenueError::Paper(PaperExecutionError::InvalidClock));
+        }
+    }
+    while s
+        .events
+        .first_key_value()
+        .is_some_and(|(key, _)| key.0 <= local_ms)
+    {
+        let ((at, priority, _), scheduled) = s.events.pop_first().unwrap();
+        let mut context = scheduled.context;
+        let event = scheduled.event;
+        if let PaperClock::Replay { now_ms } = e.clock {
+            e.advance_replay_time(at.max(now_ms))
+                .map_err(TradingVenueError::Paper)?;
+        }
+        let executed = local_now(e)?;
+        if s.simulation_active && priority > 0 {
+            settle_simulation(s, e, executed)?;
+        }
+        context.event_time_ms = Some(executed);
+        // 内部イベントはその実行時刻を明示する。元要求の共有時計に上書きさせない。
+        context.replay_clock = None;
+        crate::execution_recording::sync_scope(context, || -> Result<(), TradingVenueError> {
+            match event {
+                Internal::Query(event) => query::process(s, e, event, executed)?,
+                Internal::Place {
+                    id,
+                    order,
+                    response_at,
+                    reply,
+                } => {
+                    let result = e.place_order(order).map_err(TradingVenueError::Paper);
+                    let accepted_id = result.as_ref().ok().and_then(|v| v.order_id);
+                    if let Some(PendingOperation::Place { accepted, .. }) =
+                        s.operations.get_mut(&id)
+                    {
+                        *accepted = Some(accepted_id);
+                    }
+                    record(e, "paper_operation_effective", || {
+                        serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
+                                    "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),
+                                    "order_id":accepted_id,"effective_exchange_ms":accepted_id.and_then(|id|e.effective_after.get(&id).copied()),"success":result.is_ok()})
+                    });
+                    let response_at =
+                        response_at.max(add(executed, s.latency.placement.response_ms)?);
+                    if result.is_ok() {
+                        s.publish(e, response_at, id)?;
+                    }
+                    s.enqueue(response_at, Internal::PlaceResponse { id, result, reply })?;
+                }
+                Internal::Cancel {
+                    id,
+                    pair,
+                    orders,
+                    response_at,
+                    reply,
+                } => {
+                    let result = if pair != e.config.pair {
+                        Err(TradingVenueError::Paper(
+                            PaperExecutionError::PairMismatch {
+                                expected: e.config.pair.clone(),
+                                actual: pair,
+                            },
+                        ))
+                    } else {
+                        e.cancel_orders(&pair, orders);
+                        Ok(())
+                    };
+                    record(e, "paper_operation_effective", || {
+                        serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
+                        "exchange_ms":e.config.time_model.local_to_exchange_ms(executed).ok(),"success":result.is_ok()})
+                    });
+                    let response_at =
+                        response_at.max(add(executed, s.latency.cancellation.response_ms)?);
+                    if result.is_ok() {
+                        s.publish(e, response_at, id)?;
+                    }
+                    s.enqueue(response_at, Internal::CancelResponse { id, result, reply })?;
+                }
+                Internal::PlaceResponse { id, result, reply } => {
+                    record(
+                        e,
+                        "paper_operation_response",
+                        || serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,"success":result.is_ok()}),
+                    );
+                    s.operations.remove(&id);
+                    reply.send(result, s);
+                }
+                Internal::CancelResponse { id, result, reply } => {
+                    record(e, "paper_operation_response", || {
+                        serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
+                        "success":result.is_ok(),"meaning":"acceptance_ack","settlement_pending":!e.cancel_at.is_empty()})
+                    });
+                    s.operations.remove(&id);
+                    reply.send(result, s);
+                }
+                Internal::Publish { id, snapshot } => {
+                    s.local = snapshot;
+                    record(
+                        e,
+                        "paper_local_state",
+                        || serde_json::json!({"operation_id":id,"local_ms":executed,"scheduled_local_ms":at,"account":s.local}),
+                    );
+                }
+            }
+            Ok(())
+        })?;
+    }
+    if s.simulation_active {
+        settle_simulation(s, e, local_ms)?;
+    }
+    if matches!(e.clock, PaperClock::Replay { .. }) {
+        e.advance_replay_time(local_ms)
+            .map_err(TradingVenueError::Paper)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum Reply<T> {
+    Async(oneshot::Sender<Result<T, TradingVenueError>>),
+    Command(u64),
+}
+#[derive(Debug)]
+enum Completion {
+    Query(u64, Result<query::Part, TradingVenueError>),
+    Place(u64, Result<PlacedOrder, TradingVenueError>),
+    Cancel(u64, Result<(), TradingVenueError>),
+}
+trait Complete {
+    fn completion(id: u64, result: Result<Self, TradingVenueError>) -> Completion
+    where
+        Self: Sized;
+}
+impl Complete for PlacedOrder {
+    fn completion(id: u64, result: Result<Self, TradingVenueError>) -> Completion {
+        Completion::Place(id, result)
+    }
+}
+impl Complete for () {
+    fn completion(id: u64, result: Result<Self, TradingVenueError>) -> Completion {
+        Completion::Cancel(id, result)
+    }
+}
+impl Complete for query::Part {
+    fn completion(id: u64, result: Result<Self, TradingVenueError>) -> Completion {
+        Completion::Query(id, result)
+    }
+}
+impl<T: Complete> Reply<T> {
+    fn send(self, result: Result<T, TradingVenueError>, state: &mut State) {
+        match self {
+            Self::Async(tx) => {
+                let _ = tx.send(result);
+            }
+            Self::Command(id) => state.completed.push_back(T::completion(id, result)),
+        }
+    }
+}
+mod owned;
+pub use owned::OwnedPaperExecution;
+
+fn enqueue_place(
+    s: &mut State,
+    e: &PaperExecutionEngine,
+    order: DesiredLimitOrder,
+    reply: Reply<PlacedOrder>,
+) -> Result<(), TradingVenueError> {
+    let (now, entry, response) = request_times(e, s.latency.placement)?;
+    let id = s
+        .operation
+        .checked_add(1)
+        .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
+    s.operation = id;
+    let info = PendingOperation::Place {
+        id,
+        requested: now,
+        effective: entry,
+        exchange: e.config.time_model.local_to_exchange_ms(entry).ok(),
+        response,
+        order: order.clone(),
+        accepted: None,
+    };
+    record(e, "paper_operation_requested", || info.json());
+    s.operations.insert(id, info);
+    s.enqueue(
+        entry,
+        Internal::Place {
+            id,
+            order,
+            response_at: response,
+            reply,
+        },
+    )?;
+    Ok(())
+}
+fn enqueue_cancel(
+    s: &mut State,
+    e: &PaperExecutionEngine,
+    pair: String,
+    orders: Vec<OrderId>,
+    reply: Reply<()>,
+) -> Result<(), TradingVenueError> {
+    let (now, entry, response) = request_times(e, s.latency.cancellation)?;
+    let id = s
+        .operation
+        .checked_add(1)
+        .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
+    s.operation = id;
+    let info = PendingOperation::Cancel {
+        id,
+        requested: now,
+        effective: entry,
+        exchange: e.config.time_model.local_to_exchange_ms(entry).ok(),
+        response,
+        orders: orders.clone(),
+    };
+    record(e, "paper_operation_requested", || info.json());
+    s.operations.insert(id, info);
+    s.enqueue(
+        entry,
+        Internal::Cancel {
+            id,
+            pair,
+            orders,
+            response_at: response,
+            reply,
+        },
+    )?;
+    Ok(())
+}
+fn enqueue_query(
+    s: &mut State,
+    e: &PaperExecutionEngine,
+    pair: &str,
+    endpoint: query::Endpoint,
+    reply: impl FnOnce(u64) -> Reply<query::Part>,
+) -> Result<u64, TradingVenueError> {
+    let latency = match endpoint {
+        Endpoint::Orders => s.latency.orders_query,
+        Endpoint::Balances => s.latency.balances_query,
+    };
+    let (now, sample_at, response_at) = request_times(e, latency)?;
+    let id = s
+        .operation
+        .checked_add(1)
+        .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
+    s.operation = id;
+    let info = PendingOperation::Query {
+        id,
+        kind: endpoint.name(),
+        pair: pair.into(),
+        requested: now,
+        sample: sample_at,
+        response: response_at,
+        sampled: None,
+    };
+    record(e, "paper_query_requested", || info.json());
+    s.operations.insert(id, info);
+    let enqueued = s.enqueue(
+        sample_at,
+        Internal::Query(QueryEvent::Sample {
+            id,
+            pair: pair.into(),
+            endpoint,
+            requested: now,
+            response_delay: latency.response_ms,
+            reply: reply(id),
+        }),
+    );
+    if let Err(error) = enqueued {
+        s.operations.remove(&id);
+        return Err(error);
+    }
+    Ok(id)
+}
+
+fn request_times(
+    e: &PaperExecutionEngine,
+    latency: PaperOperationLatency,
+) -> Result<(i64, i64, i64), TradingVenueError> {
+    let now = local_now(e)?;
+    let entry = add(now, latency.entry_ms)?;
+    let response = add(entry, latency.response_ms)?;
+    e.config
+        .time_model
+        .local_to_exchange_ms(entry)
+        .map_err(TradingVenueError::Paper)?;
+    Ok((now, entry, response))
 }

@@ -381,3 +381,5 @@ pub mod replay;
 pub mod clock_observation;
 
 pub mod simulation;
+
+pub mod event_strategy;

@@ -54,7 +54,7 @@ impl PreparedReplay {
     ) -> io::Result<CompiledReplay<'_, C>> {
         let mut driver = crate::simulation::SimulationDriver::new(config, time_model)
             .map_err(|e| invalid(format!("{e:?}")))?;
-        let mut admissions = Vec::with_capacity(self.records.len());
+        let mut events = crate::simulation::PreparedEvents::new(self.records.len());
         for entry in &self.records {
             let record = &entry.record;
             let received = (record.received_at_micros / 1000) as i64;
@@ -78,14 +78,15 @@ impl PreparedReplay {
                     .map(|event| driver.admit_event(received, id, BotEvent::Custom(event))),
                 _ => None,
             };
-            admissions.push(result.map(|result| driver.take_admission(result)));
+            let admission = result.map(|result| driver.take_admission(result, &mut events));
+            events.admissions.push(admission);
         }
-        driver.compile_markets(&mut admissions);
+        driver.compile_markets(&mut events);
         Ok(CompiledReplay {
             input: self,
             config,
             time_model,
-            admissions,
+            events,
         })
     }
     pub fn new(
@@ -172,17 +173,19 @@ pub struct CompiledReplay<'a, C> {
     input: &'a PreparedReplay,
     config: crate::simulation::SimulationConfig,
     time_model: crate::paper_execution::PaperTimeModel,
-    admissions: Vec<Option<crate::simulation::PreparedAdmission<C>>>,
+    events: crate::simulation::PreparedEvents<C>,
 }
 impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
-    pub async fn run<S: BotStrategy<V, CustomEvent = C>, V: TradingVenue>(
+    /// 同期コマンド戦略を、既存の市場順序・先読み・終了判定で実行する。
+    pub async fn run_commands<S: crate::event_strategy::EventStrategy<CustomEvent = C>>(
         &self,
-        runner: &mut BotRunner<S, V>,
+        runner: &mut crate::event_strategy::EventRunner<S>,
         options: ReplayOptions,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> ReplayReport {
-        if runner.venue().simulation_config() != Some(self.config)
-            || runner.venue().simulation_time_model() != self.time_model
+        use crate::simulation::ReplayRuntime;
+        if runner.simulation_config() != Some(self.config)
+            || runner.simulation_time_model() != self.time_model
         {
             return ReplayReport {
                 error: Some("compiled replay simulation configuration mismatch".into()),
@@ -191,7 +194,7 @@ impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
                 ..Default::default()
             };
         }
-        let mut admissions = self.admissions.iter();
+        let mut admissions = self.events.admissions.iter();
         run_validated_simulation_replay(
             runner,
             self.input
@@ -214,7 +217,51 @@ impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
                     .next()
                     .unwrap()
                     .as_ref()
-                    .map(|admission| driver.admit_prepared(admission))
+                    .map(|a| driver.admit_prepared(a, &self.events))
+            },
+        )
+        .await
+    }
+    pub async fn run<S: BotStrategy<V, CustomEvent = C>, V: TradingVenue>(
+        &self,
+        runner: &mut BotRunner<S, V>,
+        options: ReplayOptions,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> ReplayReport {
+        if runner.venue().simulation_config() != Some(self.config)
+            || runner.venue().simulation_time_model() != self.time_model
+        {
+            return ReplayReport {
+                error: Some("compiled replay simulation configuration mismatch".into()),
+                incomplete: true,
+                end_reason: ReplayEndReason::Error,
+                ..Default::default()
+            };
+        }
+        let mut admissions = self.events.admissions.iter();
+        run_validated_simulation_replay(
+            runner,
+            self.input
+                .records
+                .iter()
+                .map(|r| Ok(SimulationRecord::Prepared(r))),
+            ReplaySetup {
+                validation: &self.input.validation,
+                tails: &self.input.tails,
+                report: ReplayReport {
+                    input_exhausted: true,
+                    ..Default::default()
+                },
+                options,
+                cancel,
+            },
+            |_| Ok(None),
+            |driver| {
+                admissions
+                    .next()
+                    .unwrap()
+                    .as_ref()
+                    .map(|admission| driver.admit_prepared(admission, &self.events))
             },
         )
         .await
@@ -1018,13 +1065,13 @@ struct ReplaySetup<'a> {
     cancel: &'a std::sync::atomic::AtomicBool,
 }
 
-async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>(
-    runner: &mut BotRunner<S, V>,
+async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime>(
+    runner: &mut R,
     records: impl Iterator<Item = io::Result<SimulationRecord<'a>>>,
     setup: ReplaySetup<'_>,
-    mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
+    mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<R::CustomEvent>>,
     mut compiled: impl FnMut(
-        &mut crate::simulation::SimulationDriver<S::CustomEvent>,
+        &mut crate::simulation::SimulationDriver<R::CustomEvent>,
     ) -> Option<Result<(), String>>,
 ) -> ReplayReport {
     let ReplaySetup {
@@ -1034,25 +1081,21 @@ async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>
         options,
         cancel,
     } = setup;
-    let config = runner.venue().simulation_config().unwrap();
-    let mut driver = match crate::simulation::SimulationDriver::new(
-        config,
-        runner.venue().simulation_time_model(),
-    ) {
-        Ok(driver) => driver,
-        Err(e) => {
-            report.error = Some(format!("{e:?}"));
-            report.end_reason = ReplayEndReason::Error;
-            report.incomplete = true;
-            runner
-                .venue()
-                .mark_market_incomplete("invalid simulation configuration");
-            report.settlement = runner.venue().paper_settlement_status();
-            return report;
-        }
-    };
-    if let Err(e) = runner.venue().begin_simulation() {
-        report.error = Some(format!("{e:?}"));
+    let config = runner.simulation_config().unwrap();
+    let mut driver =
+        match crate::simulation::SimulationDriver::new(config, runner.simulation_time_model()) {
+            Ok(driver) => driver,
+            Err(e) => {
+                report.error = Some(format!("{e:?}"));
+                report.end_reason = ReplayEndReason::Error;
+                report.incomplete = true;
+                runner.mark_market_incomplete("invalid simulation configuration");
+                report.settlement = runner.paper_settlement_status();
+                return report;
+            }
+        };
+    if let Err(e) = runner.begin_simulation() {
+        report.error = Some(e);
     }
     let end = tails
         .values()
@@ -1119,7 +1162,7 @@ async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>
                     CapturePayload::Disconnected { reason } => {
                         driver.mark_incomplete(format!("source {source} disconnected: {reason}"));
                         if !options.recovery {
-                            runner.venue().mark_market_incomplete(reason);
+                            runner.mark_market_incomplete(reason);
                         }
                         report.gaps.push(ReplayGap {
                             source_index: source,
@@ -1173,7 +1216,7 @@ async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>
                 item.as_ref()
                     .is_ok_and(|r| r.received_at_micros() / 1000 > received as u64)
             }) {
-                if let Err(e) = driver.advance_to(runner, received, end, cancel).await {
+                if let Err(e) = driver.advance_runtime(runner, received, end, cancel).await {
                     report.interrupted = cancel.load(std::sync::atomic::Ordering::Relaxed);
                     if !report.interrupted {
                         report.error = Some(e);
@@ -1190,7 +1233,9 @@ async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>
         if let Some(end) = end {
             match end.checked_add(config.lookahead_ms) {
                 Some(through) => {
-                    if let Err(error) = driver.advance_to(runner, through, Some(end), cancel).await
+                    if let Err(error) = driver
+                        .advance_runtime(runner, through, Some(end), cancel)
+                        .await
                     {
                         report.interrupted = cancel.load(std::sync::atomic::Ordering::Relaxed);
                         if !report.interrupted {
@@ -1203,9 +1248,7 @@ async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>
         }
     }
     if report.error.is_some() || report.interrupted {
-        runner
-            .venue()
-            .mark_market_incomplete("simulation error or interruption");
+        runner.mark_market_incomplete("simulation error or interruption");
     }
     if report.error.is_some() {
         report.end_reason = ReplayEndReason::Error;
@@ -1224,7 +1267,7 @@ async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>
     report.pending_handler = runner.handler_pending();
     report.pending_deliveries = runner.pending_delivery_count();
     report.simulation = Some(driver.report());
-    report.settlement = runner.venue().paper_settlement_status();
+    report.settlement = runner.paper_settlement_status();
     report.incomplete = report.error.is_some()
         || report.interrupted
         || !report.gaps.is_empty()
@@ -1232,8 +1275,8 @@ async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>
         || report.pending_deliveries > 0
         || report.settlement.as_ref().is_some_and(|s| s.unsettled);
     runner.stop_pending_handler();
-    runner.venue().record_paper_settlement();
-    if let Some(recorder) = runner.venue().recorder() {
+    runner.record_paper_settlement();
+    if let Some(recorder) = runner.recorder() {
         recorder.record_lazy("replay_outcome", || {
             let mut value = serde_json::to_value(&report).unwrap();
             value["settlement"] = report
