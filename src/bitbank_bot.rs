@@ -306,6 +306,7 @@ async fn run_bitbank_pair_feed<E>(
     client_options: Vec<BitbankOption>,
     websocket_config: WebSocketConfig,
     event_tx: mpsc::Sender<BotEvent<E>>,
+    observation: Option<crate::execution_recording::ExecutionRecorder>,
 ) where
     E: Send + 'static,
 {
@@ -315,6 +316,7 @@ async fn run_bitbank_pair_feed<E>(
         client_options,
         websocket_config,
         inbound_tx,
+        observation,
     ));
 
     let mut converter = BitbankMarketEventConverter::new(pair.clone());
@@ -375,6 +377,7 @@ where
     pairs: Vec<String>,
     default_options: Vec<BitbankOption>,
     websocket_config: WebSocketConfig,
+    websocket_observation: Option<crate::execution_recording::ExecutionRecorder>,
     buffer_size: usize,
     venue: V,
 }
@@ -390,6 +393,7 @@ where
             pairs: Vec::new(),
             default_options: Vec::new(),
             websocket_config: WebSocketConfig::default(),
+            websocket_observation: None,
             buffer_size: 128,
             venue,
         }
@@ -407,6 +411,16 @@ where
 
     pub fn websocket_config(mut self, websocket_config: WebSocketConfig) -> Self {
         self.websocket_config = websocket_config;
+        self
+    }
+
+    /// WSコールバック冒頭の時計観測を指定したrecorderへ保存する。
+    /// venueにも同じrecorderを渡すと、HTTPと同じrun_idに記録できる。
+    pub fn websocket_observation(
+        mut self,
+        recorder: crate::execution_recording::ExecutionRecorder,
+    ) -> Self {
+        self.websocket_observation = Some(recorder);
         self
     }
 
@@ -433,8 +447,9 @@ where
             let pair_options = duplicate_bitbank_options(&self.default_options);
             let tx = event_tx.clone();
             let config = self.websocket_config.clone();
+            let observation = self.websocket_observation.clone();
             let handle = tokio::spawn(async move {
-                run_bitbank_pair_feed(pair, pair_options, config, tx).await;
+                run_bitbank_pair_feed(pair, pair_options, config, tx, observation).await;
             });
             feed_handles.push(handle);
         }

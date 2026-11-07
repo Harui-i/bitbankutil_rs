@@ -313,3 +313,5 @@ pub mod execution_recording;
 mod recording_http;
 
 pub mod replay;
+
+pub mod clock_observation;

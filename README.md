@@ -55,6 +55,9 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 実行記録は既定で資金・注文の監査情報だけを保存します。キューの全件・周期snapshot・差分・counterを選ぶ方法は
 [実行記録](docs/execution-recording.md#記録量を選ぶ)を参照してください。
 
+発注・取消から時計差の区間を求め、WSの到着遅延を分析するための任意の観測ログも利用できます。
+[時計観測ガイド](docs/clock-observation.md)を参照してください。
+
 ## API カバレッジ
 
 ### Public API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md))

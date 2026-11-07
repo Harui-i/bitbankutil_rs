@@ -4,11 +4,14 @@ use crypto_botters::{
 };
 use tokio::sync::mpsc;
 
+/// 公開WSを起動する。observationを指定するとJSONコールバック冒頭の時計を記録する。
+/// 詳細は[`crate::clock_observation`]を参照。
 pub async fn run_websocket(
     pair: String,
     client_options: Vec<BitbankOption>,
     wsc: WebSocketConfig,
     tx: mpsc::Sender<BitbankInboundMessage>,
+    observation: Option<crate::execution_recording::ExecutionRecorder>,
 ) {
     let mut ws_client = Client::new();
 
@@ -26,19 +29,11 @@ pub async fn run_websocket(
         format!("circuit_break_info_{}", pair).to_owned(),
     ];
 
+    let observer = observation.map(crate::clock_observation::WsObserver::new);
     let _transactions_connection = ws_client
         .websocket(
             "",
-            move |val: serde_json::Value| match crate::replay::decode_bitbank(&val) {
-                Ok(Some((_, message))) => {
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        let _ = tx.send(message).await;
-                    });
-                }
-                Ok(None) => {}
-                Err(error) => log::warn!("invalid Bitbank callback: {error}"),
-            },
+            move |val: serde_json::Value| dispatch_callback(val, observer.as_ref(), &tx),
             [
                 BitbankOption::WebSocketChannels(channels),
                 BitbankOption::WebSocketConfig(wsc),
@@ -50,5 +45,67 @@ pub async fn run_websocket(
     // スリープ
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    }
+}
+
+fn dispatch_callback(
+    val: serde_json::Value,
+    observer: Option<&crate::clock_observation::WsObserver>,
+    tx: &mpsc::Sender<BitbankInboundMessage>,
+) {
+    let received = crate::clock_observation::ClockObservation::now();
+    let decoded = crate::replay::decode_bitbank(&val);
+    if let Some(observer) = observer {
+        observer.observe(&val, received, matches!(&decoded, Ok(Some(_))));
+    }
+    match decoded {
+        Ok(Some((_, message))) => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(message).await;
+            });
+        }
+        Ok(None) => {}
+        Err(error) => log::warn!("invalid Bitbank callback: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        clock_observation::{ClockObservation, WsObserver},
+        execution_recording::{ExecutionRecorder, JsonlSink, read_records, tests::Memory},
+    };
+    use serde_json::json;
+    #[tokio::test]
+    async fn blocked_downstream_keeps_callback_timestamp() {
+        let m = Memory::default();
+        let recorder = ExecutionRecorder::new("ws", json!({}), JsonlSink(m.clone()));
+        let observer = WsObserver::new(recorder.clone());
+        let (tx, mut rx) = mpsc::channel(1);
+        let raw = json!(["message",{"room_name":"depth_diff_btc_jpy","message":{"data":{"a":[],"b":[],"t":123,"s":"42"}}}]);
+        dispatch_callback(raw.clone(), Some(&observer), &tx);
+        dispatch_callback(raw, Some(&observer), &tx);
+        // 容量1の受信先を消費しなくても、両方の時計観測は既に保存済み。
+        let records = read_records(std::io::Cursor::new(m.0.lock().unwrap().clone())).unwrap();
+        let events: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind == "ws_clock_observed")
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].data["receive_sequence"], 2);
+        assert_eq!(events[0].data["exchange_times"][0]["field"], "t");
+        assert_eq!(events[0].data["exchange_times"][0]["sequence_id"], "42");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let after = ClockObservation::now();
+        assert!(
+            events[1].data["received_clock"]["monotonic_us"]
+                .as_i64()
+                .unwrap()
+                < after.monotonic_us
+        );
+        rx.recv().await.unwrap();
+        rx.recv().await.unwrap();
     }
 }
