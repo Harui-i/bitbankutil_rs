@@ -1,6 +1,5 @@
+use crate::book_units::{Amount, Price, Quantity};
 use std::{fmt, str::FromStr};
-
-use rust_decimal::Decimal;
 
 use crate::bitbank_structs::{BitbankAssetDatum, BitbankGetOrderResponse};
 
@@ -98,13 +97,13 @@ pub struct OrderId(pub u64);
 pub struct DesiredLimitOrder {
     pub pair: String,
     pub side: OrderSide,
-    pub amount: Decimal,
-    pub price: Decimal,
+    pub amount: Quantity,
+    pub price: Price,
     pub post_only: Option<bool>,
 }
 
 impl DesiredLimitOrder {
-    pub fn limit(pair: String, side: OrderSide, amount: Decimal, price: Decimal) -> Self {
+    pub fn limit(pair: String, side: OrderSide, amount: Quantity, price: Price) -> Self {
         Self {
             pair,
             side,
@@ -114,7 +113,7 @@ impl DesiredLimitOrder {
         }
     }
 
-    pub fn limit_price(&self) -> Decimal {
+    pub fn limit_price(&self) -> Price {
         self.price
     }
 
@@ -138,8 +137,8 @@ pub struct OpenOrder {
     pub pair: String,
     pub side: OrderSide,
     pub order_type: OrderType,
-    pub remaining_amount: Decimal,
-    pub price: Option<Decimal>,
+    pub remaining_amount: Quantity,
+    pub price: Option<Price>,
     pub post_only: Option<bool>,
 }
 
@@ -171,15 +170,21 @@ impl TryFrom<&BitbankGetOrderResponse> for OpenOrder {
             .remaining_amount
             .as_deref()
             .ok_or(ParseOrderError::MissingRemainingAmount)?
-            .parse::<Decimal>()
-            .map_err(|_| ParseOrderError::InvalidDecimal("remaining_amount".to_owned()))?;
+            .parse()
+            .map_err(|error| ParseOrderError::InvalidNumeric {
+                field: "remaining_amount".to_owned(),
+                error,
+            })?;
         let price = value
             .price
             .as_deref()
             .map(|price| {
                 price
-                    .parse::<Decimal>()
-                    .map_err(|_| ParseOrderError::InvalidDecimal("price".to_owned()))
+                    .parse()
+                    .map_err(|error| ParseOrderError::InvalidNumeric {
+                        field: "price".to_owned(),
+                        error,
+                    })
             })
             .transpose()?;
 
@@ -198,9 +203,9 @@ impl TryFrom<&BitbankGetOrderResponse> for OpenOrder {
 #[derive(PartialEq, Eq, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BalanceSnapshot {
     pub asset: String,
-    pub free_amount: Decimal,
-    pub locked_amount: Decimal,
-    pub onhand_amount: Decimal,
+    pub free_amount: Amount,
+    pub locked_amount: Amount,
+    pub onhand_amount: Amount,
 }
 
 impl TryFrom<&BitbankAssetDatum> for BalanceSnapshot {
@@ -209,9 +214,9 @@ impl TryFrom<&BitbankAssetDatum> for BalanceSnapshot {
     fn try_from(value: &BitbankAssetDatum) -> Result<Self, Self::Error> {
         Ok(Self {
             asset: value.asset.clone(),
-            free_amount: parse_decimal_field("free_amount", &value.free_amount)?,
-            locked_amount: parse_decimal_field("locked_amount", &value.locked_amount)?,
-            onhand_amount: parse_decimal_field("onhand_amount", &value.onhand_amount)?,
+            free_amount: parse_numeric_field("free_amount", &value.free_amount)?,
+            locked_amount: parse_numeric_field("locked_amount", &value.locked_amount)?,
+            onhand_amount: parse_numeric_field("onhand_amount", &value.onhand_amount)?,
         })
     }
 }
@@ -222,19 +227,57 @@ pub enum ParseOrderError {
     UnknownType(String),
     InvalidOrderId,
     MissingRemainingAmount,
-    InvalidDecimal(String),
+    InvalidNumeric {
+        field: String,
+        error: crate::book_units::NumericError,
+    },
 }
 
-fn parse_decimal_field(field: &str, value: &str) -> Result<Decimal, ParseOrderError> {
+fn parse_numeric_field<T: std::str::FromStr<Err = crate::book_units::NumericError>>(
+    field: &str,
+    value: &str,
+) -> Result<T, ParseOrderError> {
     value
-        .parse::<Decimal>()
-        .map_err(|_| ParseOrderError::InvalidDecimal(field.to_owned()))
+        .parse()
+        .map_err(|error| ParseOrderError::InvalidNumeric {
+            field: field.to_owned(),
+            error,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::book_units::*;
     use serde_json::json;
+
+    #[test]
+    fn balance_precision_and_numeric_errors_are_preserved() {
+        let value = crate::bitbank_structs::BitbankAssetDatum {
+            asset: "jpy".into(),
+            free_amount: "0.000000000000000000000001".into(),
+            locked_amount: "0".into(),
+            onhand_amount: "0.000000000000000000000001".into(),
+            amount_precision: 24.into(),
+            withdrawing_amount: "0".into(),
+            withdrawal_fee: serde_json::json!("0"),
+            stop_deposit: false,
+            stop_withdrawal: false,
+            network_list: None,
+            collateral_ratio: "1".into(),
+        };
+        assert_eq!(
+            BalanceSnapshot::try_from(&value).unwrap().free_amount,
+            Amount::from_units(1)
+        );
+        assert_eq!(
+            parse_numeric_field::<Price>("price", "0.000000001"),
+            Err(ParseOrderError::InvalidNumeric {
+                field: "price".into(),
+                error: NumericError::Precision
+            })
+        );
+    }
 
     #[test]
     fn converts_bitbank_order_response_to_open_order() {
@@ -264,8 +307,8 @@ mod tests {
         assert_eq!(order.pair, "btc_jpy");
         assert_eq!(order.side, OrderSide::Buy);
         assert_eq!(order.order_type, OrderType::Limit);
-        assert_eq!(order.remaining_amount, Decimal::new(1, 1));
-        assert_eq!(order.price, Some(Decimal::new(5_000_000, 0)));
+        assert_eq!(order.remaining_amount, literal("0.1"));
+        assert_eq!(order.price, Some(literal("5000000")));
         assert_eq!(order.post_only, Some(true));
     }
 
@@ -332,8 +375,8 @@ mod tests {
             pair: "btc_jpy".to_owned(),
             side: OrderSide::Sell,
             order_type: OrderType::Limit,
-            remaining_amount: Decimal::new(25, 2),
-            price: Some(Decimal::new(4_900_000, 0)),
+            remaining_amount: literal("0.25"),
+            price: Some(literal("4900000")),
             post_only: Some(true),
         };
 
@@ -342,8 +385,8 @@ mod tests {
             DesiredLimitOrder::limit(
                 "btc_jpy".to_owned(),
                 OrderSide::Sell,
-                Decimal::new(25, 2),
-                Decimal::new(4_900_000, 0),
+                literal("0.25"),
+                literal("4900000"),
             )
         );
     }
@@ -353,16 +396,16 @@ mod tests {
         let desired_order = DesiredLimitOrder::limit(
             "btc_jpy".to_owned(),
             OrderSide::Sell,
-            Decimal::new(25, 2),
-            Decimal::new(4_900_000, 0),
+            literal("0.25"),
+            literal("4900000"),
         );
         let open_order = OpenOrder {
             order_id: OrderId(12345),
             pair: "btc_jpy".to_owned(),
             side: OrderSide::Sell,
             order_type: OrderType::Limit,
-            remaining_amount: Decimal::new(25, 2),
-            price: Some(Decimal::new(4_900_000, 0)),
+            remaining_amount: literal("0.25"),
+            price: Some(literal("4900000")),
             post_only: None,
         };
 
@@ -374,16 +417,16 @@ mod tests {
         let desired_order = DesiredLimitOrder::limit(
             "btc_jpy".to_owned(),
             OrderSide::Sell,
-            Decimal::new(25, 2),
-            Decimal::new(4_900_000, 0),
+            literal("0.25"),
+            literal("4900000"),
         );
         let open_order = OpenOrder {
             order_id: OrderId(12345),
             pair: "btc_jpy".to_owned(),
             side: OrderSide::Sell,
             order_type: OrderType::Limit,
-            remaining_amount: Decimal::new(25, 2),
-            price: Some(Decimal::new(4_900_000, 0)),
+            remaining_amount: literal("0.25"),
+            price: Some(literal("4900000")),
             post_only: Some(false),
         };
 

@@ -53,6 +53,20 @@ impl<B, H: RequestHandler<B>> RequestHandler<B> for Observed<H> {
         self.inner.handle_response(s, h, b)
     }
 }
+fn query_strings(value: Value) -> Value {
+    match value {
+        Value::Number(n) => Value::String(n.to_string()),
+        Value::Array(values) => Value::Array(values.into_iter().map(query_strings).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(k, v)| (k, query_strings(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 impl Transport {
     pub async fn request<Q: Serialize + ?Sized, B: Serialize>(
         &self,
@@ -111,6 +125,13 @@ impl Transport {
                 })
             });
         }
+        // arbitrary_precisionのNumberをURLエンコーダへ直接渡さず、
+        // クエリの数値だけを正確な十進文字列にする（JSON本文は変更しない）。
+        let query = query
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| RequestError::BuildRequestError("invalid query"))?
+            .map(query_strings);
         for attempt in 1..=config.max_try {
             *observed.response_clock.lock().unwrap() = None;
             *observed.status.lock().unwrap() = None;
@@ -128,7 +149,13 @@ impl Transport {
             }
             let result = self
                 .http
-                .request(method.clone(), path, query, body.as_ref(), &observed)
+                .request(
+                    method.clone(),
+                    path,
+                    query.as_ref(),
+                    body.as_ref(),
+                    &observed,
+                )
                 .await;
             let timing = measurement.finish();
             let timeout = match &result {
@@ -246,6 +273,16 @@ fn safe_request(path: &str, value: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arbitrary_precision_query_numbers_remain_exact_strings() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"order_id":9007199254740993,"amount":90000000000.00000001}"#)
+                .unwrap();
+        let query = super::query_strings(value);
+        assert_eq!(query["order_id"], "9007199254740993");
+        assert_eq!(query["amount"], "90000000000.00000001");
+    }
+
     use super::*;
 
     #[test]

@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::literal;
 mod support;
 use bitbankutil_rs::{
     bitbank_bot::*,
@@ -7,7 +8,6 @@ use bitbankutil_rs::{
     replay::*,
     trading_venue::TradingVenue,
 };
-use rust_decimal::Decimal;
 use std::{
     io,
     sync::{
@@ -73,8 +73,8 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
                             DesiredLimitOrder::limit(
                                 "btc_jpy".into(),
                                 OrderSide::Buy,
-                                Decimal::ONE,
-                                Decimal::from(100),
+                                literal("1"),
+                                literal("100"),
                             )
                             .into(),
                         )
@@ -187,15 +187,15 @@ fn venue(delta: i64, recorder: Option<ExecutionRecorder>) -> PaperTradingVenue {
             vec![
                 BalanceSnapshot {
                     asset: "jpy".into(),
-                    free_amount: Decimal::from(1000),
-                    locked_amount: Decimal::ZERO,
-                    onhand_amount: Decimal::from(1000),
+                    free_amount: literal("1000"),
+                    locked_amount: literal("0"),
+                    onhand_amount: literal("1000"),
                 },
                 BalanceSnapshot {
                     asset: "btc".into(),
-                    free_amount: Decimal::ZERO,
-                    locked_amount: Decimal::ZERO,
-                    onhand_amount: Decimal::ZERO,
+                    free_amount: literal("0"),
+                    locked_amount: literal("0"),
+                    onhand_amount: literal("0"),
                 },
             ],
             recorder,
@@ -281,7 +281,7 @@ async fn interleaves_timers_without_future_information_and_preserves_ties() {
             let account = runner.venue().account_snapshot("btc_jpy").await.unwrap();
             let jpy = account.balances.iter().find(|b| b.asset == "jpy").unwrap();
             // 時計を境界まで進めても、watermarkなしでは取消資金を解放しない。
-            assert_eq!(jpy.locked_amount, Decimal::ZERO);
+            assert_eq!(jpy.locked_amount, literal("0"));
             let accepted: Vec<_> = runner
                 .venue()
                 .engine()
@@ -663,8 +663,8 @@ fn seeded_engine(
     engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             exchange_ms,
         ),
     });

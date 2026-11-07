@@ -1,4 +1,5 @@
 //! 合成キュー履歴に対する固定回数の採取・照会コスト。時間は参考値のみ。
+use bitbankutil_rs::book_units::{Quantity, literal};
 use bitbankutil_rs::{
     market_event::{MarketDepthSnapshot, MarketEvent},
     order_domain::{BalanceSnapshot, DesiredLimitOrder, OrderSide},
@@ -80,8 +81,8 @@ fn engine(history: usize) -> PaperExecutionEngine {
         e.apply_market_event(&MarketEvent::DepthUpdated {
             pair: "btc_jpy".into(),
             depth: MarketDepthSnapshot::new(
-                [(101.into(), 1.0)].into(),
-                [(99.into(), (i + 1) as f64)].into(),
+                [(101.into(), literal("1.0"))].into(),
+                [(99.into(), Quantity::from((i + 1) as i32))].into(),
                 1000,
             ),
         });

@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::{Price, literal};
 mod support;
 use bitbankutil_rs::{
     bitbank_bot::*, depth::Depth, market_event::MarketEvent, replay::*,
@@ -45,9 +46,21 @@ fn fixture_merge_and_books() {
     assert_eq!(
         checkpoints,
         vec![
-            (3, "100".into(), 0.4, "101".into(), 1.5),
-            (4, "99.5".into(), 2.0, "101".into(), 1.5),
-            (9, "98".into(), 3.0, "103".into(), 2.0)
+            (
+                3,
+                "100".into(),
+                literal("0.4"),
+                "101".into(),
+                literal("1.5")
+            ),
+            (
+                4,
+                "99.5".into(),
+                literal("2.0"),
+                "101".into(),
+                literal("1.5")
+            ),
+            (9, "98".into(), literal("3.0"), "103".into(), literal("2.0"))
         ]
     );
     assert_eq!(custom, 3);
@@ -309,7 +322,7 @@ fn numeric_sequence_equal_diff_and_late_whole() {
     let MarketEvent::DepthUpdated { depth, .. } = event else {
         panic!()
     };
-    assert_eq!(*depth.best_bid().unwrap().1, 3.0);
+    assert_eq!(*depth.best_bid().unwrap().1, literal("3.0"));
     whole[1]["message"]["data"]["sequenceId"] = serde_json::json!("11");
     let event = converter
         .convert(decode_bitbank(&whole).unwrap().unwrap().1)
@@ -318,7 +331,7 @@ fn numeric_sequence_equal_diff_and_late_whole() {
     let MarketEvent::DepthUpdated { depth, .. } = event else {
         panic!()
     };
-    assert_eq!(*depth.best_bid().unwrap().1, 1.0);
+    assert_eq!(*depth.best_bid().unwrap().1, literal("1.0"));
 }
 #[test]
 fn duplicate_trades_do_not_fill_twice_and_conflicts_fail() {
@@ -632,10 +645,7 @@ impl BotStrategy<bitbankutil_rs::paper_execution::PaperTradingVenue> for PaperRe
             assert!(ctx.venue().paper_settlement_status().is_none());
             if ctx.now_ms() >= 1_793_113_200_080 {
                 // 再接続した板は新しいwholeとdiffから復元され、戦略へ届く。
-                assert_eq!(
-                    *depth.best_bid().unwrap().0,
-                    rust_decimal::Decimal::from(98)
-                );
+                assert_eq!(*depth.best_bid().unwrap().0, Price::from(98));
                 ctx.venue()
                     .cancel_orders("btc_jpy", vec![OrderId(1)])
                     .await
@@ -833,8 +843,8 @@ fn seeded_engine(
     engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             exchange_ms,
         ),
     });

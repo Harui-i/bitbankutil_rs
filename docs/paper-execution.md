@@ -61,6 +61,26 @@ snapshot以前の内部差分は後から遡及適用せず、板不足として
 `BotRunner::process` / `submit_replay` とengineの手動watermark操作は低水準kernelの検証用であり、
 通常のPaper・バックテストの入力経路としては使いません。
 
+## 板・FIFOの数値表現と差分更新
+
+価格は`Price`、数量は`Quantity`、手数料率は`Rate`（いずれも小数8桁のi64）、
+売買代金・手数料・各資産の残高は`Amount`（小数24桁のi128）で保持します。
+取引所の十進文字列とJSON数値は正確に解析し、丸め・浮動小数点への変換を行いません。
+これはペア固有のtick/lot検証を代替するものではありません。
+価格・数量・率の正の上限は92,233,720,368.54775807、金額・残高は約170兆です。
+精度超過とoverflowは`NumericError`として拒否し、暗黙の切り捨てはしません。
+約定と取消は口座更新を検証してから確定し、数値エラーで一部だけの資金移動やFIFO消化を残しません。
+
+`Depth`も`BTreeMap<Price, Quantity>`を返し、最良気配・スプレッドに型変換はありません。
+`MarketDepthSnapshot::new`には同じ型の板を渡します。対数などの近似分析に限り明示的にf64へ変換します。
+旧公開APIとの変換層はありません。型の使い方・換算式・JSON表現は[数値型](numeric-types.md)を参照してください。
+
+通常の差分更新は変更価格だけをFIFOへ適用し、表示減少から先行数量を消費しない契約を維持します。
+全体板、接続切替、更新を取りこぼした入力では全体から再同期します。
+`MarketDepthSnapshot::changes_since` はシーケンス番号の連番を仮定せず、実際の更新元の同一性を確認します。
+全板snapshotはArcで共有し、後続更新で過去のsnapshotを変更しません。
+独立に作ったsnapshot同士は内容が等しくても差分関係にしません。
+
 ## 注文・口座の遅延
 
 `PaperLatencyConfig` のplacement・cancellation・orders_query・balances_queryには

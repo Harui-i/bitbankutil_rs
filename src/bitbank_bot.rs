@@ -610,8 +610,8 @@ mod tests {
         engine.apply_market_event(&crate::market_event::MarketEvent::DepthUpdated {
             pair: "btc_jpy".into(),
             depth: crate::market_event::MarketDepthSnapshot::new(
-                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+                std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
                 exchange_ms,
             ),
         });
@@ -619,9 +619,9 @@ mod tests {
     }
 
     use super::*;
+    use crate::book_units::{Quantity, literal};
     use crate::depth::Depth;
     use crate::order_domain::OrderSide;
-    use rust_decimal::Decimal;
     use serde_json::Number;
 
     use crate::order_domain::OrderId;
@@ -834,15 +834,15 @@ mod tests {
             vec![
                 BalanceSnapshot {
                     asset: "btc".into(),
-                    free_amount: Decimal::ZERO,
-                    locked_amount: Decimal::ZERO,
-                    onhand_amount: Decimal::ZERO,
+                    free_amount: literal("0"),
+                    locked_amount: literal("0"),
+                    onhand_amount: literal("0"),
                 },
                 BalanceSnapshot {
                     asset: "jpy".into(),
-                    free_amount: Decimal::new(1000, 0),
-                    locked_amount: Decimal::ZERO,
-                    onhand_amount: Decimal::new(1000, 0),
+                    free_amount: literal("1000"),
+                    locked_amount: literal("0"),
+                    onhand_amount: literal("1000"),
                 },
             ],
             None,
@@ -858,8 +858,8 @@ mod tests {
                 DesiredLimitOrder::limit(
                     "btc_jpy".into(),
                     OrderSide::Buy,
-                    Decimal::ONE,
-                    Decimal::new(100, 0),
+                    literal("1"),
+                    literal("100"),
                 )
                 .into(),
             )
@@ -872,9 +872,9 @@ mod tests {
             .send(BotEvent::Market(MarketEvent::Transactions {
                 pair: "btc_jpy".into(),
                 transactions: vec![MarketTrade {
-                    amount: Decimal::new(25, 2),
+                    amount: literal("0.25"),
                     executed_at: occurred,
-                    price: Decimal::new(100, 0),
+                    price: literal("100"),
                     side: OrderSide::Sell,
                     transaction_id: 1,
                 }],
@@ -885,9 +885,9 @@ mod tests {
         inbound
             .send(BitbankInboundMessage::Transactions(vec![
                 BitbankTransactionDatum {
-                    amount: Decimal::new(25, 2),
+                    amount: literal("0.25"),
                     executed_at: occurred + 1,
-                    price: Decimal::new(100, 0),
+                    price: literal("100"),
                     side: "sell".into(),
                     transaction_id: 2,
                 },
@@ -896,7 +896,7 @@ mod tests {
             .unwrap();
         drop(inbound);
         forward_bitbank_messages("btc_jpy".into(), &mut inbound_rx, &sender).await;
-        for remaining in [Decimal::new(5, 1), Decimal::new(5, 1)] {
+        for remaining in [literal("0.5"), literal("0.5")] {
             let snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
                 .await
                 .unwrap()
@@ -909,7 +909,7 @@ mod tests {
                     .find(|b| b.asset == "btc")
                     .unwrap()
                     .free_amount,
-                Decimal::ONE - remaining
+                Quantity::ONE.checked_sub(remaining).unwrap().to_amount()
             );
         }
         runtime.shutdown().await.unwrap();
@@ -961,8 +961,8 @@ mod tests {
         };
         assert_eq!(pair, "btc_jpy");
         assert!(depth.is_complete());
-        assert_eq!(depth.best_ask().unwrap().0, &Decimal::new(101, 0));
-        assert_eq!(depth.best_bid().unwrap().0, &Decimal::new(100, 0));
+        assert_eq!(depth.best_ask().unwrap().0, &literal("101"));
+        assert_eq!(depth.best_bid().unwrap().0, &literal("100"));
         assert_eq!(depth.last_timestamp(), 1234);
     }
 
@@ -970,9 +970,9 @@ mod tests {
     fn bitbank_converter_maps_transactions_to_domain_side() {
         let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
         let trade = BitbankTransactionDatum {
-            amount: Decimal::new(25, 1),
+            amount: literal("2.5"),
             executed_at: 1000,
-            price: Decimal::new(100, 0),
+            price: literal("100"),
             side: "buy".to_owned(),
             transaction_id: 42,
         };
@@ -993,23 +993,23 @@ mod tests {
     fn bitbank_converter_preserves_notification_transaction_order() {
         let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
         let newest = BitbankTransactionDatum {
-            amount: Decimal::new(1, 0),
+            amount: literal("1"),
             executed_at: 3000,
-            price: Decimal::new(90, 0),
+            price: literal("90"),
             side: "sell".to_owned(),
             transaction_id: 3,
         };
         let middle = BitbankTransactionDatum {
-            amount: Decimal::new(1, 0),
+            amount: literal("1"),
             executed_at: 2000,
-            price: Decimal::new(100, 0),
+            price: literal("100"),
             side: "sell".to_owned(),
             transaction_id: 2,
         };
         let oldest = BitbankTransactionDatum {
-            amount: Decimal::new(1, 0),
+            amount: literal("1"),
             executed_at: 1000,
-            price: Decimal::new(110, 0),
+            price: literal("110"),
             side: "sell".to_owned(),
             transaction_id: 1,
         };
@@ -1034,9 +1034,9 @@ mod tests {
     fn bitbank_converter_rejects_unknown_transaction_side() {
         let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
         let trade = BitbankTransactionDatum {
-            amount: Decimal::new(25, 1),
+            amount: literal("2.5"),
             executed_at: 1000,
-            price: Decimal::new(100, 0),
+            price: literal("100"),
             side: "unknown".to_owned(),
             transaction_id: 42,
         };

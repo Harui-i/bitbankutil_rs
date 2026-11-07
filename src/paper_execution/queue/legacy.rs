@@ -1,21 +1,21 @@
-//! 比較専用: 6581cfab の queue.rs。公開診断型のみ親モジュールと共有。
+//! 比較専用: 6581cfab のキュー方式を専用整数型へ移植。公開診断型を親と共有。
 #![allow(dead_code)]
 use super::*;
+use crate::book_units::{Price, Quantity, literal};
 use crate::{depth::Depth, market_event::MarketDepthSnapshot};
-use rust_decimal::prelude::FromPrimitive;
 
 #[derive(Debug, Clone)]
 struct Book {
     evidence: PaperBookEvidence,
-    bids: BTreeMap<Decimal, Decimal>,
-    asks: BTreeMap<Decimal, Decimal>,
+    bids: BTreeMap<Price, Quantity>,
+    asks: BTreeMap<Price, Quantity>,
 }
 
 #[derive(Debug)]
 struct Level {
     side: OrderSide,
-    price: Decimal,
-    displayed: Decimal,
+    price: Price,
+    displayed: Quantity,
     segments: Vec<PaperQueueSegment>,
 }
 
@@ -70,14 +70,13 @@ impl QueueModel {
             // 受信が逆順でも新しい観測板を古いsnapshotへ巻き戻さない。
             return;
         }
-        let convert = |map: &BTreeMap<Decimal, f64>| -> Option<BTreeMap<Decimal, Decimal>> {
+        let convert = |map: &BTreeMap<Price, Quantity>| -> Option<BTreeMap<Price, Quantity>> {
             map.iter()
                 .map(|(&p, &q)| {
-                    if p <= Decimal::ZERO || !q.is_finite() || q <= 0.0 {
+                    if p <= literal("0") || q <= Quantity::ZERO {
                         return None;
                     }
-                    let q = Decimal::from_f64(q)?;
-                    (q > Decimal::ZERO).then_some((p, q))
+                    (q > literal("0")).then_some((p, q))
                 })
                 .collect()
         };
@@ -122,7 +121,9 @@ impl QueueModel {
             if displayed > level.displayed {
                 level.segments.push(PaperQueueSegment {
                     effective_after_ms: exchange_now.max(depth.last_timestamp()),
-                    external_amount: displayed - level.displayed,
+                    external_amount: displayed
+                        .checked_sub(level.displayed)
+                        .expect("positive difference"),
                     order_id: None,
                 });
             }
@@ -203,7 +204,7 @@ impl QueueModel {
         };
         level.segments.push(PaperQueueSegment {
             effective_after_ms: at,
-            external_amount: Decimal::ZERO,
+            external_amount: literal("0"),
             order_id: Some(id),
         });
     }
@@ -219,14 +220,14 @@ impl QueueModel {
         trade: &MarketTrade,
         orders: &BTreeMap<OrderId, OpenOrder>,
         cancel_at: &BTreeMap<OrderId, i64>,
-    ) -> Vec<(OrderId, Decimal)> {
+    ) -> Vec<(OrderId, Quantity)> {
         let active = |segment: &PaperQueueSegment| {
             segment
                 .order_id
                 .and_then(|id| orders.get(&id).map(|o| (id, o)))
                 .filter(|(id, o)| {
                     segment.effective_after_ms < trade.executed_at
-                        && o.remaining_amount > Decimal::ZERO
+                        && o.remaining_amount > literal("0")
                         && cancel_at.get(id).is_none_or(|t| trade.executed_at < *t)
                 })
         };
@@ -253,27 +254,32 @@ impl QueueModel {
             // 旧自注文の後ろの外部数量も、その成立時刻に存在したなら消化する。
             // 将来の自注文だけを飛ばし、確定を遅らせても列を同じ状態へ進める。
             for segment in &mut level.segments {
-                if remaining <= Decimal::ZERO && !through {
+                if remaining <= literal("0") && !through {
                     break;
                 }
                 if segment.effective_after_ms >= trade.executed_at {
                     continue;
                 }
                 if let Some((id, order)) = active(segment) {
-                    if remaining <= Decimal::ZERO {
+                    if remaining <= literal("0") {
                         continue;
                     }
                     let amount = order.remaining_amount.min(remaining);
-                    remaining -= amount;
+                    remaining = remaining.checked_sub(amount).expect("bounded subtraction");
                     fills.push((id, amount));
                 } else if segment.order_id.is_none() {
                     if through {
                         // 価格通過は先頭数量が通過済みとの近似。自己約定は公開数量を上限とする。
-                        segment.external_amount = Decimal::ZERO;
+                        segment.external_amount = literal("0");
                     } else {
                         let consumed = segment.external_amount.min(remaining);
-                        segment.external_amount -= consumed;
-                        remaining -= consumed;
+                        segment.external_amount = segment
+                            .external_amount
+                            .checked_sub(consumed)
+                            .expect("bounded subtraction");
+                        remaining = remaining
+                            .checked_sub(consumed)
+                            .expect("bounded subtraction");
                     }
                 }
             }

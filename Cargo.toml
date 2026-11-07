@@ -20,8 +20,7 @@ live-private-order-api = ["live-private-api"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
-rust_decimal = { version = "1.43.0", features = ["serde-with-float"] }
+serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
 crypto-botters = { package = "crypto-botters-bitbank", version = "0.8.0", features = [
   "bitbank",
 ] }

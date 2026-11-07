@@ -1,8 +1,8 @@
+use bitbankutil_rs::book_units::{Price, literal};
 use bitbankutil_rs::{
     bitbank_bot::*, market_event::MarketEvent, order_domain::*, paper_execution::*, replay::*,
     simulation::*, trading_venue::TradingVenue,
 };
-use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
@@ -11,7 +11,7 @@ fn venue(delta: i64, latency: PaperLatencyConfig) -> PaperTradingVenue {
     config.time_model = PaperTimeModel::FixedOffset {
         exchange_minus_local_ms: delta,
     };
-    config.fee_schedule = PaperFeeSchedule::new(Decimal::ZERO, Decimal::ZERO);
+    config.fee_schedule = PaperFeeSchedule::new(literal("0"), literal("0"));
     let engine = PaperExecutionEngine::new(
         config,
         PaperClock::Replay { now_ms: 0 },
@@ -40,7 +40,7 @@ fn raw(channel: &str, data: Value) -> BitbankInboundMessage {
     .unwrap()
     .1
 }
-fn whole(time: i64, sequence: u64, ask: i64, bid: i64) -> BitbankInboundMessage {
+fn whole(time: i64, sequence: u64, ask: i32, bid: i32) -> BitbankInboundMessage {
     raw(
         "depth_whole",
         json!({"asks":[[ask.to_string(),"10"]],"bids":[[bid.to_string(),"10"]],
@@ -64,7 +64,7 @@ fn trade(time: i64, id: i64) -> BitbankInboundMessage {
 struct Observation {
     receipt: i64,
     now: i64,
-    ask: Option<Decimal>,
+    ask: Option<Price>,
     accepted: Option<bool>,
 }
 struct Strategy {
@@ -233,7 +233,7 @@ async fn raw_books_are_reconstructed_independently_and_sequence_gaps_are_allowed
             .book
             .unwrap()
             .best_ask,
-        Decimal::from(112)
+        literal("112")
     );
     // 内部: t120で112を追加し、t130で115を追加。戦略はt160まで何も知らない。
     assert_eq!(seen.lock().unwrap().len(), 1);
@@ -280,7 +280,7 @@ async fn fills_happen_at_occurrence_and_notification_precedes_public_receipt() {
                 .find(|b| b.asset == "btc")
                 .unwrap()
                 .free_amount,
-            Decimal::from(11)
+            literal("11")
         );
     }
 }
@@ -506,7 +506,7 @@ async fn cancellation_arriving_with_trade_excludes_that_millisecond_and_releases
                 .find(|b| b.asset == "jpy")
                 .unwrap()
                 .free_amount,
-            Decimal::from(10_000)
+            literal("10000")
         );
         assert!(!v.paper_settlement_status().unwrap().unsettled);
     }
@@ -527,8 +527,8 @@ async fn strategy_handle_cannot_read_or_drive_internal_market_state() {
                 ctx.emit(BotEvent::Market(MarketEvent::DepthUpdated {
                     pair: "btc_jpy".into(),
                     depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-                        [(7.into(), 1.0)].into(),
-                        [(6.into(), 1.0)].into(),
+                        [(7.into(), literal("1.0"))].into(),
+                        [(6.into(), literal("1.0"))].into(),
                         100,
                     ),
                 }))

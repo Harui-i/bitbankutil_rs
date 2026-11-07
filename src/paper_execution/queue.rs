@@ -1,7 +1,8 @@
 //! 受信済みL2板による受付近似と、価格レベル共有のFIFO数量モデル。
 use super::*;
-use crate::{depth::Depth, market_event::MarketDepthSnapshot};
-use rust_decimal::prelude::FromPrimitive;
+use crate::book_units::{Price, Quantity};
+use crate::depth::Depth;
+use crate::market_event::MarketDepthSnapshot;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -16,16 +17,16 @@ pub enum PaperModelUnavailable {
 pub struct PaperBookEvidence {
     pub exchange_at_ms: i64,
     pub received_at_ms: i64,
-    pub best_bid: Decimal,
-    pub best_ask: Decimal,
-    pub lowest_bid: Decimal,
-    pub highest_ask: Decimal,
+    pub best_bid: Price,
+    pub best_ask: Price,
+    pub lowest_bid: Price,
+    pub highest_ask: Price,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PaperQueueLevel {
     pub side: OrderSide,
-    pub price: Decimal,
+    pub price: Price,
     pub segments: Vec<PaperQueueSegment>,
 }
 
@@ -33,23 +34,28 @@ pub struct PaperQueueLevel {
 pub struct PaperQueueSegment {
     /// この数量/注文が列へ入る取引所時計。過去成立の取引で消化しない。
     pub effective_after_ms: i64,
-    pub external_amount: Decimal,
+    pub external_amount: Quantity,
     pub order_id: Option<OrderId>,
 }
 
 #[derive(Debug, Clone)]
 struct Book {
     evidence: PaperBookEvidence,
-    bids: BTreeMap<Decimal, Decimal>,
-    asks: BTreeMap<Decimal, Decimal>,
+    snapshot: MarketDepthSnapshot,
 }
 
-type LevelKey = (OrderSide, Decimal);
+type LevelKey = (OrderSide, Price);
+#[derive(Debug, Clone)]
+struct Segment {
+    effective_after_ms: i64,
+    external_amount: i64,
+    order_id: Option<OrderId>,
+}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Level {
-    displayed: Decimal,
-    segments: Vec<PaperQueueSegment>,
+    displayed: i64,
+    segments: Vec<Segment>,
 }
 
 /// キュー本体をコピーせず取得できる保持量。空の価格根拠は retained_levels に含む。
@@ -76,7 +82,7 @@ pub(super) struct QueueModel {
     // 数量/自注文を持つ価格だけを約定検索する。
     levels: BTreeMap<LevelKey, Level>,
     // 空の価格にも最終表示数量を残す。再受付で消化済み数量を復活させない。
-    empty_levels: BTreeMap<LevelKey, Decimal>,
+    empty_levels: BTreeMap<LevelKey, i64>,
     // 直前表示が正の価格。次の板から消えた価格も一度だけ更新する。
     displayed_levels: BTreeSet<LevelKey>,
     order_levels: BTreeMap<OrderId, LevelKey>,
@@ -87,6 +93,11 @@ pub(super) struct QueueModel {
 #[cfg(test)]
 thread_local! { pub(super) static STATE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
+pub(super) struct AllocationPlan {
+    pub fills: Vec<(OrderId, Quantity)>,
+    updates: Vec<(LevelKey, Level)>,
+    removed: u64,
+}
 impl QueueModel {
     pub fn observed_mode(&self) -> Option<String> {
         self.observed_mode.clone()
@@ -102,7 +113,15 @@ impl QueueModel {
             .map(|(&(side, price), l)| PaperQueueLevel {
                 side,
                 price,
-                segments: l.segments.clone(),
+                segments: l
+                    .segments
+                    .iter()
+                    .map(|s| PaperQueueSegment {
+                        effective_after_ms: s.effective_after_ms,
+                        external_amount: Quantity::from_units(s.external_amount),
+                        order_id: s.order_id,
+                    })
+                    .collect(),
             })
             .collect()
     }
@@ -132,64 +151,66 @@ impl QueueModel {
             // 受信が逆順でも新しい観測板を古いsnapshotへ巻き戻さない。
             return;
         }
-        let convert = |map: &BTreeMap<Decimal, f64>| -> Option<BTreeMap<Decimal, Decimal>> {
-            map.iter()
-                .map(|(&p, &q)| {
-                    if p <= Decimal::ZERO || !q.is_finite() || q <= 0.0 {
-                        return None;
-                    }
-                    let q = Decimal::from_f64(q)?;
-                    (q > Decimal::ZERO).then_some((p, q))
-                })
-                .collect()
-        };
         let parsed = (|| {
-            if !depth.is_complete() {
+            let evidence = PaperBookEvidence {
+                exchange_at_ms: depth.last_timestamp(),
+                received_at_ms: local_ms,
+                best_bid: *depth.bids().last_key_value()?.0,
+                best_ask: *depth.asks().first_key_value()?.0,
+                lowest_bid: *depth.bids().first_key_value()?.0,
+                highest_ask: *depth.asks().last_key_value()?.0,
+            };
+            if evidence.best_bid >= evidence.best_ask {
                 return None;
             }
-            let bids = convert(depth.bids())?;
-            let asks = convert(depth.asks())?;
-            let best_bid = *bids.last_key_value()?.0;
-            let best_ask = *asks.first_key_value()?.0;
-            if best_bid >= best_ask {
-                return None;
+            let delta = self
+                .book
+                .as_ref()
+                .and_then(|b| depth.changes_since(&b.snapshot));
+            let mut updates = BTreeMap::new();
+            let mut add = |side, price: Price, amount: Quantity, allow_zero: bool| {
+                let amount = amount.units();
+                if price <= Price::ZERO || amount < 0 || (!allow_zero && amount == 0) {
+                    return None;
+                }
+                updates.insert((side, price), amount);
+                Some(())
+            };
+            if let Some(delta) = delta {
+                for &(side, price, amount) in delta {
+                    add(side, price, amount, true)?;
+                }
+            } else {
+                for (&p, &q) in depth.bids() {
+                    add(OrderSide::Buy, p, q, false)?;
+                }
+                for (&p, &q) in depth.asks() {
+                    add(OrderSide::Sell, p, q, false)?;
+                }
             }
-            Some(Book {
-                evidence: PaperBookEvidence {
-                    exchange_at_ms: depth.last_timestamp(),
-                    received_at_ms: local_ms,
-                    best_bid,
-                    best_ask,
-                    lowest_bid: *bids.first_key_value()?.0,
-                    highest_ask: *asks.last_key_value()?.0,
-                },
-                bids,
-                asks,
-            })
+            Some((evidence, delta.is_some(), updates))
         })();
-        let Some(book) = parsed else {
+        let Some((evidence, incremental, mut updates)) = parsed else {
             self.book = None;
-            self.issue("incomplete or invalid observed book");
+            self.issue("incomplete or invalid observed book (requires exact 8-decimal units)");
             return;
         };
-        // 過去の全価格ではなく、新板の表示価格と前回表示が正だった価格だけを更新。
-        let keys: BTreeSet<_> = self
-            .displayed_levels
-            .iter()
-            .copied()
-            .chain(book.bids.keys().map(|&p| (OrderSide::Buy, p)))
-            .chain(book.asks.keys().map(|&p| (OrderSide::Sell, p)))
-            .collect();
-        for key @ (side, price) in keys {
-            let displayed = match side {
-                OrderSide::Buy => &book.bids,
-                OrderSide::Sell => &book.asks,
+        let mut book = if incremental {
+            self.book.take().expect("incremental parent")
+        } else {
+            // 再同期では直前の表示から消えた保持価格も0にする。
+            for &key in &self.displayed_levels {
+                updates.entry(key).or_insert(0);
             }
-            .get(&price)
-            .copied()
-            .unwrap_or_default();
-            if let Some(old) = self.empty_levels.get(&key).copied() {
-                if displayed > old {
+            Book {
+                evidence: evidence.clone(),
+                snapshot: depth.clone(),
+            }
+        };
+        for (key, displayed) in updates {
+            if let Some(old) = self.empty_levels.get_mut(&key) {
+                if displayed > *old {
+                    let old = *old;
                     self.empty_levels.remove(&key);
                     self.levels.insert(
                         key,
@@ -199,13 +220,13 @@ impl QueueModel {
                         },
                     );
                 } else {
-                    *self.empty_levels.get_mut(&key).unwrap() = displayed;
+                    *old = displayed;
                 }
             }
             if let Some(level) = self.levels.get_mut(&key) {
-                // 取消/減少から先頭数量は減らさない。増加分は既存注文の後ろへ置く。
+                // 表示減少は先頭を消費しない。増加分だけを末尾へ追加。
                 if displayed > level.displayed {
-                    level.segments.push(PaperQueueSegment {
+                    level.segments.push(Segment {
                         effective_after_ms: exchange_now.max(depth.last_timestamp()),
                         external_amount: displayed - level.displayed,
                         order_id: None,
@@ -214,13 +235,15 @@ impl QueueModel {
                 level.displayed = displayed;
             }
             if self.levels.contains_key(&key) || self.empty_levels.contains_key(&key) {
-                if displayed > Decimal::ZERO {
+                if displayed > 0 {
                     self.displayed_levels.insert(key);
                 } else {
                     self.displayed_levels.remove(&key);
                 }
             }
         }
+        book.evidence = evidence;
+        book.snapshot = depth.clone();
         self.book = Some(book);
     }
     pub fn admission(
@@ -269,20 +292,20 @@ impl QueueModel {
     pub fn accept(&mut self, order: &DesiredLimitOrder, id: OrderId, at: i64) {
         let book = self.book.as_ref().expect("validated admission");
         let displayed = match order.side {
-            OrderSide::Buy => &book.bids,
-            OrderSide::Sell => &book.asks,
+            OrderSide::Buy => book.snapshot.bids(),
+            OrderSide::Sell => book.snapshot.asks(),
         }
         .get(&order.price)
-        .copied()
+        .map(|q| q.units())
         .unwrap_or_default();
         let key = (order.side, order.price);
         let previous = self.empty_levels.remove(&key);
         let level = self.levels.entry(key).or_insert_with(|| Level {
             displayed: previous.unwrap_or(displayed),
-            segments: if previous.is_some() || displayed == Decimal::ZERO {
+            segments: if previous.is_some() || displayed == 0 {
                 Vec::new()
             } else {
-                vec![PaperQueueSegment {
+                vec![Segment {
                     effective_after_ms: at,
                     external_amount: displayed,
                     order_id: None,
@@ -290,12 +313,12 @@ impl QueueModel {
             },
         });
         self.order_levels.insert(id, key);
-        if displayed > Decimal::ZERO {
+        if displayed > 0 {
             self.displayed_levels.insert(key);
         }
-        level.segments.push(PaperQueueSegment {
+        level.segments.push(Segment {
             effective_after_ms: at,
-            external_amount: Decimal::ZERO,
+            external_amount: 0,
             order_id: Some(id),
         });
     }
@@ -323,40 +346,41 @@ impl QueueModel {
             removed_segments: self.removed_segments,
         }
     }
-    pub fn allocations(
-        &mut self,
+    pub fn plan_allocations(
+        &self,
         trade: &MarketTrade,
         orders: &BTreeMap<OrderId, OpenOrder>,
         cancel_at: &BTreeMap<OrderId, i64>,
-    ) -> Vec<(OrderId, Decimal)> {
-        let active = |segment: &PaperQueueSegment| {
+    ) -> AllocationPlan {
+        let active = |segment: &Segment| {
             segment
                 .order_id
                 .and_then(|id| orders.get(&id).map(|o| (id, o)))
                 .filter(|(id, o)| {
                     segment.effective_after_ms < trade.executed_at
-                        && o.remaining_amount > Decimal::ZERO
+                        && o.remaining_amount > Quantity::ZERO
                         && cancel_at.get(id).is_none_or(|t| trade.executed_at < *t)
                 })
         };
-        let mut remaining = trade.amount;
+        let price = trade.price;
+        let mut remaining = trade.amount.units();
         let mut fills = Vec::new();
-        let mut emptied = Vec::new();
+        let mut updates = Vec::new();
+        let mut removed = 0;
         // side/price順の範囲検索。Buy側は高価格、Sell側は低価格が優先。
         let (ascending, descending) = match trade.side {
-            OrderSide::Buy => {
-                (
-                    Some(self.levels.range_mut(
-                        (OrderSide::Sell, Decimal::MIN)..=(OrderSide::Sell, trade.price),
-                    )),
-                    None,
-                )
-            }
+            OrderSide::Buy => (
+                Some(
+                    self.levels
+                        .range((OrderSide::Sell, Price::MIN)..=(OrderSide::Sell, price)),
+                ),
+                None,
+            ),
             OrderSide::Sell => (
                 None,
                 Some(
                     self.levels
-                        .range_mut((OrderSide::Buy, trade.price)..=(OrderSide::Buy, Decimal::MAX)),
+                        .range((OrderSide::Buy, price)..=(OrderSide::Buy, Price::MAX)),
                 ),
             ),
         };
@@ -365,27 +389,28 @@ impl QueueModel {
             .flatten()
             .chain(descending.into_iter().flatten().rev())
         {
-            let through = trade.price != key.1;
+            let mut level = level.clone();
+            let through = price != key.1;
             // 旧自注文の後ろの外部数量も、その成立時刻に存在したなら消化する。
             // 将来の自注文だけを飛ばし、確定を遅らせても列を同じ状態へ進める。
             for segment in &mut level.segments {
-                if remaining <= Decimal::ZERO && !through {
+                if remaining <= 0 && !through {
                     break;
                 }
                 if segment.effective_after_ms >= trade.executed_at {
                     continue;
                 }
                 if let Some((id, order)) = active(segment) {
-                    if remaining <= Decimal::ZERO {
+                    if remaining <= 0 {
                         continue;
                     }
-                    let amount = order.remaining_amount.min(remaining);
+                    let amount = order.remaining_amount.units().min(remaining);
                     remaining -= amount;
-                    fills.push((id, amount));
+                    fills.push((id, Quantity::from_units(amount)));
                 } else if segment.order_id.is_none() {
                     if through {
                         // 価格通過は先頭数量が通過済みとの近似。自己約定は公開数量を上限とする。
-                        segment.external_amount = Decimal::ZERO;
+                        segment.external_amount = 0;
                     } else {
                         let consumed = segment.external_amount.min(remaining);
                         segment.external_amount -= consumed;
@@ -396,15 +421,33 @@ impl QueueModel {
             let before = level.segments.len();
             level
                 .segments
-                .retain(|s| s.order_id.is_some() || s.external_amount > Decimal::ZERO);
-            self.removed_segments += (before - level.segments.len()) as u64;
-            if level.segments.is_empty() {
-                emptied.push(key);
-            }
+                .retain(|s| s.order_id.is_some() || s.external_amount > 0);
+            removed += (before - level.segments.len()) as u64;
+            updates.push((key, level));
         }
-        for key in emptied {
+        AllocationPlan {
+            fills,
+            updates,
+            removed,
+        }
+    }
+    pub fn commit_allocations(&mut self, plan: AllocationPlan) {
+        self.removed_segments += plan.removed;
+        for (key, level) in plan.updates {
+            self.levels.insert(key, level);
             self.retire_empty(key);
         }
+    }
+    #[allow(dead_code)] // 比較benchmarkと直接kernelテスト用。
+    pub fn allocations(
+        &mut self,
+        trade: &MarketTrade,
+        orders: &BTreeMap<OrderId, OpenOrder>,
+        cancel_at: &BTreeMap<OrderId, i64>,
+    ) -> Vec<(OrderId, Quantity)> {
+        let plan = self.plan_allocations(trade, orders, cancel_at);
+        let fills = plan.fills.clone();
+        self.commit_allocations(plan);
         fills
     }
 }
@@ -416,10 +459,10 @@ mod legacy;
 mod tests {
     use super::*;
 
-    fn book(t: i64, quantity: f64) -> MarketDepthSnapshot {
+    fn book(t: i64, quantity: Quantity) -> MarketDepthSnapshot {
         MarketDepthSnapshot::new(
-            [(110.into(), quantity), (120.into(), 1.0)].into(),
-            [(90.into(), 1.0), (100.into(), quantity)].into(),
+            [(110.into(), quantity), (120.into(), literal("1.0"))].into(),
+            [(90.into(), literal("1.0")), (100.into(), quantity)].into(),
             t,
         )
     }
@@ -428,7 +471,7 @@ mod tests {
             .into_iter()
             .filter_map(|mut l| {
                 l.segments
-                    .retain(|s| s.order_id.is_some() || s.external_amount > Decimal::ZERO);
+                    .retain(|s| s.order_id.is_some() || s.external_amount > literal("0"));
                 (!l.segments.is_empty()).then_some(l)
             })
             .collect::<Vec<_>>();
@@ -449,7 +492,7 @@ mod tests {
                 random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
                 match random % 5 {
                     0 | 1 => {
-                        let b = book(t, (random % 7 + 1) as f64);
+                        let b = book(t, Quantity::from((random % 7 + 1) as i32));
                         new.observe_book(&b, t + 5, t + 2);
                         old.observe_book(&b, t + 5, t + 2);
                     }
@@ -459,7 +502,7 @@ mod tests {
                         } else {
                             OrderSide::Sell
                         };
-                        let offset = ((random >> 8) % 6) as i64;
+                        let offset = ((random >> 8) % 6) as i32;
                         let price = if side == OrderSide::Buy {
                             100 - offset
                         } else {
@@ -510,14 +553,15 @@ mod tests {
                                 OrderSide::Sell
                             },
                             price: (if random & 16 == 0 { 100 } else { 110 }).into(),
-                            amount: (random % 11 + 1).into(),
+                            amount: Quantity::from((random % 11 + 1) as i32),
                         };
                         let fills = new.allocations(&trade, &orders, &cancel);
                         assert_eq!(fills, old.allocations(&trade, &orders, &cancel));
                         for (id, amount) in fills {
                             let order = orders.get_mut(&id).unwrap();
-                            order.remaining_amount -= amount;
-                            if order.remaining_amount == Decimal::ZERO {
+                            order.remaining_amount =
+                                order.remaining_amount.checked_sub(amount).unwrap();
+                            if order.remaining_amount == literal("0") {
                                 orders.remove(&id);
                                 new.remove(id);
                                 old.remove(id);
@@ -534,11 +578,203 @@ mod tests {
         }
     }
 
+    fn captured_book(
+        converter: &mut crate::bitbank_bot::BitbankMarketEventConverter,
+        value: serde_json::Value,
+        whole: bool,
+    ) -> MarketDepthSnapshot {
+        use crate::bitbank_bot::BitbankInboundMessage;
+        let message = if whole {
+            BitbankInboundMessage::DepthWhole(serde_json::from_value(value).unwrap())
+        } else {
+            BitbankInboundMessage::DepthDiff(serde_json::from_value(value).unwrap())
+        };
+        let MarketEvent::DepthUpdated { depth, .. } = converter.convert(message).unwrap().unwrap()
+        else {
+            panic!("expected depth")
+        };
+        depth
+    }
+    fn whole_value(sequence: u64, time: i64) -> serde_json::Value {
+        serde_json::json!({"asks":[["110","1.00000001"],["120","2"]], "bids":[["100","3.00000001"],["90","4"]],
+            "asks_over":"0","bids_under":"0","asks_under":"0","bids_over":"0","ask_market":"0","bid_market":"0", "timestamp":time,"sequenceId":sequence.to_string()})
+    }
+    #[test]
+    fn incremental_and_resynchronized_books_preserve_fifo_and_fills() {
+        let mut converter = crate::bitbank_bot::BitbankMarketEventConverter::new("xrp_jpy".into());
+        let mut incremental = QueueModel::default();
+        let mut full = QueueModel::default();
+        let mut previous = captured_book(&mut converter, whole_value(1, 1), true);
+        incremental.observe_book(&previous, 1, 1);
+        full.observe_book(&previous, 1, 1);
+        let mut orders = BTreeMap::new();
+        for sequence in 2..200u64 {
+            let t = sequence as i64 * 10;
+            let order = DesiredLimitOrder::limit(
+                "xrp_jpy".into(),
+                OrderSide::Buy,
+                "0.00000003".parse().unwrap(),
+                100.into(),
+            );
+            let id = OrderId(sequence);
+            incremental.accept(&order, id, t - 1);
+            full.accept(&order, id, t - 1);
+            orders.insert(
+                id,
+                OpenOrder {
+                    order_id: id,
+                    pair: order.pair.clone(),
+                    side: order.side,
+                    order_type: crate::order_domain::OrderType::Limit,
+                    remaining_amount: order.amount,
+                    price: Some(order.price),
+                    post_only: Some(true),
+                },
+            );
+            let mut next = captured_book(
+                &mut converter,
+                serde_json::json!({"a":[["111","5"],["111","0"]], "b":[["100", if sequence % 3 == 0 {"0"} else {"3.00000002"}]], "t":t,"s":sequence.to_string()}),
+                false,
+            );
+            assert!(next.changes_since(&previous).is_some());
+            if sequence % 7 == 0 {
+                // 未配送更新を挟んだ場合、差分の親が一致せず全体へ戻る。
+                next = captured_book(&mut converter, whole_value(sequence, t), true);
+                assert!(next.changes_since(&previous).is_none());
+            }
+            let snapshot = MarketDepthSnapshot::new(
+                next.asks().clone(),
+                next.bids().clone(),
+                next.last_timestamp(),
+            );
+            incremental.observe_book(&next, t, t);
+            full.observe_book(&snapshot, t, t);
+            assert_eq!(
+                incremental.admission(&order, true),
+                full.admission(&order, true)
+            );
+            let trade = MarketTrade {
+                transaction_id: t,
+                executed_at: t + 1,
+                side: OrderSide::Sell,
+                price: 100.into(),
+                amount: 4.into(),
+            };
+            assert_eq!(
+                incremental.allocations(&trade, &orders, &BTreeMap::new()),
+                full.allocations(&trade, &orders, &BTreeMap::new())
+            );
+            incremental.remove(id);
+            full.remove(id);
+            orders.remove(&id);
+            assert_eq!(incremental.state(), full.state(), "sequence {sequence}");
+            assert_eq!(incremental.diagnostics(), full.diagnostics());
+            // 既に公開したsnapshotは後続更新でも不変。
+            assert_eq!(previous.changes_since(&previous), Some(&[][..]));
+            previous = next;
+        }
+    }
+    #[test]
+    fn missed_updates_and_connection_switch_require_full_resynchronization() {
+        let mut converter = crate::bitbank_bot::BitbankMarketEventConverter::new("xrp_jpy".into());
+        let first = captured_book(&mut converter, whole_value(1, 1), true);
+        let middle = captured_book(
+            &mut converter,
+            serde_json::json!({"a":[],"b":[["100","0"]],"t":2,"s":"2"}),
+            false,
+        );
+        let last = captured_book(
+            &mut converter,
+            serde_json::json!({"a":[],"b":[["99","2"]],"t":3,"s":"3"}),
+            false,
+        );
+        assert!(last.changes_since(&first).is_none());
+        assert!(last.changes_since(&middle).is_some());
+        assert_eq!(*first.best_bid().unwrap().0, literal("100"));
+        assert_eq!(*last.best_bid().unwrap().0, literal("99"));
+        let order =
+            DesiredLimitOrder::limit("xrp_jpy".into(), OrderSide::Buy, 1.into(), 100.into());
+        let mut q = QueueModel::default();
+        q.observe_book(&first, 1, 1);
+        q.accept(&order, OrderId(1), 1);
+        q.observe_book(&last, 3, 3);
+        assert_eq!(q.levels[&(OrderSide::Buy, Price::from(100))].displayed, 0);
+        assert_eq!(
+            q.book
+                .as_ref()
+                .unwrap()
+                .snapshot
+                .bids()
+                .get(&Price::from(100)),
+            None
+        );
+        let mut other = crate::bitbank_bot::BitbankMarketEventConverter::new("xrp_jpy".into());
+        let next = captured_book(&mut other, whole_value(1, 4), true);
+        assert!(next.changes_since(&last).is_none());
+        q.observe_book(&next, 4, 4);
+        assert_eq!(
+            q.levels[&(OrderSide::Buy, Price::from(100))].displayed,
+            literal::<Quantity>("3.00000001").units()
+        );
+    }
+
+    #[test]
+    fn captured_quantities_keep_units_beyond_float_precision() {
+        let mut converter = crate::bitbank_bot::BitbankMarketEventConverter::new("xrp_jpy".into());
+        let mut value = whole_value(1, 1);
+        value["bids"][0][1] = serde_json::json!("90000000000.00000001");
+        let depth = captured_book(&mut converter, value, true);
+        assert_eq!(
+            depth.bids()[&Price::from(100)],
+            Quantity::from_units(9_000_000_000_000_000_001)
+        );
+        let mut q = QueueModel::default();
+        q.observe_book(&depth, 1, 1);
+        let order = DesiredLimitOrder::limit(
+            "xrp_jpy".into(),
+            OrderSide::Buy,
+            "0.00000001".parse().unwrap(),
+            100.into(),
+        );
+        assert!(q.admission(&order, true).is_ok());
+        q.accept(&order, OrderId(1), 1);
+        assert_eq!(
+            q.state()[0].segments[0].external_amount,
+            "90000000000.00000001".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn fixed_units_are_exact_and_never_round_unsupported_precision() {
+        assert!("0.000000001".parse::<Price>().is_err());
+        assert!("0.000000001".parse::<Quantity>().is_err());
+        let mut q = QueueModel::default();
+        q.observe_book(&book(1, literal("4161.5933")), 1, 1);
+        let order = DesiredLimitOrder::limit(
+            "xrp_jpy".into(),
+            OrderSide::Buy,
+            literal("0.00000001"),
+            100.into(),
+        );
+        q.accept(&order, OrderId(1), 1);
+        assert_eq!(
+            q.state()[0].segments[0].external_amount,
+            literal("4161.5933")
+        );
+    }
+
     #[test]
     fn exhausted_history_keeps_only_price_evidence() {
         let mut q = QueueModel::default();
         for t in 1..=2000 {
-            let b = book(t * 3, if t % 2 == 0 { 1.0 } else { 2.0 });
+            let b = book(
+                t * 3,
+                if t % 2 == 0 {
+                    literal("1.0")
+                } else {
+                    literal("2.0")
+                },
+            );
             q.observe_book(&b, t * 3, t * 3);
             let o =
                 DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 1.into(), 100.into());

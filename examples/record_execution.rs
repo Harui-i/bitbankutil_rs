@@ -1,4 +1,5 @@
 //! オフラインでの記録と集計: cargo run --example record_execution -- /tmp/run.jsonl
+use bitbankutil_rs::book_units::literal;
 use bitbankutil_rs::{
     execution_recording::{ExecutionRecorder, JsonlSink, read_records},
     market_event::{MarketEvent, MarketTrade},
@@ -6,7 +7,6 @@ use bitbankutil_rs::{
     paper_execution::{PaperExecutionConfig, PaperExecutionEngine, PaperTradingVenue},
     trading_venue::TradingVenue,
 };
-use rust_decimal::Decimal;
 use serde_json::json;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,19 +22,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         JsonlSink::open(&path)?,
     );
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
-    config.fee_schedule.maker_fee_rate_quote = Decimal::new(1, 3);
+    config.fee_schedule.maker_fee_rate_quote = literal("0.001");
     let balances = vec![
         BalanceSnapshot {
             asset: "btc".into(),
-            free_amount: Decimal::ZERO,
-            locked_amount: Decimal::ZERO,
-            onhand_amount: Decimal::ZERO,
+            free_amount: literal("0"),
+            locked_amount: literal("0"),
+            onhand_amount: literal("0"),
         },
         BalanceSnapshot {
             asset: "jpy".into(),
-            free_amount: Decimal::from(1000),
-            locked_amount: Decimal::ZERO,
-            onhand_amount: Decimal::from(1000),
+            free_amount: literal("1000"),
+            locked_amount: literal("0"),
+            onhand_amount: literal("1000"),
         },
     ];
     let venue = PaperTradingVenue::new(
@@ -51,8 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .on_market_event(&MarketEvent::DepthUpdated {
             pair: "btc_jpy".into(),
             depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-                std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-                std::collections::BTreeMap::from([(1.into(), 1.0)]),
+                std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+                std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
                 0,
             ),
         })
@@ -60,17 +60,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let order = DesiredLimitOrder::limit(
         "btc_jpy".into(),
         OrderSide::Buy,
-        Decimal::from(2),
-        Decimal::from(100),
+        literal("2"),
+        literal("100"),
     );
     let placed = venue.place_order(order.clone().into()).await.unwrap();
     venue
         .on_market_event(&MarketEvent::Transactions {
             pair: "btc_jpy".into(),
             transactions: vec![MarketTrade {
-                amount: Decimal::ONE,
+                amount: literal("1"),
                 executed_at: 1,
-                price: Decimal::from(100),
+                price: literal("100"),
                 side: OrderSide::Sell,
                 transaction_id: 1,
             }],
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     venue.advance_trade_watermark(2).unwrap(); // 取消を含む次のmsまで合成入力は完了
     let mut rejected = order;
-    rejected.amount = Decimal::from(1000);
+    rejected.amount = literal("1000");
     assert!(venue.place_order(rejected.into()).await.is_err());
     venue.account_snapshot("btc_jpy").await.unwrap();
     recorder.finish()?;

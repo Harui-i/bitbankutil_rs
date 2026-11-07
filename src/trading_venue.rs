@@ -16,6 +16,7 @@ pub type TradingVenueFuture<'a, T> =
 
 #[derive(Debug)]
 pub enum TradingVenueError {
+    Numeric(crate::book_units::NumericError),
     Bitbank(Option<crypto_botters::bitbank::BitbankHandleError>),
     Parse(ParseOrderError),
     Paper(PaperExecutionError),
@@ -257,6 +258,17 @@ impl TradingVenue for BitbankTradingVenue {
             serde_json::json!(&request),
             async move {
                 let order = request.order;
+                if order.amount <= crate::book_units::Quantity::ZERO
+                    || order.price <= crate::book_units::Price::ZERO
+                {
+                    return Err(TradingVenueError::Numeric(
+                        crate::book_units::NumericError::Invalid,
+                    ));
+                }
+                order
+                    .price
+                    .notional(order.amount)
+                    .map_err(TradingVenueError::Numeric)?;
                 let response = self
                     .api_client
                     .post_order(
@@ -304,8 +316,8 @@ impl TradingVenue for BitbankTradingVenue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::book_units::literal;
     use crate::order_domain::OrderSide;
-    use rust_decimal::Decimal;
     use serde_json::json;
 
     #[tokio::test]
@@ -320,7 +332,7 @@ mod tests {
             Err(TradingVenueError::Unavailable)
         ));
         let request =
-            DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, Decimal::ONE, Decimal::ONE)
+            DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, literal("1"), literal("1"))
                 .into();
         assert!(matches!(
             NoTradingVenue.place_order(request).await,
@@ -379,7 +391,7 @@ mod tests {
         .unwrap();
         let snapshot = convert_account_snapshot(orders, assets).unwrap();
         assert_eq!(snapshot.open_orders[0].side, OrderSide::Buy);
-        assert_eq!(snapshot.open_orders[0].remaining_amount, Decimal::new(1, 1));
-        assert_eq!(snapshot.balances[0].locked_amount, Decimal::new(500_000, 0));
+        assert_eq!(snapshot.open_orders[0].remaining_amount, literal("0.1"));
+        assert_eq!(snapshot.balances[0].locked_amount, literal("500000"));
     }
 }

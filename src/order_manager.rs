@@ -1,3 +1,4 @@
+use crate::book_units::Amount;
 use std::collections::BTreeSet;
 
 use crate::{
@@ -5,7 +6,6 @@ use crate::{
     order_domain::{DesiredLimitOrder, OpenOrder, OrderId, OrderSide},
     trading_venue::{PlacedOrder, PlacementRequest, TradingVenue, TradingVenueError},
 };
-use rust_decimal::Decimal;
 use tokio::time::Instant;
 
 /// 操作を同じタスクで並行pollし、再生上の要求登録順を起床順に依存させない。
@@ -83,10 +83,10 @@ pub fn plan_orders(
 fn plan_concurrent_orders_from_open_orders(
     wanna_place_orders: Vec<DesiredLimitOrder>,
     current_orders: Vec<OpenOrder>,
-    btc_free_amount: Decimal,
-    jpy_free_amount: Decimal,
+    btc_free_amount: Amount,
+    jpy_free_amount: Amount,
     pair: &str,
-) -> ConcurrentOrderPlan {
+) -> Result<ConcurrentOrderPlan, crate::book_units::NumericError> {
     let OrderPlan {
         cancels,
         placements,
@@ -101,23 +101,23 @@ fn plan_concurrent_orders_from_open_orders(
     // placementsの順序が発注したい注文の優先順位であると仮定する。
     for sord in placements {
         if sord.side == OrderSide::Buy {
-            let consumed_jpy = sord.amount * sord.limit_price();
+            let consumed_jpy = sord.limit_price().notional(sord.amount)?;
 
             if next_jpy_free_amount >= consumed_jpy {
                 log::debug!("{:?} posted firstly.", sord);
                 first_placements.insert(sord);
-                next_jpy_free_amount -= consumed_jpy;
+                next_jpy_free_amount = next_jpy_free_amount.checked_sub(consumed_jpy)?;
             } else {
                 log::debug!("{:?} posted secondly.", sord);
                 second_placements.insert(sord);
             }
         } else if sord.side == OrderSide::Sell {
-            let consumed_btc = sord.amount;
+            let consumed_btc = sord.amount.to_amount();
 
             if next_btc_free_amount >= consumed_btc {
                 log::debug!("{:?} posted firstly.", sord);
                 first_placements.insert(sord);
-                next_btc_free_amount -= consumed_btc;
+                next_btc_free_amount = next_btc_free_amount.checked_sub(consumed_btc)?;
             } else {
                 log::debug!("{:?} posted secondly.", sord);
                 second_placements.insert(sord);
@@ -130,11 +130,11 @@ fn plan_concurrent_orders_from_open_orders(
         }
     }
 
-    ConcurrentOrderPlan {
+    Ok(ConcurrentOrderPlan {
         cancels,
         first_placements,
         second_placements,
-    }
+    })
 }
 
 pub async fn place_wanna_orders(
@@ -198,11 +198,11 @@ wanna_place_orders
 pub async fn place_wanna_orders_concurrent(
     wanna_place_orders: Vec<DesiredLimitOrder>,
     current_orders: Vec<OpenOrder>,
-    btc_free_amount: Decimal,
-    jpy_free_amount: Decimal,
+    btc_free_amount: Amount,
+    jpy_free_amount: Amount,
     pair: String,
     venue: impl TradingVenue,
-) {
+) -> Result<(), crate::book_units::NumericError> {
     let start = Instant::now();
     let ConcurrentOrderPlan {
         cancels,
@@ -214,7 +214,7 @@ pub async fn place_wanna_orders_concurrent(
         btc_free_amount,
         jpy_free_amount,
         &pair,
-    );
+    )?;
 
     enum FirstJoinSetResponse {
         CancelResponse(Result<(), TradingVenueError>),
@@ -283,11 +283,13 @@ pub async fn place_wanna_orders_concurrent(
         "Replaced orders(concurrently) within {} ms.",
         start.elapsed().as_millis()
     );
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::book_units::*;
     use crate::order_domain::OrderType;
     use crate::trading_venue::{AccountSnapshot, TradingVenueFuture};
     use std::sync::{Arc, Mutex};
@@ -356,8 +358,8 @@ mod tests {
     fn desired_order(
         pair: &str,
         side: OrderSide,
-        amount: Decimal,
-        price: Decimal,
+        amount: Quantity,
+        price: Price,
     ) -> DesiredLimitOrder {
         DesiredLimitOrder::limit(pair.to_owned(), side, amount, price)
     }
@@ -366,8 +368,8 @@ mod tests {
         order_id: u64,
         pair: &str,
         side: OrderSide,
-        amount: Decimal,
-        price: Decimal,
+        amount: Quantity,
+        price: Price,
         post_only: Option<bool>,
     ) -> OpenOrder {
         OpenOrder {
@@ -390,15 +392,15 @@ mod tests {
         let desired = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
+            literal("0.1"),
+            literal("5000000"),
         );
         let current_orders = vec![open_order(
             10,
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
+            literal("0.1"),
+            literal("5000000"),
             Some(true),
         )];
 
@@ -414,8 +416,8 @@ mod tests {
             10,
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(2, 1),
-            Decimal::new(5_100_000, 0),
+            literal("0.2"),
+            literal("5100000"),
             Some(true),
         )];
 
@@ -430,8 +432,8 @@ mod tests {
         let desired = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
+            literal("0.1"),
+            literal("5000000"),
         );
 
         let plan = plan_orders(vec![desired.clone()], vec![], "btc_jpy");
@@ -446,8 +448,8 @@ mod tests {
             12,
             "eth_jpy",
             OrderSide::Sell,
-            Decimal::new(1, 0),
-            Decimal::new(400_000, 0),
+            literal("1"),
+            literal("400000"),
             Some(true),
         )];
 
@@ -462,38 +464,38 @@ mod tests {
         let existing_wanted = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
+            literal("0.1"),
+            literal("5000000"),
         );
         let new_wanted = desired_order(
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(2, 1),
-            Decimal::new(5_100_000, 0),
+            literal("0.2"),
+            literal("5100000"),
         );
         let current_orders = vec![
             open_order(
                 10,
                 "btc_jpy",
                 OrderSide::Buy,
-                Decimal::new(1, 1),
-                Decimal::new(5_000_000, 0),
+                literal("0.1"),
+                literal("5000000"),
                 Some(true),
             ),
             open_order(
                 11,
                 "btc_jpy",
                 OrderSide::Sell,
-                Decimal::new(3, 1),
-                Decimal::new(5_200_000, 0),
+                literal("0.3"),
+                literal("5200000"),
                 Some(true),
             ),
             open_order(
                 12,
                 "eth_jpy",
                 OrderSide::Sell,
-                Decimal::new(1, 0),
-                Decimal::new(400_000, 0),
+                literal("1"),
+                literal("400000"),
                 Some(true),
             ),
         ];
@@ -501,10 +503,11 @@ mod tests {
         let plan = plan_concurrent_orders_from_open_orders(
             vec![existing_wanted, new_wanted.clone()],
             current_orders,
-            Decimal::new(1, 0),
-            Decimal::new(1_000_000, 0),
+            literal("1"),
+            literal("1000000"),
             "btc_jpy",
-        );
+        )
+        .unwrap();
 
         assert_eq!(plan.cancels, vec![OrderId(11)]);
         assert_eq!(plan.first_placements, set_of(vec![new_wanted]));
@@ -516,26 +519,26 @@ mod tests {
         let first_buy = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(1_000_000, 0),
+            literal("0.1"),
+            literal("1000000"),
         );
         let second_buy = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(2, 1),
-            Decimal::new(1_000_000, 0),
+            literal("0.2"),
+            literal("1000000"),
         );
         let first_sell = desired_order(
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(3, 1),
-            Decimal::new(1_200_000, 0),
+            literal("0.3"),
+            literal("1200000"),
         );
         let second_sell = desired_order(
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(3, 1),
-            Decimal::new(1_300_000, 0),
+            literal("0.3"),
+            literal("1300000"),
         );
 
         let plan = plan_concurrent_orders_from_open_orders(
@@ -546,10 +549,11 @@ mod tests {
                 second_sell.clone(),
             ],
             vec![],
-            Decimal::new(5, 1),
-            Decimal::new(100_000, 0),
+            literal("0.5"),
+            literal("100000"),
             "btc_jpy",
-        );
+        )
+        .unwrap();
 
         assert!(plan.cancels.is_empty());
         assert_eq!(plan.first_placements, set_of(vec![first_buy, first_sell]));
@@ -564,25 +568,26 @@ mod tests {
         let desired = desired_order(
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(25, 2),
-            Decimal::new(4_900_000, 0),
+            literal("0.25"),
+            literal("4900000"),
         );
         let current_orders = vec![open_order(
             123,
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(25, 2),
-            Decimal::new(4_900_000, 0),
+            literal("0.25"),
+            literal("4900000"),
             None,
         )];
 
         let plan = plan_concurrent_orders_from_open_orders(
             vec![desired],
             current_orders,
-            Decimal::ZERO,
-            Decimal::ZERO,
+            literal("0"),
+            literal("0"),
             "btc_jpy",
-        );
+        )
+        .unwrap();
 
         assert!(plan.cancels.is_empty());
         assert!(plan.first_placements.is_empty());
@@ -594,15 +599,15 @@ mod tests {
         let desired = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(5_000_000, 0),
+            literal("0.1"),
+            literal("5000000"),
         );
         let current_order = open_order(
             10,
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(2, 1),
-            Decimal::new(5_100_000, 0),
+            literal("0.2"),
+            literal("5100000"),
             Some(true),
         );
         let venue = FakeTradingVenue::default();
@@ -632,21 +637,21 @@ mod tests {
         let first_buy = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(1, 1),
-            Decimal::new(1_000_000, 0),
+            literal("0.1"),
+            literal("1000000"),
         );
         let second_buy = desired_order(
             "btc_jpy",
             OrderSide::Buy,
-            Decimal::new(2, 1),
-            Decimal::new(1_000_000, 0),
+            literal("0.2"),
+            literal("1000000"),
         );
         let current_order = open_order(
             20,
             "btc_jpy",
             OrderSide::Sell,
-            Decimal::new(3, 1),
-            Decimal::new(1_200_000, 0),
+            literal("0.3"),
+            literal("1200000"),
             Some(true),
         );
         let venue = FakeTradingVenue::default();
@@ -654,12 +659,13 @@ mod tests {
         place_wanna_orders_concurrent(
             vec![first_buy.clone(), second_buy.clone()],
             vec![current_order],
-            Decimal::ZERO,
-            Decimal::new(100_000, 0),
+            literal("0"),
+            literal("100000"),
             "btc_jpy".to_owned(),
             venue.clone(),
         )
-        .await;
+        .await
+        .unwrap();
 
         let calls = venue.calls();
         assert!(calls.contains(&VenueCall::Cancel {

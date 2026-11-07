@@ -1,4 +1,5 @@
 use super::*;
+use bitbankutil_rs::book_units::literal;
 use bitbankutil_rs::trading_venue::{PlacementRequest, TradingVenue};
 
 #[derive(Clone, Default)]
@@ -24,15 +25,15 @@ impl TradingVenue for ProbeVenue {
                 balances: vec![
                     BalanceSnapshot {
                         asset: "btc".to_owned(),
-                        free_amount: Decimal::ZERO,
-                        locked_amount: Decimal::ZERO,
-                        onhand_amount: Decimal::ZERO,
+                        free_amount: literal("0"),
+                        locked_amount: literal("0"),
+                        onhand_amount: literal("0"),
                     },
                     BalanceSnapshot {
                         asset: "jpy".to_owned(),
-                        free_amount: Decimal::ZERO,
-                        locked_amount: Decimal::ZERO,
-                        onhand_amount: Decimal::ZERO,
+                        free_amount: literal("0"),
+                        locked_amount: literal("0"),
+                        onhand_amount: literal("0"),
                     },
                 ],
             })
@@ -71,13 +72,13 @@ async fn runtime_applies_trade_before_bot_reads_account() {
     let venue = ProbeVenue::default();
     let mut bot = MyBot::new(
         "btc_jpy".to_owned(),
-        Decimal::ONE,
+        literal("1"),
         0,
-        Decimal::new(1, 1),
-        Decimal::ONE,
+        literal("0.1"),
+        literal("1"),
     );
-    let asks = [(Decimal::new(6_000_000, 0), 1.0)].into();
-    let bids = [(Decimal::new(5_000_000, 0), 1.0)].into();
+    let asks = [(literal("6000000"), literal("1.0"))].into();
+    let bids = [(literal("5000000"), literal("1.0"))].into();
     bot.depth = MarketDepthSnapshot::new(asks, bids, 0);
     let runtime = BitbankBotBuilder::new(bot, venue.clone()).spawn();
     runtime
@@ -97,8 +98,7 @@ async fn runtime_applies_trade_before_bot_reads_account() {
 
 #[tokio::test]
 async fn paper_mode_needs_no_credentials_and_exposes_initial_balances() {
-    let (venue, _) =
-        paper_venue("btc_jpy", Decimal::ZERO, Decimal::new(1_000_000, 0), 1000).unwrap();
+    let (venue, _) = paper_venue("btc_jpy", literal("0"), literal("1000000"), 1000).unwrap();
     let snapshot = venue.account_snapshot("btc_jpy").await.unwrap();
     assert!(snapshot.open_orders.is_empty());
     assert_eq!(
@@ -108,12 +108,12 @@ async fn paper_mode_needs_no_credentials_and_exposes_initial_balances() {
             .find(|b| b.asset == "jpy")
             .unwrap()
             .free_amount,
-        Decimal::new(1_000_000, 0)
+        literal("1000000")
     );
 }
 
 #[test]
 fn paper_setup_rejects_negative_balance_and_unsupported_pair() {
-    assert!(paper_venue("btc_jpy", Decimal::new(-1, 0), Decimal::ZERO, 1000).is_err());
-    assert!(paper_venue("btc_usdt", Decimal::ZERO, Decimal::ZERO, 1000).is_err());
+    assert!(paper_venue("btc_jpy", literal("-1"), literal("0"), 1000).is_err());
+    assert!(paper_venue("btc_usdt", literal("0"), literal("0"), 1000).is_err());
 }

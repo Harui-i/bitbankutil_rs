@@ -1,9 +1,9 @@
 //! backtestのサンプル: cargo run --example offline_replay -- /tmp/replay.jsonl
+use bitbankutil_rs::book_units::literal;
 use bitbankutil_rs::{
     bitbank_bot::*, depth::Depth, execution_recording::*, market_event::MarketEvent,
     order_domain::*, paper_execution::*, replay::*, trading_venue::TradingVenue,
 };
-use rust_decimal::Decimal;
 use serde_json::json;
 use std::sync::atomic::AtomicBool;
 struct Strategy {
@@ -38,7 +38,7 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
                             DesiredLimitOrder::limit(
                                 "btc_jpy".into(),
                                 OrderSide::Buy,
-                                Decimal::ONE,
+                                literal("1"),
                                 *price,
                             )
                             .into(),
@@ -76,14 +76,14 @@ async fn demo(
     config.time_model = PaperTimeModel::FixedOffset {
         exchange_minus_local_ms: 0,
     };
-    config.fee_schedule = PaperFeeSchedule::new(Decimal::new(1, 3), Decimal::new(2, 3));
+    config.fee_schedule = PaperFeeSchedule::new(literal("0.001"), literal("0.002"));
     let balances = [("btc", 0), ("jpy", 1000)]
         .into_iter()
         .map(|(asset, amount)| BalanceSnapshot {
             asset: asset.into(),
             free_amount: amount.into(),
             onhand_amount: amount.into(),
-            locked_amount: Decimal::ZERO,
+            locked_amount: literal("0"),
         })
         .collect();
     let venue = PaperTradingVenue::new(
@@ -153,8 +153,8 @@ mod tests {
             let account = demo(path.to_string_lossy().into_owned()).await.unwrap();
             assert_eq!(account.open_orders.len(), 1);
             // 最終注文99.5の前には表示数量2があり、公開約定0.75では自分まで届かない。
-            assert_eq!(account.balances[0].free_amount, Decimal::ZERO);
-            assert_eq!(account.balances[1].onhand_amount, Decimal::from(1000));
+            assert_eq!(account.balances[0].free_amount, literal("0"));
+            assert_eq!(account.balances[1].onhand_amount, literal("1000"));
             let records =
                 read_records(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).unwrap();
             let events: Vec<_> = records

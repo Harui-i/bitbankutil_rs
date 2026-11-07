@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::literal;
 mod support;
 use bitbankutil_rs::{
     bitbank_bot::*,
@@ -9,7 +10,6 @@ use bitbankutil_rs::{
     replay::*,
     trading_venue::{AccountSnapshot, TradingVenue},
 };
-use rust_decimal::Decimal;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use support::TestDiagnostics;
 
@@ -27,7 +27,7 @@ fn engine(
     config.time_model = PaperTimeModel::FixedOffset {
         exchange_minus_local_ms: delta,
     };
-    config.fee_schedule = PaperFeeSchedule::new(Decimal::ZERO, Decimal::ZERO);
+    config.fee_schedule = PaperFeeSchedule::new(literal("0"), literal("0"));
     PaperExecutionEngine::new(
         config,
         clock,
@@ -45,7 +45,7 @@ fn engine(
     .map(|engine| seeded_engine(engine, exchange_ms))
     .unwrap()
 }
-fn sell(price: i64) -> DesiredLimitOrder {
+fn sell(price: i32) -> DesiredLimitOrder {
     DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Sell, 1.into(), price.into())
 }
 fn latency() -> PaperLatencyConfig {
@@ -71,14 +71,14 @@ fn trades() -> MarketEvent {
                 executed_at: 1060,
                 side: OrderSide::Buy,
                 price: 101.into(),
-                amount: Decimal::new(15, 1),
+                amount: literal("1.5"),
             },
             MarketTrade {
                 transaction_id: 2,
                 executed_at: 1160,
                 side: OrderSide::Buy,
                 price: 101.into(),
-                amount: Decimal::new(25, 2),
+                amount: literal("0.25"),
             },
         ],
     }
@@ -110,7 +110,8 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
                 "btc_jpy".into(),
                 ctx.venue().clone(),
             )
-            .await;
+            .await
+            .map_err(|e| e.to_string())?;
             self.0.lock().unwrap().push(ctx.now_ms());
         }
         Ok(())
@@ -156,7 +157,7 @@ async fn overlap(delta: i64, recording: bool) -> (AccountSnapshot, Vec<PaperEven
     let before = venue.known_account_snapshot();
     assert_eq!(before.open_orders.len(), 1);
     assert_eq!(before.open_orders[0].order_id, OrderId(2));
-    assert_eq!(balance(&before, "btc").locked_amount, Decimal::from(2));
+    assert_eq!(balance(&before, "btc").locked_amount, literal("2"));
     assert_eq!(
         venue
             .paper_settlement_status()
@@ -174,7 +175,7 @@ async fn overlap(delta: i64, recording: bool) -> (AccountSnapshot, Vec<PaperEven
     assert!(venue.paper_settlement_status().unwrap().pending_operations > 0);
     assert_eq!(
         balance(&venue.known_account_snapshot(), "jpy").onhand_amount,
-        Decimal::ZERO
+        literal("0")
     );
     runner.process_next_internal(false).await.unwrap();
     assert_eq!(runner.now_ms(), Some(1270 - delta));
@@ -185,10 +186,10 @@ async fn overlap(delta: i64, recording: bool) -> (AccountSnapshot, Vec<PaperEven
     );
     let after = venue.known_account_snapshot();
     assert_eq!(after.open_orders.len(), 1);
-    assert_eq!(after.open_orders[0].remaining_amount, Decimal::new(25, 2));
-    assert_eq!(balance(&after, "btc").free_amount, Decimal::ONE);
-    assert_eq!(balance(&after, "btc").locked_amount, Decimal::new(25, 2));
-    assert_eq!(balance(&after, "jpy").onhand_amount, Decimal::new(17575, 2));
+    assert_eq!(after.open_orders[0].remaining_amount, literal("0.25"));
+    assert_eq!(balance(&after, "btc").free_amount, literal("1"));
+    assert_eq!(balance(&after, "btc").locked_amount, literal("0.25"));
+    assert_eq!(balance(&after, "jpy").onhand_amount, literal("175.75"));
     assert_eq!(
         venue
             .paper_settlement_status()
@@ -235,9 +236,9 @@ async fn concurrent_replace_preserves_overlap_late_fills_and_notification_time()
     assert_eq!(
         fills,
         [
-            (OrderId(1), Decimal::ONE, 1060),
-            (OrderId(2), Decimal::new(5, 1), 1060),
-            (OrderId(2), Decimal::new(25, 2), 1160)
+            (OrderId(1), literal("1"), 1060),
+            (OrderId(2), literal("0.5"), 1060),
+            (OrderId(2), literal("0.25"), 1160)
         ]
     );
 }
@@ -307,7 +308,7 @@ async fn end_boundary_retains_sent_operation_without_activating_or_unlocking_it(
             .find(|b| b.asset == "btc")
             .unwrap()
             .locked_amount,
-        Decimal::ONE
+        literal("1")
     );
 }
 
@@ -357,13 +358,13 @@ async fn realtime_operations_progress_without_market_input_and_share_handles() {
     );
     assert_eq!(
         balance(&venue.known_account_snapshot(), "btc").locked_amount,
-        Decimal::ONE
+        literal("1")
     );
     let through = bitbankutil_rs::execution_recording::timestamp_ms() as i64;
     shared.advance_trade_watermark(through).unwrap();
     assert_eq!(
         balance(&venue.known_account_snapshot(), "btc").locked_amount,
-        Decimal::ZERO
+        literal("0")
     );
 }
 
@@ -418,11 +419,11 @@ async fn concurrent_requests_check_exchange_funds_at_entry_and_report_failure_on
     let base = actual.iter().find(|b| b.asset == "btc").unwrap();
     assert_eq!(
         (base.free_amount, base.locked_amount),
-        (Decimal::ONE, Decimal::from(2))
+        (literal("1"), literal("2"))
     );
     assert_eq!(
         balance(&venue.known_account_snapshot(), "btc").free_amount,
-        Decimal::from(3)
+        literal("3")
     );
     runner.process_next_internal(false).await.unwrap();
     assert_eq!(*results.lock().unwrap(), [true, false]);
@@ -470,7 +471,7 @@ async fn full_fill_before_cancel_and_duplicate_cancel_never_unlock_twice() {
                 executed_at: 1040,
                 side: OrderSide::Buy,
                 price: 101.into(),
-                amount: Decimal::ONE,
+                amount: literal("1"),
             }],
         })
         .unwrap();
@@ -486,9 +487,9 @@ async fn full_fill_before_cancel_and_duplicate_cancel_never_unlock_twice() {
             balance(&state, "btc").free_amount,
             balance(&state, "btc").locked_amount
         ),
-        (Decimal::from(2), Decimal::ZERO)
+        (literal("2"), literal("0"))
     );
-    assert_eq!(balance(&state, "jpy").free_amount, Decimal::from(100));
+    assert_eq!(balance(&state, "jpy").free_amount, literal("100"));
     assert_eq!(
         venue
             .paper_settlement_status()
@@ -516,7 +517,7 @@ async fn overflow_rejection_does_not_enqueue_or_lock_funds() {
     assert_eq!(venue.next_internal_time(), None);
     assert_eq!(
         balance(&venue.known_account_snapshot(), "btc").locked_amount,
-        Decimal::ZERO
+        literal("0")
     );
 }
 
@@ -569,7 +570,7 @@ async fn activation_boundary_and_pre_ack_fill_preserve_recording_context() {
                     executed_at: time,
                     side: OrderSide::Buy,
                     price: 101.into(),
-                    amount: Decimal::ONE,
+                    amount: literal("1"),
                 })
                 .collect(),
         })
@@ -578,13 +579,13 @@ async fn activation_boundary_and_pre_ack_fill_preserve_recording_context() {
     assert!(venue.engine().lock().unwrap().open_orders().is_empty());
     assert_eq!(
         balance(&venue.known_account_snapshot(), "jpy").free_amount,
-        Decimal::ZERO
+        literal("0")
     );
     venue.process_internal_events(1100).unwrap();
     place.await.unwrap();
     let state = venue.known_account_snapshot();
     assert!(state.open_orders.is_empty());
-    assert_eq!(balance(&state, "jpy").free_amount, Decimal::from(100));
+    assert_eq!(balance(&state, "jpy").free_amount, literal("100"));
     let records = records.0.lock().unwrap();
     let effective = records
         .iter()
@@ -765,7 +766,7 @@ impl BotStrategy<PaperTradingVenue> for EmitInvalid {
                     executed_at: 1001,
                     side: OrderSide::Buy,
                     price: 101.into(),
-                    amount: Decimal::ZERO,
+                    amount: literal("0"),
                 }],
             }))
             .await
@@ -1042,8 +1043,8 @@ fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExe
     engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             exchange_ms,
         ),
     });

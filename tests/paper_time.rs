@@ -1,3 +1,4 @@
+use bitbankutil_rs::book_units::literal;
 mod support;
 use bitbankutil_rs::{
     bitbank_bot::{BotContext, BotEvent, BotRunner, BotStrategy},
@@ -57,7 +58,7 @@ fn trades(times: &[i64]) -> MarketEvent {
         transactions: times
             .iter()
             .map(|t| MarketTrade {
-                amount: rust_decimal::Decimal::new(5, 1),
+                amount: literal("0.5"),
                 price: 100.into(),
                 side: OrderSide::Buy,
                 executed_at: *t,
@@ -70,8 +71,8 @@ fn book(time: i64) -> MarketEvent {
     MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: MarketDepthSnapshot::new(
-            BTreeMap::from([(1_000_000.into(), 1.0)]),
-            BTreeMap::from([(1.into(), 1.0)]),
+            BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            BTreeMap::from([(1.into(), literal("1.0"))]),
             time,
         ),
     }
@@ -236,10 +237,7 @@ async fn replay(recording: bool, slow: bool, delta: i64) -> (AccountSnapshot, Ve
     let mut account = v.account_snapshot("btc_jpy").await.unwrap();
     // 比較対象は取引結果。ローカル採取時刻のδ依存は照会の専用テストで検証する。
     account.query = None;
-    assert_eq!(
-        account.open_orders[0].remaining_amount,
-        rust_decimal::Decimal::new(5, 1)
-    );
+    assert_eq!(account.open_orders[0].remaining_amount, literal("0.5"));
     let events = v.engine().lock().unwrap().drain_events();
     (account, events)
 }
@@ -274,10 +272,7 @@ fn offset_preserves_exchange_causality_and_late_cancellation() {
             let events = e.advance_trade_watermark(1300).unwrap();
             assert_eq!(filled_ids(events), [OrderId(1), OrderId(2)]);
             assert_eq!(e.open_orders().len(), 1);
-            assert_eq!(
-                e.open_orders()[0].remaining_amount,
-                rust_decimal::Decimal::new(5, 1)
-            );
+            assert_eq!(e.open_orders()[0].remaining_amount, literal("0.5"));
             assert!(!e.settlement_status().unsettled);
             let result = (e.balances(), e.open_orders(), e.drain_events());
             if let Some(expected) = &expected {
@@ -481,8 +476,8 @@ fn seeded_engine(mut engine: PaperExecutionEngine, exchange_ms: i64) -> PaperExe
     engine.apply_market_event(&bitbankutil_rs::market_event::MarketEvent::DepthUpdated {
         pair: "btc_jpy".into(),
         depth: bitbankutil_rs::market_event::MarketDepthSnapshot::new(
-            std::collections::BTreeMap::from([(1_000_000.into(), 1.0)]),
-            std::collections::BTreeMap::from([(1.into(), 1.0)]),
+            std::collections::BTreeMap::from([(1_000_000.into(), literal("1.0"))]),
+            std::collections::BTreeMap::from([(1.into(), literal("1.0"))]),
             exchange_ms,
         ),
     });
