@@ -1258,11 +1258,8 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                 self.finish_handler(result)?;
                 continue;
             }
-            // 既に登録済みの模擬操作は呼出元で駆動できる。
-            if self.venue.next_internal_time().is_some() || self.venue.has_pending_operations() {
-                return Ok(());
-            }
-            // 戦略が起動した通常のasyncタスクにも実行機会を与える。
+            // 模擬操作が登録済みでも、戦略の子タスクが未実行の場合がある。
+            // 時計を進める前に実行機会を与え、同時刻の要求を登録させる。
             tokio::task::yield_now().await;
             if let std::task::Poll::Ready((strategy, result)) =
                 self.poll_active(&mut std::task::Context::from_waker(&waker))
