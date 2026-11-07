@@ -6,6 +6,172 @@ use bitbankutil_rs::{
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
+#[tokio::test]
+async fn prepared_and_compiled_replay_preserve_reports_accounts_delivery_and_failures() {
+    let whole = |time: i64, seq: u64| {
+        json!(["message", {"room_name":"depth_whole_btc_jpy","message":{"data":{
+            "asks":[["110","10"]],"bids":[["90","10"]],"asks_over":"0","bids_under":"0","asks_under":"0","bids_over":"0","ask_market":"0","bid_market":"0","timestamp":time,"sequenceId":seq.to_string()
+        }}}])
+    };
+    for case in 0..4 {
+        let mut payloads = vec![
+            (
+                80,
+                CapturePayload::Connected {
+                    endpoint: "fixture".into(),
+                    subscriptions: vec!["depth".into()],
+                },
+            ),
+            (
+                100,
+                CapturePayload::Message {
+                    message: whole(90, 1),
+                },
+            ),
+            (
+                112,
+                CapturePayload::Message {
+                    message: json!(["message", {"room_name":"depth_diff_btc_jpy","message":{"data":{"a":[["110","9"]],"b":[],"t":110,"s":"2"}}}]),
+                },
+            ),
+            (
+                160,
+                CapturePayload::Message {
+                    message: json!(["message", {"room_name":"transactions_btc_jpy","message":{"data":{"transactions":[{"executed_at":120,"transaction_id":1,"side":"sell","amount":"1","price":"99"}]}}}]),
+                },
+            ),
+        ];
+        match case {
+            1 => payloads.push((
+                170,
+                CapturePayload::Message {
+                    message: whole(105, 3),
+                },
+            )), // 発生時刻とseqの矛盾
+            2 => payloads.extend([
+                (
+                    170,
+                    CapturePayload::Disconnected {
+                        reason: "scheduled_refresh".into(),
+                    },
+                ),
+                (
+                    175,
+                    CapturePayload::Connected {
+                        endpoint: "fixture".into(),
+                        subscriptions: vec!["depth".into()],
+                    },
+                ),
+                (
+                    180,
+                    CapturePayload::Message {
+                        message: whole(180, 4),
+                    },
+                ),
+            ]),
+            3 => payloads.push((
+                170,
+                CapturePayload::Message {
+                    message: whole(90, 1),
+                },
+            )), // 同じ入力の重複
+            _ => {}
+        }
+        payloads.push((
+            400,
+            CapturePayload::Message {
+                message: json!(["heartbeat"]),
+            },
+        ));
+        let records: Vec<_> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, (time, payload))| {
+                (
+                    0,
+                    CaptureRecord {
+                        format_version: 1,
+                        exchange: "bitbank".into(),
+                        stream: "public".into(),
+                        session_id: "fixture".into(),
+                        connection_id: if case == 2 && i >= 5 {
+                            "reconnected".into()
+                        } else {
+                            "connection".into()
+                        },
+                        sequence: i as u64 + 1,
+                        received_at_micros: time * 1000,
+                        payload,
+                    },
+                )
+            })
+            .collect();
+        let prepared = PreparedReplay::new(records.iter().cloned().map(Ok)).unwrap();
+        for recovery in [false, true] {
+            for end_time_ms in [None, Some(115)] {
+                let options = ReplayOptions {
+                    recovery,
+                    end_time_ms,
+                };
+                let make_venue = || {
+                    venue(
+                        0,
+                        PaperLatencyConfig {
+                            notification_ms: 5,
+                            ..Default::default()
+                        },
+                    )
+                };
+                let (mut reference, seen) = runner(make_venue(), true);
+                let report = run_replay_with_options(
+                    &mut reference,
+                    records.iter().cloned().map(Ok),
+                    options,
+                    &AtomicBool::new(false),
+                    |_| Ok(None),
+                )
+                .await;
+                if case == 0 && end_time_ms.is_none() {
+                    assert!(report.error.is_none(), "{:?}", report.error);
+                    assert!(!report.incomplete);
+                }
+                let expected = serde_json::to_value(report).unwrap();
+                let account = reference.paper_diagnostics().unwrap();
+                let compiled = prepared
+                    .compile(
+                        make_venue().simulation_config().unwrap(),
+                        Default::default(),
+                        |_| Ok(None::<()>),
+                    )
+                    .unwrap();
+                for variant in 0..3 {
+                    let (mut candidate, observed) = runner(make_venue(), true);
+                    let report = if variant == 0 {
+                        prepared
+                            .run(&mut candidate, options, &AtomicBool::new(false), |_| {
+                                Ok(None)
+                            })
+                            .await
+                    } else {
+                        compiled
+                            .run(&mut candidate, options, &AtomicBool::new(false))
+                            .await
+                    };
+                    assert_eq!(
+                        serde_json::to_value(report).unwrap(),
+                        expected,
+                        "case={case} recovery={recovery} end={end_time_ms:?} variant={variant}"
+                    );
+                    assert_eq!(*observed.lock().unwrap(), *seen.lock().unwrap());
+                    let actual = candidate.paper_diagnostics().unwrap();
+                    assert_eq!(actual.balances(), account.balances());
+                    assert_eq!(actual.open_orders(), account.open_orders());
+                }
+            }
+        }
+    }
+}
+
 fn venue(delta: i64, latency: PaperLatencyConfig) -> PaperTradingVenue {
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
     config.time_model = PaperTimeModel::FixedOffset {
@@ -423,7 +589,7 @@ async fn offline_end_uses_shortest_source_tail_and_preserves_original_receipt() 
     ];
     let report = run_replay(
         &mut runner,
-        records.into_iter().map(Ok),
+        records.iter().cloned().map(Ok),
         false,
         &AtomicBool::new(false),
         |_| Ok(Some(())),
@@ -433,7 +599,39 @@ async fn offline_end_uses_shortest_source_tail_and_preserves_original_receipt() 
     assert_eq!(report.final_time_ms, Some(150));
     assert_eq!(seen.lock().unwrap().len(), 1);
     assert_eq!(seen.lock().unwrap()[0].receipt, 100);
-    assert_eq!(report.simulation.unwrap().config.lookahead_ms, 100);
+    assert_eq!(report.simulation.as_ref().unwrap().config.lookahead_ms, 100);
+    let prepared = PreparedReplay::new(records.into_iter().map(Ok)).unwrap();
+    let compiled = prepared
+        .compile(
+            SimulationConfig { lookahead_ms: 100 },
+            Default::default(),
+            |_| Ok(Some(())),
+        )
+        .unwrap();
+    let expected = serde_json::to_value(report).unwrap();
+    for compiled_mode in [false, true] {
+        let (mut candidate, observed) = self::runner(venue(0, Default::default()), false);
+        let report = if compiled_mode {
+            compiled
+                .run(
+                    &mut candidate,
+                    ReplayOptions::default(),
+                    &AtomicBool::new(false),
+                )
+                .await
+        } else {
+            prepared
+                .run(
+                    &mut candidate,
+                    ReplayOptions::default(),
+                    &AtomicBool::new(false),
+                    |_| Ok(Some(())),
+                )
+                .await
+        };
+        assert_eq!(serde_json::to_value(report).unwrap(), expected);
+        assert_eq!(*observed.lock().unwrap(), *seen.lock().unwrap());
+    }
 }
 
 #[tokio::test]

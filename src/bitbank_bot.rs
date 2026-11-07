@@ -1143,6 +1143,7 @@ struct ActiveHandler<S: BotStrategy<V>, V: TradingVenue> {
     input_id: Option<InputId>,
     market_id: Option<u64>,
     recovery: bool,
+    replay: bool,
 }
 
 struct RunnerWake(std::sync::Arc<tokio::sync::Notify>);
@@ -1241,9 +1242,12 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
     /// 通常のasync処理は従来どおり時刻を固定して完了を待つ。
     pub async fn poll_replay(&mut self) -> Result<(), BotRunError<S::Error>> {
         self.venue.set_replay_driver(true);
+        if self.active.is_none() && self.delivery.is_empty() {
+            return Ok(());
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(RunnerWake(self.wake.clone())));
+        self.venue.set_replay_waker(Some(waker.clone()));
         loop {
-            let waker = std::task::Waker::from(std::sync::Arc::new(RunnerWake(self.wake.clone())));
-            self.venue.set_replay_waker(Some(waker.clone()));
             self.start_handler(true)?;
             if self.active.is_none() {
                 return Ok(());
@@ -1254,7 +1258,8 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
                 self.finish_handler(result)?;
                 continue;
             }
-            // JoinSet内で要求を登録するタスクにも一度実行機会を与える。
+            // 模擬操作が登録済みでも、戦略の子タスクが未実行の場合がある。
+            // 時計を進める前に実行機会を与え、同時刻の要求を登録させる。
             tokio::task::yield_now().await;
             if let std::task::Poll::Ready((strategy, result)) =
                 self.poll_active(&mut std::task::Context::from_waker(&waker))
@@ -1528,7 +1533,16 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             replay_clock: self.last_time.map(|_| self.replay_clock.clone()),
             ..Default::default()
         };
-        crate::execution_recording::sync_scope(context, || active.future.as_mut().poll(cx))
+        crate::execution_recording::sync_scope(context, || {
+            // Tokioの協調実行budget切れを、模擬操作待ちと取り違えて時計を進めない。
+            // backtestの同時刻処理は実時間スケジューラのbudgetに依存させない。
+            if active.replay {
+                use std::future::Future;
+                std::pin::pin!(tokio::task::unconstrained(active.future.as_mut())).poll(cx)
+            } else {
+                active.future.as_mut().poll(cx)
+            }
+        })
     }
     fn start_handler(&mut self, replay: bool) -> Result<(), BotRunError<S::Error>> {
         if self.active.is_some() {
@@ -1605,6 +1619,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             input_id: entry.input_id.clone(),
             market_id,
             recovery: entry.recovery,
+            replay,
         });
         Ok(())
     }

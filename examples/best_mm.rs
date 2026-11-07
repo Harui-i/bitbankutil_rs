@@ -351,16 +351,27 @@ fn paper_venue(
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = env::args().collect();
+    let mode = args.get(1).map(String::as_str);
     env_logger::builder()
-        .filter_level(LevelFilter::Info)
+        .filter_level(if mode == Some("--backtest") {
+            LevelFilter::Warn
+        } else {
+            LevelFilter::Info
+        })
         .format_timestamp_millis()
         .init();
 
-    let args: Vec<String> = env::args().collect();
-    let mode = args.get(1).map(String::as_str);
     let expected_len = match mode {
         Some("--live") => 7,
         Some("--paper") => 10,
+        Some("--backtest") => {
+            if args.len() == 12 {
+                12
+            } else {
+                11
+            }
+        }
         _ => 0,
     };
     if args.len() != expected_len {
@@ -370,7 +381,17 @@ async fn main() {
         log::error!(
             "   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL LOOKAHEAD_MS"
         );
+        log::error!(
+            "   or: cargo run --release --example best_mm -- --backtest PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL LOOKAHEAD_MS MANIFEST [REPEATS]"
+        );
         std::process::exit(2);
+    }
+    if mode == Some("--backtest") {
+        if let Err(error) = run_backtest(&args).await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
     }
 
     let pair = args[2].clone();
@@ -433,6 +454,86 @@ async fn main() {
             );
         }
     }
+}
+
+async fn run_backtest(args: &[String]) -> Result<(), String> {
+    use bitbankutil_rs::{bitbank_bot::BotRunner, replay::*, simulation::SimulationConfig};
+    use std::{sync::atomic::AtomicBool, time::Instant};
+    let pair = &args[2];
+    let tick_size: Price = args[3]
+        .parse()
+        .map_err(|e| format!("invalid tick size: {e}"))?;
+    let refresh: u128 = args[4]
+        .parse()
+        .map_err(|e| format!("invalid refresh: {e}"))?;
+    let lot: Quantity = args[5].parse().map_err(|e| format!("invalid lot: {e}"))?;
+    let max_lot: Quantity = args[6]
+        .parse()
+        .map_err(|e| format!("invalid max lot: {e}"))?;
+    let base_initial = args[7]
+        .parse()
+        .map_err(|e| format!("invalid initial balance: {e}"))?;
+    let jpy_initial = args[8]
+        .parse()
+        .map_err(|e| format!("invalid initial balance: {e}"))?;
+    let lookahead_ms = args[9]
+        .parse()
+        .map_err(|e| format!("invalid lookahead: {e}"))?;
+    let repeats: usize = args
+        .get(11)
+        .map(|s| s.parse())
+        .transpose()
+        .map_err(|e| format!("invalid repeats: {e}"))?
+        .unwrap_or(1);
+    if tick_size <= literal("0") || lot <= literal("0") || lot > max_lot || repeats == 0 {
+        return Err("requires positive tick, lot, repeats and lot <= max_lot".into());
+    }
+    // 入力準備より先に設定を検証する。
+    paper_venue(pair, base_initial, jpy_initial, lookahead_ms)?;
+    let started = Instant::now();
+    let prepared = PreparedReplay::new(ReplayInput::open(&args[10]).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let parsed_seconds = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    let compiled = prepared
+        .compile(
+            SimulationConfig { lookahead_ms },
+            Default::default(),
+            |_| Ok(None::<std::convert::Infallible>),
+        )
+        .map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        serde_json::json!({"prepare_seconds":parsed_seconds,"compile_seconds":started.elapsed().as_secs_f64(),"records":prepared.len()})
+    );
+    for repeat in 0..repeats {
+        let (venue, _) = paper_venue(pair, base_initial, jpy_initial, lookahead_ms)?;
+        let mut runner = BotRunner::new(
+            MyBot::new(pair.clone(), tick_size, refresh, lot, max_lot),
+            venue,
+        );
+        let started = Instant::now();
+        let report = compiled
+            .run(
+                &mut runner,
+                ReplayOptions {
+                    recovery: true,
+                    end_time_ms: None,
+                },
+                &AtomicBool::new(false),
+            )
+            .await;
+        let elapsed = started.elapsed().as_secs_f64();
+        let diagnostics = runner.paper_diagnostics().unwrap();
+        println!(
+            "{}",
+            serde_json::json!({"repeat":repeat,"seconds":elapsed,"records":report.records,"error":report.error,"incomplete":report.incomplete,"final_time_ms":report.final_time_ms,"balances":diagnostics.balances(),"orders":diagnostics.open_orders()})
+        );
+        if let Some(error) = report.error {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

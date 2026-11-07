@@ -25,6 +25,230 @@ pub struct CaptureRecord {
     #[serde(flatten)]
     pub payload: CapturePayload,
 }
+
+type DecodedBitbank = Option<(String, BitbankInboundMessage)>;
+struct PreparedRecord {
+    source: usize,
+    record: CaptureRecord,
+    bitbank: DecodedBitbank,
+}
+
+/// 検証とJSONの解析を一度だけ済ませ、複数のbacktestで再利用する入力。
+///
+/// 接続メタデータと型付きbitbank入力をRAMに保持する。準備時間は実行時間とは別に計測する。
+/// bitbankの生JSONは解析後に破棄し、custom変換が必要な他取引所のJSONだけを保持する。
+/// 他取引所のレコードは実行時のcustom変換へ渡す。接続切断・時刻・約定の処理は通常のrun_replayと共通。
+pub struct PreparedReplay {
+    records: Vec<PreparedRecord>,
+    validation: ReplayValidation,
+    tails: BTreeMap<usize, i64>,
+}
+impl PreparedReplay {
+    /// 板の復元・市場入力の重複検証も一度だけ行う。時計モデルと先読み幅を固定する。
+    /// custom変換は準備時に呼ばれ、結果を反復実行で共有する。
+    pub fn compile<C: Clone + Send + 'static>(
+        &self,
+        config: crate::simulation::SimulationConfig,
+        time_model: crate::paper_execution::PaperTimeModel,
+        mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<C>>,
+    ) -> io::Result<CompiledReplay<'_, C>> {
+        let mut driver = crate::simulation::SimulationDriver::new(config, time_model)
+            .map_err(|e| invalid(format!("{e:?}")))?;
+        let mut admissions = Vec::with_capacity(self.records.len());
+        for entry in &self.records {
+            let record = &entry.record;
+            let received = (record.received_at_micros / 1000) as i64;
+            let id = Some(InputId {
+                session_id: record.session_id.clone(),
+                sequence: record.sequence,
+            });
+            let result = match &record.payload {
+                CapturePayload::Message { .. } if record.exchange == "bitbank" => {
+                    entry.bitbank.as_ref().map(|(pair, message)| {
+                        driver.admit_bitbank(
+                            received,
+                            id,
+                            format!("{}:{}", entry.source, record.connection_id),
+                            pair.clone(),
+                            message.clone(),
+                        )
+                    })
+                }
+                CapturePayload::Message { .. } => custom(record)?
+                    .map(|event| driver.admit_event(received, id, BotEvent::Custom(event))),
+                _ => None,
+            };
+            admissions.push(result.map(|result| driver.take_admission(result)));
+        }
+        driver.compile_markets(&mut admissions);
+        Ok(CompiledReplay {
+            input: self,
+            config,
+            time_model,
+            admissions,
+        })
+    }
+    pub fn new(
+        input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
+    ) -> io::Result<Self> {
+        let mut result = Self {
+            records: Vec::new(),
+            validation: ReplayValidation::default(),
+            tails: BTreeMap::new(),
+        };
+        for item in input {
+            let (source, mut record) = item?;
+            result.validation.validate(source, &record)?;
+            let time = i64::try_from(record.received_at_micros / 1000).map_err(invalid)?;
+            let bitbank = match &record.payload {
+                CapturePayload::Message { message } if record.exchange == "bitbank" => {
+                    decode_bitbank(message)?
+                }
+                _ => None,
+            };
+            if record.exchange == "bitbank"
+                && let CapturePayload::Message { message } = &mut record.payload
+            {
+                // bitbankは実行時に必ず解析済み入力を使い、custom変換には渡さない。
+                *message = Value::Null;
+            }
+            result.tails.insert(source, time);
+            result.records.push(PreparedRecord {
+                source,
+                record,
+                bitbank,
+            });
+        }
+        Ok(result)
+    }
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// PaperTradingVenue等のsimulation対応venueを使うランナーで再生する。
+    pub async fn run<S: BotStrategy<V>, V: TradingVenue>(
+        &self,
+        runner: &mut BotRunner<S, V>,
+        options: ReplayOptions,
+        cancel: &std::sync::atomic::AtomicBool,
+        custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
+    ) -> ReplayReport {
+        if runner.venue().simulation_config().is_none() {
+            return ReplayReport {
+                error: Some("prepared replay requires a simulation venue".into()),
+                incomplete: true,
+                end_reason: ReplayEndReason::Error,
+                ..Default::default()
+            };
+        }
+        run_validated_simulation_replay(
+            runner,
+            self.records
+                .iter()
+                .map(|r| Ok(SimulationRecord::Prepared(r))),
+            ReplaySetup {
+                validation: &self.validation,
+                tails: &self.tails,
+                report: ReplayReport {
+                    input_exhausted: true,
+                    ..Default::default()
+                },
+                options,
+                cancel,
+            },
+            custom,
+            |_| None,
+        )
+        .await
+    }
+}
+
+/// 戦略に依存しない板イベントを共有する反復backtest用入力。
+/// 残高・注文・約定待ち行列・戦略ハンドラーは毎回新たに実行する。
+pub struct CompiledReplay<'a, C> {
+    input: &'a PreparedReplay,
+    config: crate::simulation::SimulationConfig,
+    time_model: crate::paper_execution::PaperTimeModel,
+    admissions: Vec<Option<crate::simulation::PreparedAdmission<C>>>,
+}
+impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
+    pub async fn run<S: BotStrategy<V, CustomEvent = C>, V: TradingVenue>(
+        &self,
+        runner: &mut BotRunner<S, V>,
+        options: ReplayOptions,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> ReplayReport {
+        if runner.venue().simulation_config() != Some(self.config)
+            || runner.venue().simulation_time_model() != self.time_model
+        {
+            return ReplayReport {
+                error: Some("compiled replay simulation configuration mismatch".into()),
+                incomplete: true,
+                end_reason: ReplayEndReason::Error,
+                ..Default::default()
+            };
+        }
+        let mut admissions = self.admissions.iter();
+        run_validated_simulation_replay(
+            runner,
+            self.input
+                .records
+                .iter()
+                .map(|r| Ok(SimulationRecord::Prepared(r))),
+            ReplaySetup {
+                validation: &self.input.validation,
+                tails: &self.input.tails,
+                report: ReplayReport {
+                    input_exhausted: true,
+                    ..Default::default()
+                },
+                options,
+                cancel,
+            },
+            |_| Ok(None),
+            |driver| {
+                admissions
+                    .next()
+                    .unwrap()
+                    .as_ref()
+                    .map(|admission| driver.admit_prepared(admission))
+            },
+        )
+        .await
+    }
+}
+
+enum SimulationRecord<'a> {
+    Captured(usize, CaptureRecord),
+    Prepared(&'a PreparedRecord),
+}
+impl<'a> SimulationRecord<'a> {
+    fn received_at_micros(&self) -> u64 {
+        match self {
+            Self::Captured(_, r) => r.received_at_micros,
+            Self::Prepared(r) => r.record.received_at_micros,
+        }
+    }
+    fn parts(
+        self,
+    ) -> (
+        usize,
+        std::borrow::Cow<'a, CaptureRecord>,
+        Option<&'a DecodedBitbank>,
+    ) {
+        match self {
+            Self::Captured(s, r) => (s, std::borrow::Cow::Owned(r), None),
+            Self::Prepared(r) => (
+                r.source,
+                std::borrow::Cow::Borrowed(&r.record),
+                Some(&r.bitbank),
+            ),
+        }
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CapturePayload {
@@ -717,10 +941,9 @@ async fn run_simulation_replay<S: BotStrategy<V>, V: TradingVenue>(
     input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
     options: ReplayOptions,
     cancel: &std::sync::atomic::AtomicBool,
-    mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
+    custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
 ) -> ReplayReport {
     let mut report = ReplayReport::default();
-    let config = runner.venue().simulation_config().unwrap();
     let mut validation = ReplayValidation::default();
     let mut spool = match SimulationSpool::new() {
         Ok(spool) => spool,
@@ -763,6 +986,55 @@ async fn run_simulation_replay<S: BotStrategy<V>, V: TradingVenue>(
         }
     }
     report.input_exhausted = report.error.is_none() && !report.interrupted;
+    let reader = spool.reader();
+    if let Err(error) = &reader {
+        report.error = Some(error.to_string());
+    }
+    let records = reader
+        .into_iter()
+        .flatten()
+        .map(|r| r.map(|(source, record)| SimulationRecord::Captured(source, record)));
+    run_validated_simulation_replay(
+        runner,
+        records,
+        ReplaySetup {
+            validation: &validation,
+            tails: &tails,
+            report,
+            options,
+            cancel,
+        },
+        custom,
+        |_| None,
+    )
+    .await
+}
+
+struct ReplaySetup<'a> {
+    validation: &'a ReplayValidation,
+    tails: &'a BTreeMap<usize, i64>,
+    report: ReplayReport,
+    options: ReplayOptions,
+    cancel: &'a std::sync::atomic::AtomicBool,
+}
+
+async fn run_validated_simulation_replay<'a, S: BotStrategy<V>, V: TradingVenue>(
+    runner: &mut BotRunner<S, V>,
+    records: impl Iterator<Item = io::Result<SimulationRecord<'a>>>,
+    setup: ReplaySetup<'_>,
+    mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
+    mut compiled: impl FnMut(
+        &mut crate::simulation::SimulationDriver<S::CustomEvent>,
+    ) -> Option<Result<(), String>>,
+) -> ReplayReport {
+    let ReplaySetup {
+        validation,
+        tails,
+        mut report,
+        options,
+        cancel,
+    } = setup;
+    let config = runner.venue().simulation_config().unwrap();
     let mut driver = match crate::simulation::SimulationDriver::new(
         config,
         runner.venue().simulation_time_model(),
@@ -795,14 +1067,14 @@ async fn run_simulation_replay<S: BotStrategy<V>, V: TradingVenue>(
         report.error = Some("evaluation end precedes runner clock".into());
     }
     if report.error.is_none() && !report.interrupted {
-        let reader = spool.reader();
-        if let Err(error) = &reader {
-            report.error = Some(error.to_string());
-        }
-        let mut records = reader.into_iter().flatten().peekable();
+        let mut records = records.peekable();
         while let Some(item) = records.next() {
-            let (source, record) = match item {
-                Ok(item) => item,
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                report.interrupted = true;
+                break;
+            }
+            let (source, record, decoded) = match item {
+                Ok(item) => item.parts(),
                 Err(error) => {
                     report.error = Some(error.to_string());
                     break;
@@ -820,67 +1092,73 @@ async fn run_simulation_replay<S: BotStrategy<V>, V: TradingVenue>(
                 sequence: record.sequence,
             };
             report.last_input = Some(id.clone());
-            let admitted = match &record.payload {
-                CapturePayload::Connected { subscriptions, .. } => {
-                    let subscriptions = subscriptions
-                        .iter()
-                        .cloned()
-                        .collect::<std::collections::BTreeSet<_>>();
-                    let candidates = report
-                        .gaps
-                        .iter_mut()
-                        .filter(|g| {
-                            g.source_index == source
-                                && g.end.is_none()
-                                && !subscriptions.is_empty()
-                                && g.subscriptions == subscriptions
-                        })
-                        .collect::<Vec<_>>();
-                    if candidates.len() == 1 {
-                        candidates.into_iter().next().unwrap().end = Some(id.clone());
+            let admitted = if let Some(result) = compiled(&mut driver) {
+                result
+            } else {
+                match &record.payload {
+                    CapturePayload::Connected { subscriptions, .. } => {
+                        let subscriptions = subscriptions
+                            .iter()
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let candidates = report
+                            .gaps
+                            .iter_mut()
+                            .filter(|g| {
+                                g.source_index == source
+                                    && g.end.is_none()
+                                    && !subscriptions.is_empty()
+                                    && g.subscriptions == subscriptions
+                            })
+                            .collect::<Vec<_>>();
+                        if candidates.len() == 1 {
+                            candidates.into_iter().next().unwrap().end = Some(id.clone());
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                CapturePayload::Disconnected { reason } => {
-                    driver.mark_incomplete(format!("source {source} disconnected: {reason}"));
-                    if !options.recovery {
-                        runner.venue().mark_market_incomplete(reason);
+                    CapturePayload::Disconnected { reason } => {
+                        driver.mark_incomplete(format!("source {source} disconnected: {reason}"));
+                        if !options.recovery {
+                            runner.venue().mark_market_incomplete(reason);
+                        }
+                        report.gaps.push(ReplayGap {
+                            source_index: source,
+                            connection_id: record.connection_id.clone(),
+                            reason: reason.clone(),
+                            subscriptions: validation.sources[&source].subscriptions
+                                [&record.connection_id]
+                                .clone(),
+                            start: id.clone(),
+                            end: None,
+                        });
+                        if !options.recovery {
+                            report.end_reason = ReplayEndReason::Disconnected;
+                        }
+                        Ok(())
                     }
-                    report.gaps.push(ReplayGap {
-                        source_index: source,
-                        connection_id: record.connection_id.clone(),
-                        reason: reason.clone(),
-                        subscriptions: validation.sources[&source].subscriptions
-                            [&record.connection_id]
-                            .clone(),
-                        start: id.clone(),
-                        end: None,
-                    });
-                    if !options.recovery {
-                        report.end_reason = ReplayEndReason::Disconnected;
+                    CapturePayload::Message { message } if record.exchange == "bitbank" => {
+                        match decoded
+                            .map_or_else(|| decode_bitbank(message), |message| Ok(message.clone()))
+                        {
+                            Ok(Some((pair, message))) => driver.admit_bitbank(
+                                received,
+                                Some(id),
+                                format!("{source}:{}", record.connection_id),
+                                pair,
+                                message,
+                            ),
+                            Ok(None) => Ok(()),
+                            Err(e) => Err(e.to_string()),
+                        }
                     }
-                    Ok(())
-                }
-                CapturePayload::Message { message } if record.exchange == "bitbank" => {
-                    match decode_bitbank(message) {
-                        Ok(Some((pair, message))) => driver.admit_bitbank(
-                            received,
-                            Some(id),
-                            format!("{source}:{}", record.connection_id),
-                            pair,
-                            message,
-                        ),
+                    CapturePayload::Message { .. } => match custom(&record) {
+                        Ok(Some(event)) => {
+                            driver.admit_event(received, Some(id), BotEvent::Custom(event))
+                        }
                         Ok(None) => Ok(()),
                         Err(e) => Err(e.to_string()),
-                    }
+                    },
                 }
-                CapturePayload::Message { .. } => match custom(&record) {
-                    Ok(Some(event)) => {
-                        driver.admit_event(received, Some(id), BotEvent::Custom(event))
-                    }
-                    Ok(None) => Ok(()),
-                    Err(e) => Err(e.to_string()),
-                },
             };
             report.records += 1;
             if let Err(e) = admitted {
@@ -893,7 +1171,7 @@ async fn run_simulation_replay<S: BotStrategy<V>, V: TradingVenue>(
             // 同msの全入力を登録してから境界を進める。
             if records.peek().is_none_or(|item| {
                 item.as_ref()
-                    .is_ok_and(|(_, r)| r.received_at_micros / 1000 > received as u64)
+                    .is_ok_and(|r| r.received_at_micros() / 1000 > received as u64)
             }) {
                 if let Err(e) = driver.advance_to(runner, received, end, cancel).await {
                     report.interrupted = cancel.load(std::sync::atomic::Ordering::Relaxed);

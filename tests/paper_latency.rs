@@ -692,6 +692,59 @@ async fn direct_runner_releases_driver_for_later_direct_venue_operations() {
     assert_eq!(venue.known_account_snapshot().open_orders.len(), 2);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn spawned_order_registers_before_clock_advances_for_direct_query() {
+    struct SpawnAndQuery;
+    impl BotStrategy<PaperTradingVenue> for SpawnAndQuery {
+        type CustomEvent = ();
+        type Error = String;
+        async fn handle_event(
+            &mut self,
+            _: BotEvent<()>,
+            ctx: &BotContext<(), PaperTradingVenue>,
+        ) -> Result<(), String> {
+            let venue = ctx.venue().clone();
+            let order = tokio::spawn(async move { venue.place_order(sell(101).into()).await });
+            ctx.venue()
+                .account_snapshot("btc_jpy")
+                .await
+                .map_err(|e| format!("{e:?}"))?;
+            order
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("{e:?}"))?;
+            Ok(())
+        }
+    }
+    let records = Records::default();
+    let recorder =
+        ExecutionRecorder::new("spawn-before-clock", serde_json::json!({}), records.clone());
+    let query_latency = PaperOperationLatency {
+        entry_ms: 50,
+        response_ms: 50,
+    };
+    let venue = PaperTradingVenue::with_latency(
+        engine(PaperClock::Replay { now_ms: 1000 }, 0, Some(recorder)),
+        PaperLatencyConfig {
+            orders_query: query_latency,
+            balances_query: query_latency,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut runner = BotRunner::new(SpawnAndQuery, venue);
+    runner
+        .process(1000, None, BotEvent::Custom(()))
+        .await
+        .unwrap();
+    let records = records.0.lock().unwrap();
+    let request = records
+        .iter()
+        .find(|r| r.kind == "paper_operation_requested" && r.data["kind"] == "place")
+        .unwrap();
+    assert_eq!(request.data["requested_at_ms"], 1000);
+}
+
 #[tokio::test]
 async fn delayed_order_manager_completion_records_current_time_inside_nested_scopes() {
     let records = Records::default();

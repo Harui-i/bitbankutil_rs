@@ -35,6 +35,43 @@ API待機中も市場・操作期限は進み、戦略ハンドラーは1件ず�
 `BotRunner::process` / `submit_replay` は低水準の受信順kernelドライバです。
 新しいPaper・バックテストには `run_replay` または `SimulationDriver` を使用してください。
 
+## 反復backtest
+
+同じ入力で複数の戦略・パラメータを評価する場合は、`PreparedReplay`で検証とJSON解析を一度だけ行い、
+`compile`で板の復元と重複検証も事前計算できます。入力・復元板をRAMに保持するため、
+逐次読み込みの`run_replay`よりメモリを使います。ディスクへのキャッシュ保存は行いません。
+
+```rust,ignore
+let prepared = PreparedReplay::new(ReplayInput::open(manifest)?)?;
+let compiled = prepared.compile(
+    SimulationConfig { lookahead_ms: 60_000 },
+    PaperTimeModel::FixedOffset { exchange_minus_local_ms: 0 },
+    |_| Ok(None::<std::convert::Infallible>),
+)?;
+// 各回で戦略・PaperTradingVenue・BotRunnerを新しく作る。
+let report = compiled.run(&mut runner, ReplayOptions::default(), &cancel).await;
+```
+
+準備時間と各回の実行時間は別々に計測してください。残高・注文・手数料・約定待ち行列・戦略ハンドラーは
+各回で再実行します。時計差と先読み幅はcompile時と一致する必要があります。
+custom変換はcompile時だけ呼び出され、その結果を共有します。毎回変換したい場合は`prepared.run`を使います。
+復元板は変更した小さな区画だけをコピーし、過去のsnapshotを保持します。
+受信順と発生時刻順の板は別々に復元し、戦略から未来の板が見えない契約を保ちます。
+接続切断や市場不整合の扱い、sourceごとの安全な終端は`run_replay`と共通です。
+compileで見つかった市場の時系列エラーも実行時の対応する境界で停止し、未来のエラーを先に適用しません。
+準備時のJSON形式・入力検証エラーは`io::Error`として返します。
+
+best_mmを同じデータで3回実行する例（APIキー不要）:
+
+```sh
+cargo run --release --example best_mm -- --backtest \
+  xrp_jpy 0.001 1000 10 1000 500 1000000 60000 /path/to/manifest.json 3
+```
+
+最初のJSON出力に準備・compile時間、その後に各回の実行時間と残高・注文・`incomplete`を出力します。
+backtest時は戦略のinfoログを抑制します。市場入力に切断がある場合は`recovery=true`で継続しますが、
+市場は不完全として新規注文・約定確定を停止します。`incomplete=true`を正常な全期間評価として扱わないでください。
+
 ## 市場データv1
 
 `ReplayInput::open(manifest_path)` はmanifestのsource一覧とJSONLファイルを逐次読み込みます。

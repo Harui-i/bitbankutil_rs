@@ -1,7 +1,6 @@
 //! 受信済みL2板による受付近似と、価格レベル共有のFIFO数量モデル。
 use super::*;
 use crate::book_units::{Price, Quantity};
-use crate::depth::Depth;
 use crate::market_event::MarketDepthSnapshot;
 use std::collections::BTreeSet;
 
@@ -155,10 +154,10 @@ impl QueueModel {
             let evidence = PaperBookEvidence {
                 exchange_at_ms: depth.last_timestamp(),
                 received_at_ms: local_ms,
-                best_bid: *depth.bids().last_key_value()?.0,
-                best_ask: *depth.asks().first_key_value()?.0,
-                lowest_bid: *depth.bids().first_key_value()?.0,
-                highest_ask: *depth.asks().last_key_value()?.0,
+                best_bid: depth.highest_price(OrderSide::Buy)?,
+                best_ask: depth.lowest_price(OrderSide::Sell)?,
+                lowest_bid: depth.lowest_price(OrderSide::Buy)?,
+                highest_ask: depth.highest_price(OrderSide::Sell)?,
             };
             if evidence.best_bid >= evidence.best_ask {
                 return None;
@@ -167,63 +166,66 @@ impl QueueModel {
                 .book
                 .as_ref()
                 .and_then(|b| depth.changes_since(&b.snapshot));
-            let mut updates = BTreeMap::new();
-            let mut add = |side, price: Price, amount: Quantity, allow_zero: bool| {
-                let amount = amount.units();
-                if price <= Price::ZERO || amount < 0 || (!allow_zero && amount == 0) {
+            let updates = if let Some(delta) = delta {
+                if delta
+                    .iter()
+                    .any(|&(_, p, q)| p <= Price::ZERO || q < Quantity::ZERO)
+                {
                     return None;
                 }
-                updates.insert((side, price), amount);
-                Some(())
-            };
-            if let Some(delta) = delta {
-                for &(side, price, amount) in delta {
-                    add(side, price, amount, true)?;
-                }
+                std::borrow::Cow::Borrowed(delta)
             } else {
-                for (&p, &q) in depth.bids() {
-                    add(OrderSide::Buy, p, q, false)?;
+                let mut updates = BTreeMap::new();
+                for side in [OrderSide::Buy, OrderSide::Sell] {
+                    for (&p, &q) in depth.levels(side) {
+                        if p <= Price::ZERO || q <= Quantity::ZERO {
+                            return None;
+                        }
+                        updates.insert((side, p), q);
+                    }
                 }
-                for (&p, &q) in depth.asks() {
-                    add(OrderSide::Sell, p, q, false)?;
+                for &key in &self.displayed_levels {
+                    updates.entry(key).or_insert(Quantity::ZERO);
                 }
-            }
-            Some((evidence, delta.is_some(), updates))
+                std::borrow::Cow::Owned(
+                    updates
+                        .into_iter()
+                        .map(|((side, p), q)| (side, p, q))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            Some((evidence, updates))
         })();
-        let Some((evidence, incremental, mut updates)) = parsed else {
+        let Some((evidence, updates)) = parsed else {
             self.book = None;
             self.issue("incomplete or invalid observed book (requires exact 8-decimal units)");
             return;
         };
-        let mut book = if incremental {
-            self.book.take().expect("incremental parent")
-        } else {
-            // 再同期では直前の表示から消えた保持価格も0にする。
-            for &key in &self.displayed_levels {
-                updates.entry(key).or_insert(0);
-            }
-            Book {
-                evidence: evidence.clone(),
-                snapshot: depth.clone(),
-            }
-        };
-        for (key, displayed) in updates {
+        for &(side, price, quantity) in updates.iter() {
+            let key = (side, price);
+            let displayed = quantity.units();
+            let previous;
             if let Some(old) = self.empty_levels.get_mut(&key) {
+                previous = *old;
                 if displayed > *old {
                     let old = *old;
                     self.empty_levels.remove(&key);
                     self.levels.insert(
                         key,
                         Level {
-                            displayed: old,
-                            segments: Vec::new(),
+                            displayed,
+                            segments: vec![Segment {
+                                effective_after_ms: exchange_now.max(depth.last_timestamp()),
+                                external_amount: displayed - old,
+                                order_id: None,
+                            }],
                         },
                     );
                 } else {
                     *old = displayed;
                 }
-            }
-            if let Some(level) = self.levels.get_mut(&key) {
+            } else if let Some(level) = self.levels.get_mut(&key) {
+                previous = level.displayed;
                 // 表示減少は先頭を消費しない。増加分だけを末尾へ追加。
                 if displayed > level.displayed {
                     level.segments.push(Segment {
@@ -233,15 +235,19 @@ impl QueueModel {
                     });
                 }
                 level.displayed = displayed;
+            } else {
+                continue;
             }
-            if self.levels.contains_key(&key) || self.empty_levels.contains_key(&key) {
-                if displayed > 0 {
-                    self.displayed_levels.insert(key);
-                } else {
-                    self.displayed_levels.remove(&key);
-                }
+            if previous == 0 && displayed > 0 {
+                self.displayed_levels.insert(key);
+            } else if previous > 0 && displayed == 0 {
+                self.displayed_levels.remove(&key);
             }
         }
+        let mut book = self.book.take().unwrap_or_else(|| Book {
+            evidence: evidence.clone(),
+            snapshot: depth.clone(),
+        });
         book.evidence = evidence;
         book.snapshot = depth.clone();
         self.book = Some(book);
@@ -291,13 +297,11 @@ impl QueueModel {
     }
     pub fn accept(&mut self, order: &DesiredLimitOrder, id: OrderId, at: i64) {
         let book = self.book.as_ref().expect("validated admission");
-        let displayed = match order.side {
-            OrderSide::Buy => book.snapshot.bids(),
-            OrderSide::Sell => book.snapshot.asks(),
-        }
-        .get(&order.price)
-        .map(|q| q.units())
-        .unwrap_or_default();
+        let displayed = book
+            .snapshot
+            .quantity_at(order.side, &order.price)
+            .map(|q| q.units())
+            .unwrap_or_default();
         let key = (order.side, order.price);
         let previous = self.empty_levels.remove(&key);
         let level = self.levels.entry(key).or_insert_with(|| Level {
@@ -458,6 +462,7 @@ mod legacy;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::depth::Depth;
 
     fn book(t: i64, quantity: Quantity) -> MarketDepthSnapshot {
         MarketDepthSnapshot::new(
@@ -674,6 +679,48 @@ mod tests {
             previous = next;
         }
     }
+    #[test]
+    fn whole_book_delta_preserves_removals_and_fifo_without_mutating_prior_snapshot() {
+        let mut converter = crate::bitbank_bot::BitbankMarketEventConverter::new("xrp_jpy".into());
+        let first = captured_book(&mut converter, whole_value(1, 1), true);
+        let order =
+            DesiredLimitOrder::limit("xrp_jpy".into(), OrderSide::Buy, 1.into(), 100.into());
+        let mut incremental = QueueModel::default();
+        let mut full = QueueModel::default();
+        for model in [&mut incremental, &mut full] {
+            model.observe_book(&first, 1, 1);
+            model.accept(&order, OrderId(1), 1);
+        }
+        let mut value = whole_value(2, 2);
+        value["bids"] = serde_json::json!([["100", "1"], ["95", "5"]]);
+        let next = captured_book(&mut converter, value, true);
+        let delta = next.changes_since(&first).unwrap();
+        for (p, q) in [(90, 0), (95, 5), (100, 1)] {
+            assert!(delta.contains(&(OrderSide::Buy, Price::from(p), Quantity::from(q))));
+        }
+        incremental.observe_book(&next, 2, 2);
+        full.observe_book(
+            &MarketDepthSnapshot::new(next.asks().clone(), next.bids().clone(), 2),
+            2,
+            2,
+        );
+        assert_eq!(incremental.state(), full.state());
+        assert_eq!(incremental.diagnostics(), full.diagnostics());
+        // 表示数量の減少を先行数量の消化にしない。
+        assert_eq!(
+            incremental.state()[0].segments[0].external_amount,
+            literal("3.00000001")
+        );
+        assert_eq!(
+            first.quantity_at(OrderSide::Buy, &90.into()),
+            Some(4.into())
+        );
+        assert_eq!(
+            first.quantity_at(OrderSide::Buy, &100.into()),
+            Some(literal("3.00000001"))
+        );
+    }
+
     #[test]
     fn missed_updates_and_connection_switch_require_full_resynchronization() {
         let mut converter = crate::bitbank_bot::BitbankMarketEventConverter::new("xrp_jpy".into());
