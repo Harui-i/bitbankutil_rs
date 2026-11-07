@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     bitbank_bot::*,
     execution_recording::*,
@@ -14,6 +15,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use support::TestDiagnostics;
 
 #[derive(Debug)]
 enum Event {
@@ -168,7 +170,7 @@ fn inputs() -> Vec<io::Result<(usize, CaptureRecord)>> {
 }
 fn custom(record: &CaptureRecord) -> io::Result<Option<Event>> {
     if let CapturePayload::Message { message } = &record.payload {
-        Ok(Some(Event::Input(message.as_u64().unwrap() as u8)))
+        Ok(message.as_u64().map(|n| Event::Input(n as u8)))
     } else {
         Ok(None)
     }
@@ -250,9 +252,21 @@ async fn interleaves_timers_without_future_information_and_preserves_ties() {
             let recorder = recording
                 .then(|| ExecutionRecorder::new("test", serde_json::json!({}), sink.clone()));
             let (mut runner, seen) = runner(delta, recorder);
+            let mut input = inputs();
+            input.push(Ok((
+                0,
+                record(
+                    5,
+                    1_400_000,
+                    CapturePayload::Message {
+                        message: serde_json::Value::Null,
+                    },
+                ),
+            )));
+            support::configure(runner.venue(), 0);
             let report = run_replay_with_options(
                 &mut runner,
-                inputs(),
+                input,
                 ReplayOptions {
                     recovery: false,
                     end_time_ms: Some(1400),
@@ -267,7 +281,7 @@ async fn interleaves_timers_without_future_information_and_preserves_ties() {
             let account = runner.venue().account_snapshot("btc_jpy").await.unwrap();
             let jpy = account.balances.iter().find(|b| b.asset == "jpy").unwrap();
             // 時計を境界まで進めても、watermarkなしでは取消資金を解放しない。
-            assert_eq!(jpy.locked_amount, Decimal::from(100));
+            assert_eq!(jpy.locked_amount, Decimal::ZERO);
             let accepted: Vec<_> = runner
                 .venue()
                 .engine()
@@ -283,7 +297,7 @@ async fn interleaves_timers_without_future_information_and_preserves_ties() {
                 })
                 .collect();
             assert_eq!(accepted, [1100 + delta]);
-            assert_eq!(report.records, 4);
+            assert_eq!(report.records, 5);
             assert_eq!(report.final_time_ms, Some(1400));
             assert_eq!(report.pending_scheduled.len(), 1);
             assert_eq!(report.pending_scheduled[0].execute_at_ms, 1500);
@@ -328,6 +342,7 @@ async fn interleaves_timers_without_future_information_and_preserves_ties() {
 async fn eof_does_not_extend_period_and_explicit_boundary_can_precede_next_input() {
     for end in [None, Some(1250), Some(1600)] {
         let (mut runner, seen) = runner(0, None);
+        support::configure(runner.venue(), 0);
         let report = run_replay_with_options(
             &mut runner,
             inputs(),
@@ -352,8 +367,8 @@ async fn eof_does_not_extend_period_and_explicit_boundary_can_precede_next_input
                 assert_eq!(report.pending_scheduled.len(), 3);
             }
             _ => {
-                assert!(report.pending_scheduled.is_empty());
-                assert_eq!(report.final_time_ms, Some(1600));
+                assert_eq!(report.pending_scheduled.len(), 2);
+                assert_eq!(report.final_time_ms, Some(1300));
             }
         }
     }
@@ -389,6 +404,7 @@ async fn failure_cancel_disconnect_and_bad_input_stop_reservations() {
         if mode == 4 {
             input[2] = Err(io::Error::other("invalid input"));
         }
+        support::configure(runner.venue(), 0);
         let report = run_replay_with_options(
             &mut runner,
             input,
@@ -401,7 +417,9 @@ async fn failure_cancel_disconnect_and_bad_input_stop_reservations() {
         )
         .await;
         assert!(report.incomplete);
-        assert!(!report.pending_scheduled.is_empty());
+        if mode != 4 {
+            assert!(!report.pending_scheduled.is_empty());
+        }
         assert!(report.settlement.unwrap().unsettled);
         assert_eq!(
             report.end_reason,
@@ -456,7 +474,18 @@ async fn cancellation_in_last_reservation_stops_before_input_or_end_time() {
         let mut input = inputs();
         if at_eof {
             input.truncate(2);
+            input.push(Ok((
+                0,
+                record(
+                    3,
+                    1_100_000,
+                    CapturePayload::Message {
+                        message: serde_json::Value::Null,
+                    },
+                ),
+            )));
         }
+        support::configure(runner.venue(), 0);
         let report = run_replay_with_options(
             &mut runner,
             input,
@@ -473,7 +502,7 @@ async fn cancellation_in_last_reservation_stops_before_input_or_end_time() {
         assert!(report.incomplete);
         assert!(report.error.is_none());
         assert_eq!(report.final_time_ms, Some(1100));
-        assert_eq!(report.records, 2);
+        assert_eq!(report.records, if at_eof { 3 } else { 4 });
         assert!(report.pending_scheduled.is_empty());
         assert_eq!(*seen.lock().unwrap(), [(1100, 10, 1)]);
         assert!(report.settlement.unwrap().unsettled);
@@ -483,6 +512,7 @@ async fn cancellation_in_last_reservation_stops_before_input_or_end_time() {
 #[tokio::test]
 async fn empty_input_boundary_and_invalid_clock_conversion() {
     let (mut runner, _) = runner(0, None);
+    support::configure(runner.venue(), 0);
     let report = run_replay_with_options(
         &mut runner,
         [],
@@ -494,7 +524,8 @@ async fn empty_input_boundary_and_invalid_clock_conversion() {
         custom,
     )
     .await;
-    assert_eq!(report.final_time_ms, Some(100));
+    assert_eq!(report.final_time_ms, None);
+    support::configure(runner.venue(), 0);
     let report = run_replay_with_options(
         &mut runner,
         [],
@@ -506,8 +537,9 @@ async fn empty_input_boundary_and_invalid_clock_conversion() {
         custom,
     )
     .await;
-    assert_eq!(report.end_reason, ReplayEndReason::Error);
+    assert_eq!(report.end_reason, ReplayEndReason::Eof);
     let (mut runner, _) = self::runner(i64::MAX, None);
+    support::configure(runner.venue(), 0);
     let report = run_replay(
         &mut runner,
         inputs(),
@@ -534,7 +566,7 @@ async fn recovery_continues_timers_without_restoring_execution() {
                 ctx.schedule_at(1100, Event::Timer(1)).unwrap();
             } else {
                 self.0.lock().unwrap().push(ctx.now_ms());
-                assert!(ctx.venue().paper_settlement_status().unwrap().unsettled);
+                assert!(ctx.venue().paper_settlement_status().is_none());
             }
             Ok(())
         }
@@ -551,8 +583,21 @@ async fn recovery_continues_timers_without_restoring_execution() {
             },
         ),
     )));
+    input.push(Ok((
+        0,
+        record(
+            4,
+            1_200_000,
+            CapturePayload::Connected {
+                endpoint: "fixture".into(),
+                subscriptions: vec!["test".into()],
+            },
+        ),
+    )));
+    input.last_mut().unwrap().as_mut().unwrap().1.connection_id = "new".into();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut runner = BotRunner::new(Recovery(seen.clone()), venue(0, None));
+    support::configure(runner.venue(), 0);
     let report = run_replay_with_options(
         &mut runner,
         input,

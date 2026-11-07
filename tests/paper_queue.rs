@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     execution_recording::{ExecutionRecorder, JsonlSink},
     market_event::{MarketCircuitBreakInfo, MarketDepthSnapshot, MarketEvent, MarketTrade},
@@ -7,6 +8,7 @@ use bitbankutil_rs::{
 };
 use rust_decimal::Decimal;
 use std::{future::Future, task::Poll};
+use support::TestDiagnostics;
 
 fn engine(delta: i64, recording: bool) -> PaperExecutionEngine {
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();

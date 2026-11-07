@@ -109,3 +109,76 @@ mod tests {
         rx.recv().await.unwrap();
     }
 }
+
+/// 遅延Paper用。コールバック内で時刻を採取し、その場で順序を保って登録する。
+/// 満杯を子タスクへ逃がすと受信順が崩れるため、overflowは評価異常にする。
+pub(crate) async fn run_simulation_websocket(
+    pair: String,
+    client_options: Vec<BitbankOption>,
+    wsc: WebSocketConfig,
+    tx: mpsc::Sender<crate::bitbank_bot::TimedBitbankMessage>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    observation: Option<crate::execution_recording::ExecutionRecorder>,
+) {
+    let mut client = Client::new();
+    for option in client_options {
+        client.update_default_option(option);
+    }
+    let channels = [
+        "ticker",
+        "transactions",
+        "depth_diff",
+        "depth_whole",
+        "circuit_break_info",
+    ]
+    .into_iter()
+    .map(|channel| format!("{channel}_{pair}"))
+    .collect();
+    let observer = observation.map(crate::clock_observation::WsObserver::new);
+    let callback_failed = failed.clone();
+    let connection = client
+        .websocket(
+            "",
+            move |value| {
+                let received = crate::clock_observation::ClockObservation::now();
+                let decoded = crate::replay::decode_bitbank(&value);
+                if let Some(observer) = &observer {
+                    observer.observe(&value, received, matches!(&decoded, Ok(Some(_))));
+                }
+                match decoded {
+                    Ok(Some((pair, message))) => {
+                        if tx
+                            .try_send((received.unix_us / 1000, pair, message))
+                            .is_err()
+                        {
+                            callback_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => callback_failed.store(true, std::sync::atomic::Ordering::Relaxed),
+                }
+            },
+            [
+                BitbankOption::WebSocketChannels(channels),
+                BitbankOption::WebSocketConfig(wsc),
+            ],
+        )
+        .await;
+    match connection {
+        Ok(connection) => {
+            let reconnect = connection.reconnect_state();
+            let mut observed_reconnect = false;
+            loop {
+                let reconnecting = reconnect.is_reconnecting();
+                if reconnecting && !observed_reconnect {
+                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                observed_reconnect = reconnecting;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        Err(_) => {
+            failed.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}

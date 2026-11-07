@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     bitbank_bot::*, depth::Depth, market_event::MarketEvent, replay::*,
     trading_venue::NoTradingVenue,
@@ -97,6 +98,7 @@ async fn derived_fifo_and_time_reversal() {
 #[tokio::test]
 async fn disconnect_recovery_and_cancel() {
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
+    support::configure(runner.venue(), 30);
     let report = run_replay(
         &mut runner,
         ReplayInput::open(manifest()).unwrap(),
@@ -109,6 +111,7 @@ async fn disconnect_recovery_and_cancel() {
     assert_eq!(report.last_input.unwrap().sequence, 6);
     assert!(report.error.is_none());
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
+    support::configure(runner.venue(), 30);
     let report = run_replay(
         &mut runner,
         ReplayInput::open(manifest()).unwrap(),
@@ -120,6 +123,7 @@ async fn disconnect_recovery_and_cancel() {
     assert!(report.incomplete);
     assert_eq!(report.records, 14);
     assert_eq!(report.gaps.len(), 2);
+    support::configure(runner.venue(), 30);
     let report = run_replay(
         &mut runner,
         ReplayInput::open(manifest()).unwrap(),
@@ -388,6 +392,7 @@ async fn empty_input_and_application_failure() {
         }
     }
     let mut runner = BotRunner::new(Unreachable, FailVenue);
+    support::configure(runner.venue(), 30);
     let report = run_replay(
         &mut runner,
         std::iter::empty(),
@@ -503,6 +508,7 @@ async fn custom_input_cannot_bypass_capture_validation() {
     let mut invalid = next.clone();
     invalid.format_version = 999;
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
+    support::configure(runner.venue(), 30);
     let report = run_replay(
         &mut runner,
         vec![Ok((0, start.clone())), Ok((0, invalid))],
@@ -623,13 +629,8 @@ impl BotStrategy<bitbankutil_rs::paper_execution::PaperTradingVenue> for PaperRe
         };
         if let BotEvent::Market(MarketEvent::DepthUpdated { depth, .. }) = event {
             self.seen.lock().unwrap().push(ctx.now_ms());
-            if !ctx
-                .venue()
-                .paper_settlement_status()
-                .unwrap()
-                .issues
-                .is_empty()
-            {
+            assert!(ctx.venue().paper_settlement_status().is_none());
+            if ctx.now_ms() >= 1_793_113_200_080 {
                 // 再接続した板は新しいwholeとdiffから復元され、戦略へ届く。
                 assert_eq!(
                     *depth.best_bid().unwrap().0,
@@ -691,7 +692,24 @@ fn paper_recovery_venue() -> bitbankutil_rs::paper_execution::PaperTradingVenue 
         ))
         .unwrap();
     engine.advance_trade_watermark(0).unwrap();
+    engine.mark_incomplete("known capture gap");
     PaperTradingVenue::new(engine)
+}
+// この回帰ではbitbankのみを必須sourceにし、再接続後の配送まで先読み範囲を確保する。
+fn paper_recovery_input() -> Vec<std::io::Result<(usize, CaptureRecord)>> {
+    ReplayInput::open(manifest())
+        .unwrap()
+        .filter_map(|item| {
+            let (source, mut record) = item.unwrap();
+            if source != 0 {
+                return None;
+            }
+            if record.sequence == 10 {
+                record.received_at_micros += 100_000;
+            }
+            Some(Ok((source, record)))
+        })
+        .collect()
 }
 #[tokio::test]
 async fn paper_recovery_delivers_reconnected_market_and_records_later_gaps_without_settling() {
@@ -706,16 +724,17 @@ async fn paper_recovery_delivers_reconnected_market_and_records_later_gaps_witho
         },
         venue.clone(),
     );
+    support::configure(runner.venue(), 30);
     let report = run_replay(
         &mut runner,
-        ReplayInput::open(manifest()).unwrap(),
+        paper_recovery_input(),
         true,
         &AtomicBool::new(false),
         |_| Ok(None),
     )
     .await;
     assert!(report.error.is_none(), "{:?}", report.error);
-    assert_eq!(report.records, 14);
+    assert_eq!(report.records, 10);
     assert_eq!(report.last_input.unwrap().sequence, 10);
     assert_eq!(
         *seen.lock().unwrap(),
@@ -729,7 +748,7 @@ async fn paper_recovery_delivers_reconnected_market_and_records_later_gaps_witho
     assert!(settlement.unsettled);
     assert_eq!(settlement.watermark_ms, Some(0));
     assert_eq!(settlement.pending_cancellations, 1);
-    assert_eq!(settlement.issues.len(), 2);
+    assert_eq!(settlement.issues.len(), 3);
     assert_eq!(
         venue.account_snapshot("btc_jpy").await.unwrap().balances,
         before
@@ -745,9 +764,10 @@ async fn paper_strict_replay_still_stops_at_first_disconnect() {
         },
         paper_recovery_venue(),
     );
+    support::configure(runner.venue(), 30);
     let report = run_replay(
         &mut runner,
-        ReplayInput::open(manifest()).unwrap(),
+        paper_recovery_input(),
         false,
         &AtomicBool::new(false),
         |_| Ok(None),
@@ -757,13 +777,13 @@ async fn paper_strict_replay_still_stops_at_first_disconnect() {
     assert!(report.incomplete);
     assert_eq!(report.last_input.unwrap().sequence, 6);
     assert_eq!(report.gaps.len(), 1);
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }
 #[tokio::test]
 async fn paper_recovery_preserves_input_validation_and_strategy_errors_after_reconnect() {
     for malformed in [false, true] {
-        let mut input: Vec<_> = ReplayInput::open(manifest())
-            .unwrap()
+        let mut input: Vec<_> = paper_recovery_input()
+            .into_iter()
             .map(Result::unwrap)
             .collect();
         if malformed {
@@ -782,6 +802,7 @@ async fn paper_recovery_preserves_input_validation_and_strategy_errors_after_rec
             },
             paper_recovery_venue(),
         );
+        support::configure(runner.venue(), 30);
         let report = run_replay(
             &mut runner,
             input.into_iter().map(Ok),
@@ -795,8 +816,11 @@ async fn paper_recovery_preserves_input_validation_and_strategy_errors_after_rec
             assert!(error.contains("strategy failed after reconnect"), "{error}");
         }
         assert!(report.incomplete);
-        assert_eq!(report.last_input.unwrap().sequence, 9);
-        assert_eq!(report.gaps.len(), 1);
+        assert_eq!(
+            report.last_input.unwrap().sequence,
+            if malformed { 9 } else { 10 }
+        );
+        assert_eq!(report.gaps.len(), if malformed { 1 } else { 2 });
         assert!(report.settlement.unwrap().unsettled);
     }
 }

@@ -33,6 +33,14 @@ impl Default for PaperTimeModel {
 impl PaperTimeModel {
     /// ローカル時計にだけ適用する。取引所時刻・watermarkは変換しない。
     /// i64の範囲を超える場合は丸めずInvalidClockを返す。
+    pub fn exchange_to_local_ms(self, exchange_ms: i64) -> Result<i64, PaperExecutionError> {
+        let Self::FixedOffset {
+            exchange_minus_local_ms,
+        } = self;
+        exchange_ms
+            .checked_sub(exchange_minus_local_ms)
+            .ok_or(PaperExecutionError::InvalidClock)
+    }
     pub fn local_to_exchange_ms(self, local_ms: i64) -> Result<i64, PaperExecutionError> {
         let Self::FixedOffset {
             exchange_minus_local_ms,
@@ -172,6 +180,7 @@ pub enum PaperExecutionError {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PaperSettlementStatus {
     pub execution_model: &'static str,
+    pub simulation: Option<crate::simulation::SimulationConfig>,
     pub book: Option<PaperBookEvidence>,
     pub book_age_ms: Option<i64>,
     /// 数量または自注文を持つ価格のみ。side/price順。空価格の根拠は診断件数で確認する。
@@ -201,7 +210,7 @@ pub struct PaperSettlementStatus {
 impl PaperSettlementStatus {
     /// 記録用の終了状態。queue本体は専用診断列に分離する。
     pub fn recording_summary(&self) -> serde_json::Value {
-        serde_json::json!({"execution_model":self.execution_model,"book":self.book,"book_age_ms":self.book_age_ms,"model_issues":self.model_issues,"observed_market_mode":self.observed_market_mode,"normal_mode_assumed":self.normal_mode_assumed,"time_model":self.time_model,"watermark_ms":self.watermark_ms,"max_trade_delay_ms":self.max_trade_delay_ms,"buffered_trades":self.buffered_trades,"pending_cancellations":self.pending_cancellations,"pending_operations":self.pending_operations,"latency_model":self.latency_model,"pending_operation_details":self.pending_operation_details,"uncertain_query_observations":self.uncertain_query_observations,"unsettled":self.unsettled,"issues":self.issues})
+        serde_json::json!({"execution_model":self.execution_model,"simulation":self.simulation,"book":self.book,"book_age_ms":self.book_age_ms,"model_issues":self.model_issues,"observed_market_mode":self.observed_market_mode,"normal_mode_assumed":self.normal_mode_assumed,"time_model":self.time_model,"watermark_ms":self.watermark_ms,"max_trade_delay_ms":self.max_trade_delay_ms,"buffered_trades":self.buffered_trades,"pending_cancellations":self.pending_cancellations,"pending_operations":self.pending_operations,"latency_model":self.latency_model,"pending_operation_details":self.pending_operation_details,"uncertain_query_observations":self.uncertain_query_observations,"unsettled":self.unsettled,"issues":self.issues})
     }
 }
 
@@ -233,6 +242,7 @@ pub enum PaperClock {
 #[derive(Debug)]
 pub struct PaperExecutionEngine {
     config: PaperExecutionConfig,
+    simulation_active: bool,
     clock: PaperClock,
     venue_state: Option<Arc<Mutex<latency::State>>>,
     effective_after: BTreeMap<OrderId, i64>,
@@ -286,6 +296,7 @@ impl PaperExecutionEngine {
 
         let engine = Self {
             config,
+            simulation_active: false,
             clock,
             venue_state: None,
             effective_after: BTreeMap::new(),
@@ -311,7 +322,7 @@ impl PaperExecutionEngine {
             recorder.record_lazy(
                 "paper_initial_state",
                 || serde_json::json!({
-                    "config": engine.config(), "clock": engine.clock, "model": "observed_book_fifo_v1",
+                    "config": engine.config(), "clock": engine.clock, "model": engine.execution_model(),
                     "queue_stream_id":engine.queue_recording_id,
                     "balances": engine.balances(), "open_orders": engine.open_orders()
                 }),
@@ -435,7 +446,7 @@ impl PaperExecutionEngine {
         self.queue_model.accept(&order, order_id, self.time_floor);
         if let Some(recorder) = &self.recorder {
             recorder.record_lazy("paper_queue_admission", || serde_json::json!({
-                "order_id":order_id,"model":"observed_book_fifo_v1","book":evidence,
+                "order_id":order_id,"model":self.execution_model(),"book":evidence,
                 "activation_exchange_ms":exchange_now,"activation_local_ms":self.config.time_model.local_to_exchange_ms(0).ok().and_then(|d|exchange_now.checked_sub(d)),"effective_after_exchange_ms":self.time_floor,
                 "book_age_ms":exchange_now.checked_sub(evidence.exchange_at_ms),
                 "normal_mode_assumed":self.config.assume_normal_mode && self.queue_model.observed_mode().is_none(),"observed_market_mode":self.queue_model.observed_mode(),
@@ -468,6 +479,12 @@ impl PaperExecutionEngine {
     /// 取消と同じmsに成立した取引は対象外（有効期間は開始・終了とも開区間）。
     /// 封鎖済みwatermark以下への取消は挿入せず、最初の未確定ms以降へ有効化する。
     pub fn cancel_orders(&mut self, pair: &str, order_ids: Vec<OrderId>) {
+        if !order_ids.iter().any(|id| {
+            self.open_orders.get(id).is_some_and(|o| o.pair == pair)
+                && !self.cancel_at.contains_key(id)
+        }) {
+            return;
+        }
         let mut time = match self.operation_time() {
             Ok(time) => time,
             Err(_) => {
@@ -523,6 +540,13 @@ impl PaperExecutionEngine {
     /// 公開約定を受信順に登録する。約定・取消結果はwatermarkで確定する。
     /// 同一IDの重複は無視し、内容衝突や確定済み境界への遅着は評価異常として記録する。
     pub fn apply_market_event(&mut self, event: &MarketEvent) -> Vec<PaperEvent> {
+        self.apply_timed_market_event(event, None)
+    }
+    pub(crate) fn apply_timed_market_event(
+        &mut self,
+        event: &MarketEvent,
+        received_local_ms: Option<i64>,
+    ) -> Vec<PaperEvent> {
         let received_exchange_ms = match self.exchange_now_ms() {
             Ok(time) => time,
             Err(_) => {
@@ -549,11 +573,14 @@ impl PaperExecutionEngine {
                 PaperClock::Replay { now_ms } => now_ms,
                 PaperClock::Realtime => crate::execution_recording::timestamp_ms() as i64,
             };
-            self.queue_model
-                .observe_book(depth, local_ms, received_exchange_ms);
+            self.queue_model.observe_book(
+                depth,
+                received_local_ms.unwrap_or(local_ms),
+                received_exchange_ms,
+            );
             self.record_queue(false);
             if let Some(recorder) = &self.recorder {
-                recorder.record_lazy("paper_queue_book", || serde_json::json!({"model":"observed_book_fifo_v1","book":self.queue_model.evidence(),"issues":self.queue_model.issues}));
+                recorder.record_lazy("paper_queue_book", || serde_json::json!({"model":self.execution_model(),"book":self.queue_model.evidence(),"issues":self.queue_model.issues}));
             }
         }
         if let MarketEvent::CircuitBreakInfo { pair, info } = event
@@ -723,7 +750,8 @@ impl PaperExecutionEngine {
     /// 未確定残高を確定済み損益へ混ぜない。通常の照会には [`Self::settlement_observation`] を使う。
     pub fn settlement_status(&self) -> PaperSettlementStatus {
         PaperSettlementStatus {
-            execution_model: "observed_book_fifo_v1",
+            execution_model: self.execution_model(),
+            simulation: None,
             book: self.queue_model.evidence(),
             book_age_ms: self
                 .queue_model
@@ -744,13 +772,19 @@ impl PaperExecutionEngine {
             latency_model: PaperLatencyConfig::default(),
             pending_operation_details: Vec::new(),
             uncertain_query_observations: self.uncertain_query_observations,
-            unsettled: self.current_unsettled() || self.uncertain_query_observations > 0,
+            unsettled: self.current_unsettled()
+                || self.uncertain_query_observations > 0
+                || (self.simulation_active
+                    && (!self.cancel_at.is_empty() || !self.buffered_trades.is_empty())),
             issues: self.settlement_issues.clone(),
         }
     }
 
     /// 現在の採取値の未確定性。評価全体の履歴とは分離する。
     fn current_unsettled(&self) -> bool {
+        if self.simulation_active {
+            return !self.settlement_issues.is_empty() || !self.queue_model.issues.is_empty();
+        }
         let now = self.exchange_now_ms();
         !self.settlement_issues.is_empty()
             || !self.queue_model.issues.is_empty()
@@ -784,7 +818,7 @@ impl PaperExecutionEngine {
     }
 
     fn settlement_record_data(&self) -> serde_json::Value {
-        serde_json::json!({"execution_model":"observed_book_fifo_v1",
+        serde_json::json!({"execution_model":self.execution_model(),
             "book":self.queue_model.evidence(),
             "book_age_ms":self.queue_model.evidence().and_then(|b| self.exchange_now_ms().ok()?.checked_sub(b.exchange_at_ms)),
             "model_issues":self.queue_model.issues,
@@ -831,6 +865,13 @@ impl PaperExecutionEngine {
         self.discarded_events
     }
 
+    pub fn execution_model(&self) -> &'static str {
+        if self.simulation_active {
+            "exchange_timeline_fifo_v2"
+        } else {
+            "observed_book_fifo_v1"
+        }
+    }
     pub fn config(&self) -> &PaperExecutionConfig {
         &self.config
     }
@@ -944,7 +985,10 @@ impl PaperExecutionEngine {
 }
 
 mod latency;
-pub use latency::{PaperLatencyConfig, PaperOperationLatency, PaperTradingVenue};
+pub use latency::{
+    PaperDiagnosticSnapshot, PaperDiagnostics, PaperLatencyConfig, PaperOperationLatency,
+    PaperTradingVenue,
+};
 mod queue;
 pub use queue::{
     PaperBookEvidence, PaperModelUnavailable, PaperQueueDiagnostics, PaperQueueLevel,

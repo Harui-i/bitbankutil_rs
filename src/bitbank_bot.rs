@@ -129,15 +129,48 @@ pub trait BotStrategy<V: TradingVenue = NoTradingVenue>: Send + 'static {
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 }
 
+/// 送信開始時のローカル時刻を保持する入力窓口。
+/// 遅延Paperでは外部入力もこの時刻まで戦略へ公開しない。
+pub struct BotEventSender<C> {
+    tx: mpsc::Sender<(i64, BotEvent<C>)>,
+}
+impl<C> Clone for BotEventSender<C> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+        }
+    }
+}
+impl<C> BotEventSender<C> {
+    pub async fn send(
+        &self,
+        event: BotEvent<C>,
+    ) -> Result<(), mpsc::error::SendError<BotEvent<C>>> {
+        let received = crate::execution_recording::timestamp_ms() as i64;
+        self.send_at(received, event).await
+    }
+    /// 外部フィードのコールバックで採取済みのローカル受信時刻を維持する。
+    pub async fn send_at(
+        &self,
+        received_at_ms: i64,
+        event: BotEvent<C>,
+    ) -> Result<(), mpsc::error::SendError<BotEvent<C>>> {
+        self.tx
+            .send((received_at_ms, event))
+            .await
+            .map_err(|e| mpsc::error::SendError(e.0.1))
+    }
+}
+
 /// ボットアクターを生かし続け、基本的なライフサイクル制御を提供するハンドル。
 pub struct BotHandle<E> {
-    event_tx: mpsc::Sender<BotEvent<E>>,
+    event_tx: BotEventSender<E>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl<E: Send + 'static> BotHandle<E> {
-    pub fn event_sender(&self) -> mpsc::Sender<BotEvent<E>> {
+    pub fn event_sender(&self) -> BotEventSender<E> {
         self.event_tx.clone()
     }
 
@@ -168,7 +201,8 @@ where
     V: TradingVenue,
     S: BotStrategy<V>,
 {
-    let (event_tx, mut event_rx) = mpsc::channel(buffer);
+    let (tx, mut event_rx) = mpsc::channel(buffer);
+    let event_tx = BotEventSender { tx };
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(async move {
         let mut runner = BotRunner::new(strategy, venue);
@@ -186,7 +220,7 @@ where
                 biased;
                 _ = &mut shutdown_rx, if !stopping => { stopping = true; event_rx.close(); }
                 maybe_event = event_rx.recv(), if !runner.handler_pending() || runner.venue().has_pending_operations() => {
-                    let Some(event) = maybe_event else {
+                    let Some((_received, event)) = maybe_event else {
                         // 将来の市場入力がなければwatermark待ちを完了できない。
                         // 送信済み操作はvenueに残し、shutdownを無期限に待たせない。
                         if runner.handler_pending() {
@@ -255,11 +289,10 @@ impl BitbankMarketEventConverter {
                 ticker: ticker.into(),
             }),
             BitbankInboundMessage::Transactions(transactions) => {
-                let mut transactions = transactions
+                let transactions = transactions
                     .into_iter()
                     .map(MarketTrade::try_from)
                     .collect::<Result<Vec<_>, _>>()?;
-                transactions.sort_by_key(|trade| (trade.executed_at, trade.transaction_id));
                 Some(MarketEvent::Transactions {
                     pair: self.pair.clone(),
                     transactions,
@@ -305,7 +338,7 @@ async fn run_bitbank_pair_feed<E>(
     pair: String,
     client_options: Vec<BitbankOption>,
     websocket_config: WebSocketConfig,
-    event_tx: mpsc::Sender<BotEvent<E>>,
+    event_tx: BotEventSender<E>,
     observation: Option<crate::execution_recording::ExecutionRecorder>,
 ) where
     E: Send + 'static,
@@ -439,7 +472,20 @@ where
             warn!("spawning a Bitbank bot without any subscribed pair");
         }
 
-        let actor = spawn_bot_actor(self.strategy, self.venue, self.buffer_size);
+        let simulation = self.venue.simulation_config().is_some();
+        let (raw_tx, raw_rx) = mpsc::channel(self.buffer_size);
+        let input_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let actor = if simulation {
+            spawn_simulation_actor(
+                self.strategy,
+                self.venue,
+                self.buffer_size,
+                raw_rx,
+                input_failed.clone(),
+            )
+        } else {
+            spawn_bot_actor(self.strategy, self.venue, self.buffer_size)
+        };
         let event_tx = actor.event_sender();
         let mut feed_handles = Vec::new();
 
@@ -448,8 +494,22 @@ where
             let tx = event_tx.clone();
             let config = self.websocket_config.clone();
             let observation = self.websocket_observation.clone();
+            let raw_tx = raw_tx.clone();
+            let failed = input_failed.clone();
             let handle = tokio::spawn(async move {
-                run_bitbank_pair_feed(pair, pair_options, config, tx, observation).await;
+                if simulation {
+                    crate::websocket_handler::run_simulation_websocket(
+                        pair,
+                        pair_options,
+                        config,
+                        raw_tx,
+                        failed,
+                        observation,
+                    )
+                    .await;
+                } else {
+                    run_bitbank_pair_feed(pair, pair_options, config, tx, observation).await;
+                }
             });
             feed_handles.push(handle);
         }
@@ -476,7 +536,7 @@ pub struct BitbankBotRuntime<E> {
 }
 
 impl<E: Send + 'static> BitbankBotRuntime<E> {
-    pub fn event_sender(&self) -> mpsc::Sender<BotEvent<E>> {
+    pub fn event_sender(&self) -> BotEventSender<E> {
         self.bot_handle
             .as_ref()
             .expect("bitbank bot runtime missing actor handle")
@@ -511,7 +571,7 @@ impl<E> Drop for BitbankBotRuntime<E> {
 pub async fn forward_bitbank_messages<E>(
     pair: String,
     inbound_rx: &mut mpsc::Receiver<BitbankInboundMessage>,
-    event_tx: &mpsc::Sender<BotEvent<E>>,
+    event_tx: &BotEventSender<E>,
 ) where
     E: Send + 'static,
 {
@@ -752,14 +812,9 @@ mod tests {
         type Error = String;
         async fn handle_event(
             &mut self,
-            event: BotEvent,
+            _event: BotEvent,
             ctx: &BotContext<Infallible, crate::paper_execution::PaperTradingVenue>,
         ) -> Result<(), Self::Error> {
-            if let BotEvent::Market(MarketEvent::Transactions { transactions, .. }) = event {
-                let through = transactions.iter().map(|t| t.executed_at).max().unwrap();
-                // この合成入力では取引の完了境界が既知。
-                ctx.venue().advance_trade_watermark(through).unwrap();
-            }
             self.snapshots
                 .send(ctx.venue().account_snapshot("btc_jpy").await.unwrap())
                 .unwrap();
@@ -794,7 +849,10 @@ mod tests {
         )
         .map(|engine| seeded_engine(engine, 0))
         .unwrap();
-        let venue = PaperTradingVenue::new(engine);
+        let venue = PaperTradingVenue::new(engine)
+            .with_simulation_config(crate::simulation::SimulationConfig { lookahead_ms: 200 })
+            .unwrap();
+        let occurred = crate::execution_recording::timestamp_ms() as i64 - 10;
         venue
             .place_order(
                 DesiredLimitOrder::limit(
@@ -815,7 +873,7 @@ mod tests {
                 pair: "btc_jpy".into(),
                 transactions: vec![MarketTrade {
                     amount: Decimal::new(25, 2),
-                    executed_at: 1,
+                    executed_at: occurred,
                     price: Decimal::new(100, 0),
                     side: OrderSide::Sell,
                     transaction_id: 1,
@@ -828,7 +886,7 @@ mod tests {
             .send(BitbankInboundMessage::Transactions(vec![
                 BitbankTransactionDatum {
                     amount: Decimal::new(25, 2),
-                    executed_at: 2,
+                    executed_at: occurred + 1,
                     price: Decimal::new(100, 0),
                     side: "sell".into(),
                     transaction_id: 2,
@@ -838,7 +896,7 @@ mod tests {
             .unwrap();
         drop(inbound);
         forward_bitbank_messages("btc_jpy".into(), &mut inbound_rx, &sender).await;
-        for remaining in [Decimal::new(75, 2), Decimal::new(5, 1)] {
+        for remaining in [Decimal::new(5, 1), Decimal::new(5, 1)] {
             let snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
                 .await
                 .unwrap()
@@ -932,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn bitbank_converter_orders_transactions_chronologically() {
+    fn bitbank_converter_preserves_notification_transaction_order() {
         let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
         let newest = BitbankTransactionDatum {
             amount: Decimal::new(1, 0),
@@ -969,7 +1027,7 @@ mod tests {
             .iter()
             .map(|trade| trade.transaction_id)
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(ids, vec![3, 2, 1]);
     }
 
     #[test]
@@ -996,7 +1054,8 @@ mod tests {
     #[tokio::test]
     async fn forward_bitbank_messages_emits_market_events() {
         let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel::<BotEvent>(4);
+        let (tx, mut event_rx) = mpsc::channel::<(i64, BotEvent)>(4);
+        let event_tx = BotEventSender { tx };
 
         inbound_tx
             .send(BitbankInboundMessage::Ticker(BitbankTickerResponse {
@@ -1015,7 +1074,7 @@ mod tests {
 
         forward_bitbank_messages("btc_jpy".to_owned(), &mut inbound_rx, &event_tx).await;
 
-        let event = event_rx.recv().await.unwrap();
+        let (_, event) = event_rx.recv().await.unwrap();
         let BotEvent::Market(MarketEvent::Ticker { pair, ticker }) = event else {
             panic!("expected ticker");
         };
@@ -1102,6 +1161,7 @@ pub struct BotRunner<S: BotStrategy<V>, V: TradingVenue> {
     delivery: std::collections::VecDeque<QueuedEvent<S::CustomEvent>>,
     venue: V,
     last_time: Option<i64>,
+    simulation_mode: bool,
     replay_clock: std::sync::Arc<std::sync::atomic::AtomicI64>,
     wake: std::sync::Arc<tokio::sync::Notify>,
     derived_count: usize,
@@ -1128,6 +1188,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             delivery: Default::default(),
             venue,
             last_time: None,
+            simulation_mode: false,
             replay_clock: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
             wake: std::sync::Arc::new(tokio::sync::Notify::new()),
             derived_count: 0,
@@ -1308,7 +1369,9 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             ..Default::default()
         };
         crate::execution_recording::sync_scope(recording_context, || {
-            if let BotEvent::Market(market) = &event {
+            if !self.simulation_mode
+                && let BotEvent::Market(market) = &event
+            {
                 if recovery {
                     self.venue.on_market_event_recovering(market)
                 } else {
@@ -1331,6 +1394,41 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         });
         Ok(())
     }
+    /// シミュレータで適用済みの市場情報を、元の受信時刻で配送する。
+    pub(crate) fn enqueue_simulation_delivery(
+        &mut self,
+        received_at_ms: i64,
+        input_id: Option<InputId>,
+        market_id: Option<u64>,
+        event: BotEvent<S::CustomEvent>,
+        recovery: bool,
+    ) -> Result<(), BotRunError<S::Error>> {
+        self.ensure_delivery_capacity(1)?;
+        self.simulation_mode = true;
+        if let Some(recorder) = self.venue.recorder() {
+            let context = crate::execution_recording::RecordingContext {
+                event_time_ms: self.last_time,
+                input_id: input_id.clone(),
+                market_event_id: market_id,
+                ..Default::default()
+            };
+            crate::execution_recording::sync_scope(context, || {
+                recorder.record_lazy("input_registered", || serde_json::json!({
+                "received_at_ms":received_at_ms,"input_id":input_id,"market_event_id":market_id
+            }))
+            });
+        }
+        self.delivery.push_back(QueuedEvent {
+            received_at_ms,
+            input_id,
+            event,
+            market_id,
+            derived: false,
+            recovery,
+        });
+        Ok(())
+    }
+
     /// 市場を現在の受信時刻で登録し、戦略が模擬操作待ちなら配送を保留する。
     /// このメソッド自身は将来の期限へ時計を進めない。
     pub async fn submit_replay(
@@ -1468,7 +1566,7 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
             overflow: false,
         }));
         let ctx = BotContext {
-            venue: self.venue.clone(),
+            venue: self.venue.strategy_view(),
             received_at_ms: entry.received_at_ms,
             time: replay.then(|| self.replay_clock.clone()),
             pending: pending.clone(),
@@ -1605,3 +1703,105 @@ impl<E: std::fmt::Debug> std::fmt::Display for BotRunError<E> {
     }
 }
 impl<E: std::fmt::Debug> std::error::Error for BotRunError<E> {}
+
+pub(crate) type TimedBitbankMessage = (i64, String, BitbankInboundMessage);
+
+fn spawn_simulation_actor<S: BotStrategy<V>, V: TradingVenue>(
+    strategy: S,
+    venue: V,
+    buffer: usize,
+    mut raw_rx: mpsc::Receiver<TimedBitbankMessage>,
+    input_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> BotHandle<S::CustomEvent> {
+    let (tx, mut event_rx) = mpsc::channel(buffer);
+    let event_tx = BotEventSender { tx };
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let join_handle = tokio::spawn(async move {
+        let mut driver = crate::simulation::SimulationDriver::new(
+            venue.simulation_config().unwrap(),
+            venue.simulation_time_model(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        venue.begin_simulation().map_err(|e| format!("{e:?}"))?;
+        let mut runner = BotRunner::new(strategy, venue);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => break,
+                _ = tick.tick() => {}
+            }
+            // 時刻を先に採取し、そこで受信済みの入力を全て登録してから進める。
+            let through = crate::execution_recording::timestamp_ms() as i64;
+            enum Input<C> {
+                Raw(String, BitbankInboundMessage),
+                Event(BotEvent<C>),
+            }
+            let mut batch = Vec::new();
+            while let Ok((time, pair, message)) = raw_rx.try_recv() {
+                batch.push((time, Input::Raw(pair, message)));
+            }
+            while let Ok((time, event)) = event_rx.try_recv() {
+                batch.push((time, Input::Event(event)));
+            }
+            batch.sort_by_key(|(time, _)| *time);
+            let mut result = Ok(());
+            if input_failed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                driver
+                    .mark_incomplete("paper input overflow, malformed input, or feed termination");
+            }
+            for (received, input) in batch {
+                result = match input {
+                    Input::Raw(pair, message) => {
+                        driver.admit_bitbank(received, None, pair.clone(), pair, message)
+                    }
+                    Input::Event(event) => driver.admit_event(received, None, event),
+                };
+                if result.is_err() {
+                    break;
+                }
+            }
+            if result.is_ok() {
+                result = driver.advance_to(&mut runner, through, None, &cancel).await;
+            }
+            if let Err(error) = result {
+                runner.venue().mark_market_incomplete(&error);
+                runner.record_settlement();
+                if let Some(recorder) = runner.venue().recorder() {
+                    recorder.record_lazy(
+                        "simulation_outcome",
+                        || serde_json::json!({"simulation":driver.report(),"error":error}),
+                    );
+                }
+                return Err(error);
+            }
+        }
+        // 末尾の先読み分や操作期限を強制完了しない。
+        let pending_handler = runner.handler_pending();
+        runner.stop_pending_handler();
+        runner.record_settlement();
+        if let Some(recorder) = runner.venue().recorder() {
+            recorder.record_lazy(
+                "simulation_outcome",
+                || serde_json::json!({"simulation":driver.report(),"shutdown":true,
+                    "pending_handler":pending_handler,"pending_deliveries":runner.pending_delivery_count(),
+                    "pending_scheduled":runner.pending_scheduled(),"final_time_ms":runner.now_ms()}),
+            );
+        }
+        Ok(())
+    });
+    BotHandle {
+        event_tx,
+        shutdown_tx: Some(shutdown_tx),
+        join_handle: Some(join_handle),
+    }
+}
+
+impl<S: BotStrategy<crate::paper_execution::PaperTradingVenue>>
+    BotRunner<S, crate::paper_execution::PaperTradingVenue>
+{
+    pub fn paper_diagnostics(&self) -> Option<crate::paper_execution::PaperDiagnosticSnapshot> {
+        self.venue.diagnostics().map(|d| d.snapshot())
+    }
+}

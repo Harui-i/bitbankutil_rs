@@ -95,12 +95,27 @@ async fn demo(
         )
         .unwrap(),
     );
+    let venue = venue
+        .with_simulation_config(bitbankutil_rs::simulation::SimulationConfig { lookahead_ms: 30 })
+        .unwrap();
     let mut runner = BotRunner::new(Strategy { last: None }, venue.clone());
-    let input =
-        ReplayInput::open(manifest)?.take_while(|r| !matches!(r,Ok((0,r)) if r.sequence>=6));
+    let mut input = ReplayInput::open(manifest)?
+        .take_while(|r| !matches!(r,Ok((0,r)) if r.sequence>=6))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    // 合成fixtureの末尾を延ばし、両sourceで評価終了+30msまで収録する。
+    for source in 0..2 {
+        let (_, last) = input.iter().rev().find(|(s, _)| *s == source).unwrap();
+        let mut tail = last.clone();
+        tail.sequence += 1;
+        tail.received_at_micros = 1_793_113_200_060_000;
+        tail.payload = CapturePayload::Message {
+            message: json!(["heartbeat"]),
+        };
+        input.push((source, tail));
+    }
     let report = run_replay(
         &mut runner,
-        input,
+        input.into_iter().map(Ok),
         false,
         &AtomicBool::new(false),
         |r| match &r.payload {
@@ -109,30 +124,13 @@ async fn demo(
         },
     )
     .await;
-    // fixtureのこの区間では、ここまでに成立した取引がすべて収録済みと分かっている。
-    // 一般のcaptureのEOFにこの保証はない。
-    venue
-        .advance_trade_watermark(1_793_113_200_030)
-        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    let account = venue
-        .account_snapshot("btc_jpy")
-        .await
-        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    venue
-        .cancel_orders(
-            "btc_jpy",
-            account.open_orders.iter().map(|o| o.order_id).collect(),
-        )
-        .await
-        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    // 同msの確定後に出した取消は次の未確定msに有効になる。
-    venue
-        .advance_trade_watermark(1_793_113_200_031)
-        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-    let final_account = venue
-        .account_snapshot("btc_jpy")
-        .await
-        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+    // EOFで取消や操作期限を強制実行しない。最終口座は診断snapshotで読み取る。
+    let diagnostics = runner.paper_diagnostics().unwrap();
+    let final_account = bitbankutil_rs::trading_venue::AccountSnapshot {
+        open_orders: diagnostics.open_orders(),
+        balances: diagnostics.balances(),
+        query: None,
+    };
     venue.record_paper_settlement();
     recorder.record_lazy("replay_finished",|| json!({"error":report.error,"incomplete":report.incomplete,"interrupted":report.interrupted,"records":report.records,"final_account":final_account}));
     recorder.finish()?;
@@ -153,10 +151,10 @@ mod tests {
                 std::env::temp_dir().join(format!("replay-test-{}-{n}.jsonl", std::process::id()));
             let _ = std::fs::remove_file(&path);
             let account = demo(path.to_string_lossy().into_owned()).await.unwrap();
-            assert!(account.open_orders.is_empty());
+            assert_eq!(account.open_orders.len(), 1);
             // 最終注文99.5の前には表示数量2があり、公開約定0.75では自分まで届かない。
             assert_eq!(account.balances[0].free_amount, Decimal::ZERO);
-            assert_eq!(account.balances[1].free_amount, Decimal::from(1000));
+            assert_eq!(account.balances[1].onhand_amount, Decimal::from(1000));
             let records =
                 read_records(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).unwrap();
             let events: Vec<_> = records
@@ -164,7 +162,7 @@ mod tests {
                 .filter(|r| r.kind == "paper_event")
                 .map(|r| r.data.clone())
                 .collect();
-            assert_eq!(events.len(), 6);
+            assert_eq!(events.len(), 4);
             assert!(
                 events
                     .iter()

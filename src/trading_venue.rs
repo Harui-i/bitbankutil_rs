@@ -70,6 +70,21 @@ pub struct PlacedOrder {
 /// 注文操作と口座取得の共通インターフェース。
 /// Cloneした値も同じ口座・注文状態を共有すること。
 pub trait TradingVenue: Clone + Send + Sync + 'static {
+    /// 戦略へ渡す操作窓口。実行基盤の権限を引き継がない。
+    fn strategy_view(&self) -> Self {
+        self.clone()
+    }
+
+    fn simulation_config(&self) -> Option<crate::simulation::SimulationConfig> {
+        None
+    }
+    fn simulation_time_model(&self) -> crate::paper_execution::PaperTimeModel {
+        Default::default()
+    }
+    fn begin_simulation(&self) -> Result<(), TradingVenueError> {
+        Ok(())
+    }
+
     /// 模擬venue内部イベントの次のローカル期限。
     fn next_internal_time(&self) -> Option<i64> {
         None
@@ -120,6 +135,15 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
         pair: &'a str,
         order_ids: Vec<OrderId>,
     ) -> TradingVenueFuture<'a, ()>;
+
+    /// 内部市場への適用。元のローカル受信時刻は診断用に保持する。
+    fn on_simulation_market(
+        &self,
+        event: &MarketEvent,
+        _received_at_ms: i64,
+    ) -> Result<(), TradingVenueError> {
+        self.on_market_event_recovering(event)
+    }
 
     /// ボットが戦略へ市場データを渡す前に呼ぶ処理。
     /// paper tradingでは公開約定を登録し、設定したwatermarkまで注文と残高を確定する。

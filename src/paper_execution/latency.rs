@@ -17,7 +17,7 @@ pub struct PaperLatencyConfig {
     pub cancellation: PaperOperationLatency,
     pub orders_query: PaperOperationLatency,
     pub balances_query: PaperOperationLatency,
-    /// watermarkで確定できた状態変化からローカル通知までの遅延。
+    /// 内部取引所の状態変化からローカル通知までの遅延。
     pub notification_ms: i64,
 }
 
@@ -84,8 +84,10 @@ struct ScheduledInternal {
 #[derive(Debug)]
 pub(super) struct State {
     latency: PaperLatencyConfig,
+    simulation: crate::simulation::SimulationConfig,
+    simulation_active: bool,
     local: AccountSnapshot,
-    events: BTreeMap<(i64, u64), ScheduledInternal>,
+    events: BTreeMap<(i64, u8, u64), ScheduledInternal>,
     sequence: u64,
     operation: u64,
     operations: BTreeMap<u64, serde_json::Value>,
@@ -101,6 +103,8 @@ impl State {
     fn new(engine: &PaperExecutionEngine, latency: PaperLatencyConfig) -> Self {
         Self {
             latency,
+            simulation: Default::default(),
+            simulation_active: false,
             local: snapshot(engine),
             events: BTreeMap::new(),
             sequence: 0,
@@ -113,13 +117,35 @@ impl State {
             notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
+    fn settlement_status(&self, engine: &PaperExecutionEngine) -> PaperSettlementStatus {
+        let mut status = engine.settlement_status();
+        status.latency_model = self.latency;
+        status.simulation = self.simulation_active.then_some(self.simulation);
+        status.pending_operation_details = self.operations.values().cloned().collect();
+        status.pending_operations = self.operations.len()
+            + self
+                .events
+                .values()
+                .filter(|v| matches!(v.event, Internal::Publish { .. }))
+                .count();
+        status.unsettled |= status.pending_operations > 0;
+        status
+    }
     fn enqueue(&mut self, at: i64, event: Internal) -> Result<(), TradingVenueError> {
         self.sequence = self
             .sequence
             .checked_add(1)
             .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
         self.events.insert(
-            (at, self.sequence),
+            (
+                at,
+                match &event {
+                    Internal::Place { .. } | Internal::Cancel { .. } => 0,
+                    Internal::Query(QueryEvent::Sample { .. }) => 1,
+                    _ => 2,
+                },
+                self.sequence,
+            ),
             ScheduledInternal {
                 context: crate::execution_recording::current_context(),
                 event,
@@ -198,13 +224,104 @@ fn record(engine: &PaperExecutionEngine, kind: &str, data: impl FnOnce() -> serd
     }
 }
 
-#[derive(Debug, Clone)]
+fn settle_simulation(
+    s: &mut State,
+    e: &mut PaperExecutionEngine,
+    local: i64,
+) -> Result<(), TradingVenueError> {
+    if !e.settlement_issues.is_empty() {
+        return Ok(());
+    }
+    let through = e
+        .config
+        .time_model
+        .local_to_exchange_ms(local)
+        .map_err(TradingVenueError::Paper)?;
+    if e.watermark_ms.is_some_and(|w| through < w) {
+        return Ok(());
+    }
+    if e.buffered_trades.is_empty() && e.cancel_at.is_empty() {
+        e.watermark_ms = Some(through);
+        return Ok(());
+    }
+    let before = snapshot(e);
+    e.advance_trade_watermark(through)
+        .map_err(TradingVenueError::Paper)?;
+    if snapshot(e) != before {
+        s.publish_market(e, local)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
 pub struct PaperTradingVenue {
     engine: Arc<Mutex<PaperExecutionEngine>>,
     state: Arc<Mutex<State>>,
+    execution_access: bool,
+}
+
+// Debug経由でも戦略へ内部板・未通知口座を公開しない。
+impl std::fmt::Debug for PaperTradingVenue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaperTradingVenue").finish_non_exhaustive()
+    }
+}
+
+/// 戦略用venueには含めない、実行基盤が所有する診断窓口。
+#[derive(Debug, Clone)]
+pub struct PaperDiagnostics(Arc<Mutex<PaperExecutionEngine>>, Arc<Mutex<State>>);
+#[derive(Debug, Clone)]
+pub struct PaperDiagnosticSnapshot {
+    account: AccountSnapshot,
+    status: PaperSettlementStatus,
+    config: PaperExecutionConfig,
+    events: Vec<PaperEvent>,
+}
+impl PaperDiagnostics {
+    pub fn snapshot(&self) -> PaperDiagnosticSnapshot {
+        let state = self.1.lock().unwrap();
+        let e = self.0.lock().unwrap();
+        PaperDiagnosticSnapshot {
+            account: snapshot(&e),
+            status: state.settlement_status(&e),
+            config: e.config.clone(),
+            events: e.event_history.iter().cloned().collect(),
+        }
+    }
+}
+impl PaperDiagnosticSnapshot {
+    pub fn balances(&self) -> Vec<BalanceSnapshot> {
+        self.account.balances.clone()
+    }
+    pub fn open_orders(&self) -> Vec<OpenOrder> {
+        self.account.open_orders.clone()
+    }
+    pub fn settlement_status(&self) -> PaperSettlementStatus {
+        self.status.clone()
+    }
+    pub fn config(&self) -> &PaperExecutionConfig {
+        &self.config
+    }
+    pub fn events(&self) -> &[PaperEvent] {
+        &self.events
+    }
+    /// snapshot自身のイベントだけを取り出す。内部取引所の履歴は変更しない。
+    pub fn drain_events(&mut self) -> Vec<PaperEvent> {
+        std::mem::take(&mut self.events)
+    }
 }
 
 impl PaperTradingVenue {
+    /// 実行基盤が保有する読み取り専用診断ハンドルを同時に作る。
+    pub fn with_diagnostics(engine: PaperExecutionEngine) -> (Self, PaperDiagnostics) {
+        let venue = Self::new(engine);
+        let diagnostics = PaperDiagnostics(venue.engine.clone(), venue.state.clone());
+        (venue, diagnostics)
+    }
+    pub(crate) fn diagnostics(&self) -> Option<PaperDiagnostics> {
+        self.execution_access
+            .then(|| PaperDiagnostics(self.engine.clone(), self.state.clone()))
+    }
     pub fn new(engine: PaperExecutionEngine) -> Self {
         Self::with_latency(engine, PaperLatencyConfig::default()).expect("zero latency is valid")
     }
@@ -222,10 +339,12 @@ impl PaperTradingVenue {
         Ok(Self {
             engine: Arc::new(Mutex::new(engine)),
             state,
+            execution_access: true,
         })
     }
     /// 同じengineから作るハンドルも操作・通知キューを共有する。
-    pub fn from_shared(engine: Arc<Mutex<PaperExecutionEngine>>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_shared(engine: Arc<Mutex<PaperExecutionEngine>>) -> Self {
         let state = {
             let mut e = engine.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = &e.venue_state {
@@ -236,11 +355,30 @@ impl PaperTradingVenue {
                 s
             }
         };
-        Self { engine, state }
+        Self {
+            engine,
+            state,
+            execution_access: true,
+        }
     }
     /// 診断用の取引所状態。直接の変更はローカル通知経路を迂回する。
-    pub fn engine(&self) -> Arc<Mutex<PaperExecutionEngine>> {
+    #[cfg(test)]
+    pub(crate) fn engine(&self) -> Arc<Mutex<PaperExecutionEngine>> {
         self.engine.clone()
+    }
+
+    pub fn with_simulation_config(
+        self,
+        config: crate::simulation::SimulationConfig,
+    ) -> Result<Self, PaperExecutionError> {
+        config.validate()?;
+        let mut state = self.state.lock().unwrap();
+        if !self.execution_access || (state.simulation_active && state.simulation != config) {
+            return Err(PaperExecutionError::InvalidClock);
+        }
+        state.simulation = config;
+        drop(state);
+        Ok(self)
     }
 
     pub fn latency_config(&self) -> PaperLatencyConfig {
@@ -254,6 +392,9 @@ impl PaperTradingVenue {
     }
 
     pub fn pending_operations(&self) -> Vec<serde_json::Value> {
+        if !self.execution_access {
+            return Vec::new();
+        }
         self.state
             .lock()
             .unwrap()
@@ -267,6 +408,9 @@ impl PaperTradingVenue {
         &self,
         through_ms: i64,
     ) -> Result<Vec<PaperEvent>, TradingVenueError> {
+        if !self.execution_access {
+            return Err(TradingVenueError::Unavailable);
+        }
         let events = {
             let mut s = self
                 .state
@@ -454,13 +598,63 @@ impl PaperTradingVenue {
 }
 
 impl TradingVenue for PaperTradingVenue {
+    fn strategy_view(&self) -> Self {
+        let mut view = self.clone();
+        view.execution_access = false;
+        view
+    }
+
+    fn simulation_config(&self) -> Option<crate::simulation::SimulationConfig> {
+        Some(self.state.lock().unwrap().simulation)
+    }
+    fn simulation_time_model(&self) -> PaperTimeModel {
+        self.engine.lock().unwrap().config.time_model
+    }
+    fn begin_simulation(&self) -> Result<(), TradingVenueError> {
+        if !self.execution_access {
+            return Err(TradingVenueError::Unavailable);
+        }
+        let mut s = self.state.lock().unwrap();
+        let mut e = self.engine.lock().unwrap();
+        s.simulation.validate().map_err(TradingVenueError::Paper)?;
+        if !s.operations.is_empty() || !s.events.is_empty() {
+            return Err(TradingVenueError::Unavailable);
+        }
+        if matches!(e.clock, PaperClock::Realtime) {
+            e.clock = PaperClock::Replay { now_ms: 0 };
+            e.time_floor = i64::MIN;
+        }
+        e.max_trade_delay_ms = None;
+        e.simulation_active = true;
+        s.simulation_active = true;
+        s.managed_replay = true;
+        record(&e, "simulation_model", || {
+            serde_json::json!({"config":s.simulation,"time_model":e.config.time_model,
+            "execution_model":"exchange_timeline_fifo_v2","ordering":"market,operations,settlement,query,responses,delivery"})
+        });
+        Ok(())
+    }
+
     fn next_internal_time(&self) -> Option<i64> {
-        self.state
-            .lock()
-            .unwrap()
-            .events
+        if !self.execution_access {
+            return None;
+        }
+        let s = self.state.lock().unwrap();
+        let e = self.engine.lock().unwrap();
+        let cancellation = if s.simulation_active && e.settlement_issues.is_empty() {
+            e.cancel_at
+                .values()
+                .min()
+                .and_then(|t| e.config.time_model.exchange_to_local_ms(*t).ok())
+        } else {
+            None
+        };
+        s.events
             .first_key_value()
             .map(|(k, _)| k.0)
+            .into_iter()
+            .chain(cancellation)
+            .min()
     }
     fn current_time_ms(&self) -> Option<i64> {
         match self.engine.lock().unwrap().clock {
@@ -469,12 +663,21 @@ impl TradingVenue for PaperTradingVenue {
         }
     }
     fn set_replay_waker(&self, waker: Option<Waker>) {
+        if !self.execution_access {
+            return;
+        }
         self.state.lock().unwrap().waker = waker;
     }
     fn set_replay_driver(&self, active: bool) {
+        if !self.execution_access {
+            return;
+        }
         self.state.lock().unwrap().managed_replay = active;
     }
     fn advance_replay_time(&self, time_ms: i64) -> Result<(), TradingVenueError> {
+        if !self.execution_access {
+            return Err(TradingVenueError::Unavailable);
+        }
         self.engine
             .lock()
             .map_err(|_| TradingVenueError::StatePoisoned)?
@@ -482,6 +685,9 @@ impl TradingVenue for PaperTradingVenue {
             .map_err(TradingVenueError::Paper)
     }
     fn process_internal_events(&self, local_ms: i64) -> Result<(), TradingVenueError> {
+        if !self.execution_access {
+            return Err(TradingVenueError::Unavailable);
+        }
         let mut s = self
             .state
             .lock()
@@ -500,7 +706,7 @@ impl TradingVenue for PaperTradingVenue {
             .first_key_value()
             .is_some_and(|(key, _)| key.0 <= local_ms)
         {
-            let ((at, _), scheduled) = s.events.pop_first().unwrap();
+            let ((at, priority, _), scheduled) = s.events.pop_first().unwrap();
             let mut context = scheduled.context;
             let event = scheduled.event;
             if let PaperClock::Replay { now_ms } = e.clock {
@@ -508,6 +714,9 @@ impl TradingVenue for PaperTradingVenue {
                     .map_err(TradingVenueError::Paper)?;
             }
             let executed = local_now(&e)?;
+            if s.simulation_active && priority > 0 {
+                settle_simulation(&mut s, &mut e, executed)?;
+            }
             context.event_time_ms = Some(executed);
             // 内部イベントはその実行時刻を明示する。元要求の共有時計に上書きさせない。
             context.replay_clock = None;
@@ -599,6 +808,9 @@ impl TradingVenue for PaperTradingVenue {
                 },
             )?;
         }
+        if s.simulation_active {
+            settle_simulation(&mut s, &mut e, local_ms)?;
+        }
         if matches!(e.clock, PaperClock::Replay { .. }) {
             e.advance_replay_time(local_ms)
                 .map_err(TradingVenueError::Paper)?;
@@ -609,6 +821,9 @@ impl TradingVenue for PaperTradingVenue {
         self.engine.lock().unwrap().recorder.clone()
     }
     fn has_pending_operations(&self) -> bool {
+        if !self.execution_access {
+            return false;
+        }
         let s = self.state.lock().unwrap();
         !s.operations.is_empty()
             || s.events
@@ -616,19 +831,17 @@ impl TradingVenue for PaperTradingVenue {
                 .any(|v| matches!(v.event, Internal::Publish { .. }))
     }
     fn paper_settlement_status(&self) -> Option<PaperSettlementStatus> {
+        if !self.execution_access {
+            return None;
+        }
         let s = self.state.lock().unwrap();
-        let mut status = self.engine.lock().unwrap().settlement_status();
-        status.latency_model = s.latency;
-        status.pending_operation_details = s.operations.values().cloned().collect();
-        status.pending_operations = s.operations.len()
-            + s.events
-                .values()
-                .filter(|v| matches!(v.event, Internal::Publish { .. }))
-                .count();
-        status.unsettled |= status.pending_operations > 0;
+        let status = s.settlement_status(&self.engine.lock().unwrap());
         Some(status)
     }
     fn record_paper_settlement(&self) {
+        if !self.execution_access {
+            return;
+        }
         let s = self.state.lock().unwrap();
         let engine = self.engine.lock().unwrap();
         let force = engine.recorder.as_ref().is_some_and(|r| {
@@ -650,6 +863,7 @@ impl TradingVenue for PaperTradingVenue {
                     .filter(|v| matches!(v.event, Internal::Publish { .. }))
                     .count();
             data["latency_model"] = serde_json::json!(s.latency);
+            data["simulation"] = serde_json::json!(s.simulation_active.then_some(s.simulation));
             data["pending_operations"] = serde_json::json!(pending);
             data["pending_operation_details"] =
                 serde_json::json!(s.operations.values().collect::<Vec<_>>());
@@ -658,6 +872,9 @@ impl TradingVenue for PaperTradingVenue {
         });
     }
     fn mark_market_incomplete(&self, reason: &str) {
+        if !self.execution_access {
+            return;
+        }
         self.engine.lock().unwrap().mark_incomplete(reason);
     }
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
@@ -718,6 +935,25 @@ impl TradingVenue for PaperTradingVenue {
         Ok(())
     }
     fn on_market_event_recovering(&self, event: &MarketEvent) -> Result<(), TradingVenueError> {
+        self.apply_market(event, None)
+    }
+    fn on_simulation_market(
+        &self,
+        event: &MarketEvent,
+        received_at_ms: i64,
+    ) -> Result<(), TradingVenueError> {
+        self.apply_market(event, Some(received_at_ms))
+    }
+}
+impl PaperTradingVenue {
+    fn apply_market(
+        &self,
+        event: &MarketEvent,
+        received_at_ms: Option<i64>,
+    ) -> Result<(), TradingVenueError> {
+        if !self.execution_access {
+            return Err(TradingVenueError::Unavailable);
+        }
         {
             let mut s = self
                 .state
@@ -728,7 +964,7 @@ impl TradingVenue for PaperTradingVenue {
                 .lock()
                 .map_err(|_| TradingVenueError::StatePoisoned)?;
             let before = snapshot(&e);
-            e.apply_market_event(event);
+            e.apply_timed_market_event(event, received_at_ms);
             if snapshot(&e) != before {
                 s.publish_market(&e, local_now(&e)?)?;
             }
