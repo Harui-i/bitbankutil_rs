@@ -8,7 +8,10 @@ use crate::{
     paper_execution::{PaperExecutionError, PaperTimeModel},
     trading_venue::TradingVenue,
 };
-use std::collections::BTreeMap;
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap, VecDeque},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationConfig {
@@ -65,6 +68,29 @@ struct InternalMarket {
     exchange_at_ms: i64,
     input: MarketInput,
 }
+// market_sequenceがキーの末尾にあるため、同一時刻・同一取引所sequenceでも一意。
+#[derive(Clone)]
+struct MarketEntry {
+    key: (i64, u64, u64),
+    event: InternalMarket,
+}
+impl PartialEq for MarketEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+impl Eq for MarketEntry {}
+impl PartialOrd for MarketEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for MarketEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
 #[derive(Clone)]
 struct Delivery<C> {
     id: Option<InputId>,
@@ -73,14 +99,32 @@ struct Delivery<C> {
 
 /// 戦略・口座に依存しない入力処理を事前計算した結果。
 #[derive(Clone)]
-pub(crate) struct PreparedAdmission<C> {
+pub(crate) struct PreparedAdmission {
     sequence: u64,
     market_sequence: u64,
     last_receipt_ms: Option<i64>,
-    markets: Vec<((i64, u64, u64), InternalMarket)>,
+    markets: std::ops::Range<usize>,
+    deliveries: std::ops::Range<usize>,
+    issues: std::ops::Range<usize>,
+    error: Option<String>,
+}
+
+/// 入力ごとの小さなVecの代わりに、イベント本体をまとめて保持する。
+pub(crate) struct PreparedEvents<C> {
+    pub admissions: Vec<Option<PreparedAdmission>>,
+    markets: Vec<MarketEntry>,
     deliveries: Vec<((i64, u64), Delivery<C>)>,
     issues: Vec<String>,
-    error: Option<String>,
+}
+impl<C> PreparedEvents<C> {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            admissions: Vec::with_capacity(capacity),
+            markets: Vec::with_capacity(capacity),
+            deliveries: Vec::with_capacity(capacity),
+            issues: Vec::new(),
+        }
+    }
 }
 #[derive(Default)]
 struct InternalBook {
@@ -97,8 +141,9 @@ pub struct SimulationDriver<C> {
     sequence: u64,
     market_sequence: u64,
     last_receipt_ms: Option<i64>,
-    markets: BTreeMap<(i64, u64, u64), InternalMarket>,
-    deliveries: BTreeMap<(i64, u64), Delivery<C>>,
+    markets: BinaryHeap<Reverse<MarketEntry>>,
+    // sequence()が受信時刻の逆行を拒否するため、配送は末尾追加・先頭取り出しでよい。
+    deliveries: VecDeque<((i64, u64), Delivery<C>)>,
     strategy_books: BTreeMap<(String, String), BitbankMarketEventConverter>,
     books: BTreeMap<(String, String), InternalBook>,
     seen_books: BTreeMap<(String, String, bool, u64), String>,
@@ -108,47 +153,58 @@ pub struct SimulationDriver<C> {
     market_ids: BTreeMap<u64, u64>,
 }
 impl<C: Send + 'static> SimulationDriver<C> {
-    pub(crate) fn take_admission(&mut self, result: Result<(), String>) -> PreparedAdmission<C> {
+    pub(crate) fn take_admission(
+        &mut self,
+        result: Result<(), String>,
+        events: &mut PreparedEvents<C>,
+    ) -> PreparedAdmission {
+        let markets_start = events.markets.len();
+        let deliveries_start = events.deliveries.len();
+        let issues_start = events.issues.len();
+        events
+            .markets
+            .extend(self.markets.drain().map(|Reverse(entry)| entry));
+        events.deliveries.extend(self.deliveries.drain(..));
+        events.issues.append(&mut self.report.issues);
         PreparedAdmission {
             sequence: self.sequence,
             market_sequence: self.market_sequence,
             last_receipt_ms: self.last_receipt_ms,
-            markets: std::mem::take(&mut self.markets).into_iter().collect(),
-            deliveries: std::mem::take(&mut self.deliveries).into_iter().collect(),
-            issues: std::mem::take(&mut self.report.issues),
+            markets: markets_start..events.markets.len(),
+            deliveries: deliveries_start..events.deliveries.len(),
+            issues: issues_start..events.issues.len(),
             error: result.err(),
         }
     }
-    pub(crate) fn compile_markets(&mut self, admissions: &mut [Option<PreparedAdmission<C>>]) {
-        let mut order = Vec::new();
-        for (record, admission) in admissions.iter().enumerate() {
-            if let Some(admission) = admission {
-                order.extend(
-                    admission
-                        .markets
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (key, _))| (*key, record, index)),
-                );
-            }
-        }
-        order.sort_unstable_by_key(|(key, _, _)| *key);
-        for (_, record, index) in order {
-            let input = &mut admissions[record].as_mut().unwrap().markets[index].1.input;
+    pub(crate) fn compile_markets(&mut self, events: &mut PreparedEvents<C>) {
+        let mut order: Vec<_> = (0..events.markets.len()).collect();
+        order.sort_unstable_by_key(|&index| events.markets[index].key);
+        for index in order {
+            let input = &mut events.markets[index].event.input;
             let raw = std::mem::replace(input, MarketInput::Compiled(Ok(None)));
             *input = MarketInput::Compiled(self.convert_internal(raw));
         }
     }
-    pub(crate) fn admit_prepared(&mut self, admission: &PreparedAdmission<C>) -> Result<(), String>
+    pub(crate) fn admit_prepared(
+        &mut self,
+        admission: &PreparedAdmission,
+        events: &PreparedEvents<C>,
+    ) -> Result<(), String>
     where
         C: Clone,
     {
         self.sequence = admission.sequence;
         self.market_sequence = admission.market_sequence;
         self.last_receipt_ms = admission.last_receipt_ms;
-        self.markets.extend(admission.markets.iter().cloned());
-        self.deliveries.extend(admission.deliveries.iter().cloned());
-        for issue in &admission.issues {
+        for entry in &events.markets[admission.markets.clone()] {
+            self.markets.push(Reverse(entry.clone()));
+        }
+        self.deliveries.extend(
+            events.deliveries[admission.deliveries.clone()]
+                .iter()
+                .cloned(),
+        );
+        for issue in &events.issues[admission.issues.clone()] {
             self.mark_incomplete(issue.clone());
         }
         admission.error.clone().map_or(Ok(()), Err)
@@ -164,8 +220,8 @@ impl<C: Send + 'static> SimulationDriver<C> {
             sequence: 0,
             market_sequence: 0,
             last_receipt_ms: None,
-            markets: BTreeMap::new(),
-            deliveries: BTreeMap::new(),
+            markets: BinaryHeap::new(),
+            deliveries: VecDeque::new(),
             strategy_books: BTreeMap::new(),
             books: BTreeMap::new(),
             seen_books: BTreeMap::new(),
@@ -227,16 +283,16 @@ impl<C: Send + 'static> SimulationDriver<C> {
             .market_sequence
             .checked_add(1)
             .ok_or("market sequence overflow")?;
-        self.markets.insert(
-            (at, order, self.market_sequence),
-            InternalMarket {
+        self.markets.push(Reverse(MarketEntry {
+            key: (at, order, self.market_sequence),
+            event: InternalMarket {
                 input_sequence: self.sequence,
                 id,
                 received_at_ms: received,
                 exchange_at_ms: exchange,
                 input,
             },
-        );
+        }));
         Ok(())
     }
     /// 生のbitbank板を別々のconverterへ渡す。streamは接続世代を含む識別子。
@@ -339,13 +395,13 @@ impl<C: Send + 'static> SimulationDriver<C> {
             )?,
         }
         if let Some(event) = event {
-            self.deliveries.insert(
+            self.deliveries.push_back((
                 (received, seq),
                 Delivery {
                     id,
                     event: BotEvent::Market(event),
                 },
-            );
+            ));
         }
         Ok(())
     }
@@ -417,7 +473,7 @@ impl<C: Send + 'static> SimulationDriver<C> {
             }
         }
         self.deliveries
-            .insert((received, seq), Delivery { id, event });
+            .push_back(((received, seq), Delivery { id, event }));
         Ok(())
     }
     fn convert_internal(&mut self, input: MarketInput) -> Result<Option<MarketEvent>, String> {
@@ -490,10 +546,10 @@ impl<C: Send + 'static> SimulationDriver<C> {
             }
             let next = self
                 .markets
-                .first_key_value()
-                .map(|(k, _)| k.0)
+                .peek()
+                .map(|Reverse(entry)| entry.key.0)
                 .into_iter()
-                .chain(self.deliveries.first_key_value().map(|(k, _)| k.0))
+                .chain(self.deliveries.front().map(|(k, _)| k.0))
                 .chain(runner.next_internal_time())
                 .min();
             let Some(time) = next.filter(|t| *t <= limit) else {
@@ -502,14 +558,18 @@ impl<C: Send + 'static> SimulationDriver<C> {
             runner.advance_time(time).map_err(|e| format!("{e:?}"))?;
             while self
                 .markets
-                .first_key_value()
-                .is_some_and(|(k, _)| k.0 == time)
+                .peek()
+                .is_some_and(|Reverse(entry)| entry.key.0 == time)
             {
-                let (_, entry) = self.markets.pop_first().unwrap();
+                let Reverse(MarketEntry { event: entry, .. }) = self.markets.pop().unwrap();
                 let market_id = runner.venue().recorder().map(|recorder| {
                     if self
                         .deliveries
-                        .contains_key(&(entry.received_at_ms, entry.input_sequence))
+                        .binary_search_by_key(
+                            &(entry.received_at_ms, entry.input_sequence),
+                            |(key, _)| *key,
+                        )
+                        .is_ok()
                     {
                         *self
                             .market_ids
@@ -546,12 +606,8 @@ impl<C: Send + 'static> SimulationDriver<C> {
                 .venue()
                 .process_internal_events(time)
                 .map_err(|e| format!("{e:?}"))?;
-            while self
-                .deliveries
-                .first_key_value()
-                .is_some_and(|(k, _)| k.0 == time)
-            {
-                let ((_, sequence), entry) = self.deliveries.pop_first().unwrap();
+            while self.deliveries.front().is_some_and(|(k, _)| k.0 == time) {
+                let ((_, sequence), entry) = self.deliveries.pop_front().unwrap();
                 let market_id = if matches!(entry.event, BotEvent::Market(_)) {
                     self.market_ids
                         .remove(&sequence)
@@ -584,5 +640,60 @@ impl<C: Send + 'static> SimulationDriver<C> {
         }
         self.report.received_through_ms = Some(received_through);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn entry(key: (i64, u64, u64)) -> MarketEntry {
+        MarketEntry {
+            key,
+            event: InternalMarket {
+                input_sequence: key.2,
+                id: None,
+                received_at_ms: key.2 as i64,
+                exchange_at_ms: key.0,
+                input: MarketInput::Compiled(Ok(None)),
+            },
+        }
+    }
+
+    #[test]
+    fn market_heap_preserves_timestamp_and_sequence_order() {
+        let mut queue = BinaryHeap::new();
+        let mut reference = BTreeMap::new();
+        let mut random = 123_u64;
+        for sequence in 0..4000 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            // 同時刻、同一取引所sequence、逆順に到着する発生時刻を混ぜる。
+            let key = ((random % 31) as i64 - 15, random % 7, sequence);
+            queue.push(Reverse(entry(key)));
+            reference.insert(key, sequence as i64);
+            if random & 3 != 0 {
+                let (key, received) = reference.pop_first().unwrap();
+                let actual = queue.pop().unwrap().0;
+                assert_eq!((actual.key, actual.event.received_at_ms), (key, received));
+            }
+            assert_eq!(
+                queue
+                    .peek()
+                    .map(|Reverse(entry): &Reverse<MarketEntry>| entry.key.0),
+                reference.first_key_value().map(|(key, _)| key.0)
+            );
+            assert_eq!(queue.len(), reference.len());
+        }
+        while let Some((key, received)) = reference.pop_first() {
+            let actual = queue.pop().unwrap().0;
+            assert_eq!((actual.key, actual.event.received_at_ms), (key, received));
+        }
+        assert!(queue.pop().is_none());
+        assert_eq!(
+            queue
+                .peek()
+                .map(|Reverse(entry): &Reverse<MarketEntry>| entry.key.0),
+            None
+        );
     }
 }

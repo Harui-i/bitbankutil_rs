@@ -54,7 +54,7 @@ impl PreparedReplay {
     ) -> io::Result<CompiledReplay<'_, C>> {
         let mut driver = crate::simulation::SimulationDriver::new(config, time_model)
             .map_err(|e| invalid(format!("{e:?}")))?;
-        let mut admissions = Vec::with_capacity(self.records.len());
+        let mut events = crate::simulation::PreparedEvents::new(self.records.len());
         for entry in &self.records {
             let record = &entry.record;
             let received = (record.received_at_micros / 1000) as i64;
@@ -78,14 +78,15 @@ impl PreparedReplay {
                     .map(|event| driver.admit_event(received, id, BotEvent::Custom(event))),
                 _ => None,
             };
-            admissions.push(result.map(|result| driver.take_admission(result)));
+            let admission = result.map(|result| driver.take_admission(result, &mut events));
+            events.admissions.push(admission);
         }
-        driver.compile_markets(&mut admissions);
+        driver.compile_markets(&mut events);
         Ok(CompiledReplay {
             input: self,
             config,
             time_model,
-            admissions,
+            events,
         })
     }
     pub fn new(
@@ -172,7 +173,7 @@ pub struct CompiledReplay<'a, C> {
     input: &'a PreparedReplay,
     config: crate::simulation::SimulationConfig,
     time_model: crate::paper_execution::PaperTimeModel,
-    admissions: Vec<Option<crate::simulation::PreparedAdmission<C>>>,
+    events: crate::simulation::PreparedEvents<C>,
 }
 impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
     pub async fn run<S: BotStrategy<V, CustomEvent = C>, V: TradingVenue>(
@@ -191,7 +192,7 @@ impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
                 ..Default::default()
             };
         }
-        let mut admissions = self.admissions.iter();
+        let mut admissions = self.events.admissions.iter();
         run_validated_simulation_replay(
             runner,
             self.input
@@ -214,7 +215,7 @@ impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
                     .next()
                     .unwrap()
                     .as_ref()
-                    .map(|admission| driver.admit_prepared(admission))
+                    .map(|admission| driver.admit_prepared(admission, &self.events))
             },
         )
         .await
