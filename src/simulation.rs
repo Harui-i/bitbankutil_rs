@@ -13,6 +13,120 @@ use std::{
     collections::{BTreeMap, BinaryHeap, VecDeque},
 };
 
+/// 同一の市場・操作・配送順序をasync戦略と同期戦略で共有する内部境界。
+pub(crate) trait ReplayRuntime {
+    type CustomEvent: Send + 'static;
+    fn simulation_config(&self) -> Option<SimulationConfig>;
+    fn simulation_time_model(&self) -> PaperTimeModel;
+    fn begin_simulation(&mut self) -> Result<(), String>;
+    fn mark_market_incomplete(&mut self, reason: &str);
+    fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder>;
+    fn paper_settlement_status(&self) -> Option<crate::paper_execution::PaperSettlementStatus>;
+    fn record_paper_settlement(&self);
+    fn on_simulation_market(
+        &mut self,
+        event: &MarketEvent,
+        received_at_ms: i64,
+    ) -> Result<(), String>;
+    fn process_internal_events(&mut self, time: i64) -> Result<(), String>;
+    fn advance_time(&mut self, time: i64) -> Result<(), String>;
+    fn next_internal_time(&self) -> Option<i64>;
+    fn now_ms(&self) -> Option<i64>;
+    fn pending_scheduled(&self) -> Vec<crate::bitbank_bot::ScheduledEventInfo>;
+    fn handler_pending(&self) -> bool;
+    fn pending_delivery_count(&self) -> usize;
+    fn stop_pending_handler(&mut self);
+    fn enqueue_simulation_delivery(
+        &mut self,
+        time: i64,
+        id: Option<InputId>,
+        market_id: Option<u64>,
+        event: BotEvent<Self::CustomEvent>,
+        recovery: bool,
+    ) -> Result<(), String>;
+    fn tick(&mut self, time: i64) -> impl std::future::Future<Output = Result<(), String>>;
+}
+impl<S: BotStrategy<V>, V: TradingVenue> ReplayRuntime for BotRunner<S, V> {
+    type CustomEvent = S::CustomEvent;
+    fn simulation_config(&self) -> Option<SimulationConfig> {
+        self.venue().simulation_config()
+    }
+    fn simulation_time_model(&self) -> PaperTimeModel {
+        self.venue().simulation_time_model()
+    }
+    fn begin_simulation(&mut self) -> Result<(), String> {
+        self.venue()
+            .begin_simulation()
+            .map_err(|e| format!("{e:?}"))
+    }
+    fn mark_market_incomplete(&mut self, reason: &str) {
+        self.venue().mark_market_incomplete(reason)
+    }
+    fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
+        self.venue().recorder()
+    }
+    fn paper_settlement_status(&self) -> Option<crate::paper_execution::PaperSettlementStatus> {
+        self.venue().paper_settlement_status()
+    }
+    fn record_paper_settlement(&self) {
+        self.venue().record_paper_settlement()
+    }
+    fn on_simulation_market(
+        &mut self,
+        event: &MarketEvent,
+        received_at_ms: i64,
+    ) -> Result<(), String> {
+        self.venue()
+            .on_simulation_market(event, received_at_ms)
+            .map_err(|e| format!("{e:?}"))
+    }
+    fn process_internal_events(&mut self, time: i64) -> Result<(), String> {
+        self.venue()
+            .process_internal_events(time)
+            .map_err(|e| format!("{e:?}"))
+    }
+    fn advance_time(&mut self, time: i64) -> Result<(), String> {
+        self.advance_time(time).map_err(|e| format!("{e:?}"))
+    }
+    fn next_internal_time(&self) -> Option<i64> {
+        self.next_internal_time()
+    }
+    fn now_ms(&self) -> Option<i64> {
+        self.now_ms()
+    }
+    fn pending_scheduled(&self) -> Vec<crate::bitbank_bot::ScheduledEventInfo> {
+        self.pending_scheduled()
+    }
+    fn handler_pending(&self) -> bool {
+        self.handler_pending()
+    }
+    fn pending_delivery_count(&self) -> usize {
+        self.pending_delivery_count()
+    }
+    fn stop_pending_handler(&mut self) {
+        self.stop_pending_handler()
+    }
+    fn enqueue_simulation_delivery(
+        &mut self,
+        time: i64,
+        id: Option<InputId>,
+        market_id: Option<u64>,
+        event: BotEvent<Self::CustomEvent>,
+        recovery: bool,
+    ) -> Result<(), String> {
+        self.enqueue_simulation_delivery(time, id, market_id, event, recovery)
+            .map_err(|e| format!("{e:?}"))
+    }
+    async fn tick(&mut self, time: i64) -> Result<(), String> {
+        if self.next_internal_time().is_some_and(|t| t <= time) {
+            self.process_next_internal(true)
+                .await
+                .map_err(|e| format!("{e:?}"))
+        } else {
+            self.poll_replay().await.map_err(|e| format!("{e:?}"))
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SimulationConfig {
     pub lookahead_ms: i64,
@@ -526,8 +640,18 @@ impl<C: Send + 'static> SimulationDriver<C> {
         end: Option<i64>,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(), String> {
+        self.advance_runtime(runner, received_through, end, cancel)
+            .await
+    }
+    pub(crate) async fn advance_runtime<R: ReplayRuntime<CustomEvent = C>>(
+        &mut self,
+        runner: &mut R,
+        received_through: i64,
+        end: Option<i64>,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), String> {
         for issue in &self.report.issues[self.reported_issues..] {
-            runner.venue().mark_market_incomplete(issue);
+            runner.mark_market_incomplete(issue);
         }
         self.reported_issues = self.report.issues.len();
         let mut limit = self
@@ -555,14 +679,14 @@ impl<C: Send + 'static> SimulationDriver<C> {
             let Some(time) = next.filter(|t| *t <= limit) else {
                 break;
             };
-            runner.advance_time(time).map_err(|e| format!("{e:?}"))?;
+            runner.advance_time(time)?;
             while self
                 .markets
                 .peek()
                 .is_some_and(|Reverse(entry)| entry.key.0 == time)
             {
                 let Reverse(MarketEntry { event: entry, .. }) = self.markets.pop().unwrap();
-                let market_id = runner.venue().recorder().map(|recorder| {
+                let market_id = runner.recorder().map(|recorder| {
                     if self
                         .deliveries
                         .binary_search_by_key(
@@ -585,7 +709,7 @@ impl<C: Send + 'static> SimulationDriver<C> {
                     input_id: entry.id.clone(),
                     ..Default::default()
                 };
-                if let Some(recorder) = runner.venue().recorder() {
+                if let Some(recorder) = runner.recorder() {
                     crate::execution_recording::sync_scope(context.clone(), || {
                         recorder.record_lazy("simulation_market", || serde_json::json!({
                         "received_at_ms":entry.received_at_ms,"exchange_at_ms":entry.exchange_at_ms,"simulation_local_ms":time,"input_id":entry.id
@@ -595,47 +719,29 @@ impl<C: Send + 'static> SimulationDriver<C> {
                 let event = self.convert_internal(entry.input)?;
                 if let Some(event) = event {
                     crate::execution_recording::sync_scope(context, || {
-                        runner
-                            .venue()
-                            .on_simulation_market(&event, entry.received_at_ms)
-                    })
-                    .map_err(|e| format!("{e:?}"))?;
+                        runner.on_simulation_market(&event, entry.received_at_ms)
+                    })?;
                 }
             }
-            runner
-                .venue()
-                .process_internal_events(time)
-                .map_err(|e| format!("{e:?}"))?;
+            runner.process_internal_events(time)?;
             while self.deliveries.front().is_some_and(|(k, _)| k.0 == time) {
                 let ((_, sequence), entry) = self.deliveries.pop_front().unwrap();
                 let market_id = if matches!(entry.event, BotEvent::Market(_)) {
                     self.market_ids
                         .remove(&sequence)
-                        .or_else(|| runner.venue().recorder().map(|r| r.next_id()))
+                        .or_else(|| runner.recorder().map(|r| r.next_id()))
                 } else {
                     None
                 };
-                runner
-                    .enqueue_simulation_delivery(time, entry.id, market_id, entry.event, true)
-                    .map_err(|e| format!("{e:?}"))?;
+                runner.enqueue_simulation_delivery(time, entry.id, market_id, entry.event, true)?;
             }
             // process_next_internalは予約イベントも処理する。市場・口座処理は上で完了済み。
-            if runner.next_internal_time().is_some_and(|t| t <= time) {
-                runner
-                    .process_next_internal(true)
-                    .await
-                    .map_err(|e| format!("{e:?}"))?;
-            } else {
-                runner.poll_replay().await.map_err(|e| format!("{e:?}"))?;
-            }
+            runner.tick(time).await?;
             self.report.evaluated_through_ms = Some(time);
         }
         if runner.now_ms().is_some_and(|t| t <= limit) {
-            runner.advance_time(limit).map_err(|e| format!("{e:?}"))?;
-            runner
-                .venue()
-                .process_internal_events(limit)
-                .map_err(|e| format!("{e:?}"))?;
+            runner.advance_time(limit)?;
+            runner.process_internal_events(limit)?;
             self.report.evaluated_through_ms = Some(limit);
         }
         self.report.received_through_ms = Some(received_through);

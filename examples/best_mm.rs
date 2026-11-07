@@ -55,6 +55,145 @@ impl MyBot {
         }
     }
 
+    fn orders_for_account(
+        &self,
+        account: bitbankutil_rs::trading_venue::AccountSnapshot,
+    ) -> Result<
+        Option<(
+            Vec<DesiredLimitOrder>,
+            Vec<bitbankutil_rs::order_domain::OpenOrder>,
+            Amount,
+            Amount,
+        )>,
+        bitbankutil_rs::book_units::NumericError,
+    > {
+        let current_orders = account.open_orders;
+        let asset_name = self.bot_config.pair.split('_').next().unwrap();
+        let Some(btc_balance_snapshot) = account
+            .balances
+            .iter()
+            .find(|asset| asset.asset == asset_name)
+        else {
+            log::error!("account snapshot is missing {}", asset_name);
+            return Ok(None);
+        };
+        let Some(jpy_balance_snapshot) = account.balances.iter().find(|asset| asset.asset == "jpy")
+        else {
+            log::error!("account snapshot is missing jpy");
+            return Ok(None);
+        };
+        log::debug!("active orders: {:?}", current_orders);
+
+        let mut btc_locked_jpy_amount: Amount = literal("0");
+        // このペアのロックされたjpyを計算する
+        for current_order in &current_orders {
+            if current_order.order_type == OrderType::Limit && current_order.side == OrderSide::Buy
+            {
+                btc_locked_jpy_amount = btc_locked_jpy_amount.checked_add(
+                    current_order
+                        .price
+                        .expect("limit order must have a price")
+                        .notional(current_order.remaining_amount)?,
+                )?;
+            }
+        }
+
+        let btc_free_amount = btc_balance_snapshot.free_amount;
+        let btc_locked_amount = btc_balance_snapshot.locked_amount;
+        let btc_amount = btc_free_amount
+            .checked_add(btc_locked_amount)?
+            .to_quantity()?;
+        let btc_amount_remainder = btc_amount.checked_remainder(self.bot_config.lot)?;
+        let jpy_free_amount = jpy_balance_snapshot.free_amount;
+        let jpy_amount = jpy_free_amount.checked_add(btc_locked_jpy_amount)?;
+
+        log::debug!(
+            "btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}",
+            btc_free_amount,
+            btc_locked_amount,
+            jpy_free_amount,
+            btc_locked_jpy_amount
+        );
+        log::info!(
+            "{}_amount: {}, jpy_amount: {}",
+            self.bot_config.pair.clone(),
+            btc_amount,
+            jpy_amount
+        );
+
+        let best_ask_price = self.depth.best_ask().unwrap().0.clone();
+        let best_bid_price = self.depth.best_bid().unwrap().0.clone();
+
+        let has_bestask_order = current_orders.iter().any(|ord| {
+            ord.side == OrderSide::Sell
+                && ord.order_type == OrderType::Limit
+                && ord.price == Some(best_ask_price)
+        });
+
+        let has_bestbid_order = current_orders.iter().any(|ord| {
+            ord.side == OrderSide::Buy
+                && ord.order_type == OrderType::Limit
+                && ord.price == Some(best_bid_price)
+        });
+
+        let sell_price = {
+            if has_bestask_order
+                || best_ask_price.checked_sub(self.bot_config.tick_size)? == best_bid_price
+            {
+                best_ask_price
+            } else {
+                best_ask_price.checked_sub(self.bot_config.tick_size)?
+            }
+        };
+
+        let buy_price = {
+            if has_bestbid_order
+                || best_bid_price.checked_add(self.bot_config.tick_size)? == best_ask_price
+            {
+                best_bid_price
+            } else {
+                best_bid_price.checked_add(self.bot_config.tick_size)?
+            }
+        };
+
+        log::debug!("target spread: {}", sell_price.checked_sub(buy_price)?);
+
+        let can_buy = jpy_amount >= buy_price.notional(self.bot_config.lot)?
+            && btc_amount.checked_add(self.bot_config.lot)? <= self.bot_config.max_lot;
+        let can_sell = btc_amount >= self.bot_config.lot;
+
+        let mut wanna_place_orders = Vec::new();
+
+        if can_buy {
+            wanna_place_orders.push(DesiredLimitOrder::limit(
+                self.bot_config.pair.clone(),
+                OrderSide::Buy,
+                self.bot_config.lot,
+                buy_price,
+            ));
+        }
+
+        if can_sell {
+            wanna_place_orders.push(DesiredLimitOrder::limit(
+                self.bot_config.pair.clone(),
+                OrderSide::Sell,
+                self.bot_config.lot.checked_add(btc_amount_remainder)?,
+                sell_price,
+            ));
+        }
+
+        log::debug!("wanna_place_orders: {:?}", wanna_place_orders);
+        log::info!(
+            "evaluated asset: {}",
+            sell_price.notional(btc_amount)?.checked_add(jpy_amount)?
+        );
+        Ok(Some((
+            wanna_place_orders,
+            current_orders,
+            btc_free_amount,
+            jpy_free_amount,
+        )))
+    }
     async fn update_orders<V: TradingVenue>(
         &mut self,
         venue: &V,
@@ -86,128 +225,11 @@ impl MyBot {
                     return Ok(());
                 }
             };
-            let current_orders = account.open_orders;
-            let asset_name = self.bot_config.pair.split('_').next().unwrap();
-            let Some(btc_balance_snapshot) = account
-                .balances
-                .iter()
-                .find(|asset| asset.asset == asset_name)
+            let Some((wanna_place_orders, current_orders, btc_free_amount, jpy_free_amount)) =
+                self.orders_for_account(account)?
             else {
-                log::error!("account snapshot is missing {}", asset_name);
                 return Ok(());
             };
-            let Some(jpy_balance_snapshot) =
-                account.balances.iter().find(|asset| asset.asset == "jpy")
-            else {
-                log::error!("account snapshot is missing jpy");
-                return Ok(());
-            };
-            log::debug!("active orders: {:?}", current_orders);
-
-            let mut btc_locked_jpy_amount: Amount = literal("0");
-            // このペアのロックされたjpyを計算する
-            for current_order in &current_orders {
-                if current_order.order_type == OrderType::Limit
-                    && current_order.side == OrderSide::Buy
-                {
-                    btc_locked_jpy_amount = btc_locked_jpy_amount.checked_add(
-                        current_order
-                            .price
-                            .expect("limit order must have a price")
-                            .notional(current_order.remaining_amount)?,
-                    )?;
-                }
-            }
-
-            let btc_free_amount = btc_balance_snapshot.free_amount;
-            let btc_locked_amount = btc_balance_snapshot.locked_amount;
-            let btc_amount = btc_free_amount
-                .checked_add(btc_locked_amount)?
-                .to_quantity()?;
-            let btc_amount_remainder = btc_amount.checked_remainder(self.bot_config.lot)?;
-            let jpy_free_amount = jpy_balance_snapshot.free_amount;
-            let jpy_amount = jpy_free_amount.checked_add(btc_locked_jpy_amount)?;
-
-            log::debug!(
-                "btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}",
-                btc_free_amount,
-                btc_locked_amount,
-                jpy_free_amount,
-                btc_locked_jpy_amount
-            );
-            log::info!(
-                "{}_amount: {}, jpy_amount: {}",
-                self.bot_config.pair.clone(),
-                btc_amount,
-                jpy_amount
-            );
-
-            let best_ask_price = self.depth.best_ask().unwrap().0.clone();
-            let best_bid_price = self.depth.best_bid().unwrap().0.clone();
-
-            let has_bestask_order = current_orders.iter().any(|ord| {
-                ord.side == OrderSide::Sell
-                    && ord.order_type == OrderType::Limit
-                    && ord.price == Some(best_ask_price)
-            });
-
-            let has_bestbid_order = current_orders.iter().any(|ord| {
-                ord.side == OrderSide::Buy
-                    && ord.order_type == OrderType::Limit
-                    && ord.price == Some(best_bid_price)
-            });
-
-            let sell_price = {
-                if has_bestask_order
-                    || best_ask_price.checked_sub(self.bot_config.tick_size)? == best_bid_price
-                {
-                    best_ask_price
-                } else {
-                    best_ask_price.checked_sub(self.bot_config.tick_size)?
-                }
-            };
-
-            let buy_price = {
-                if has_bestbid_order
-                    || best_bid_price.checked_add(self.bot_config.tick_size)? == best_ask_price
-                {
-                    best_bid_price
-                } else {
-                    best_bid_price.checked_add(self.bot_config.tick_size)?
-                }
-            };
-
-            log::debug!("target spread: {}", sell_price.checked_sub(buy_price)?);
-
-            let can_buy = jpy_amount >= buy_price.notional(self.bot_config.lot)?
-                && btc_amount.checked_add(self.bot_config.lot)? <= self.bot_config.max_lot;
-            let can_sell = btc_amount >= self.bot_config.lot;
-
-            let mut wanna_place_orders = Vec::new();
-
-            if can_buy {
-                wanna_place_orders.push(DesiredLimitOrder::limit(
-                    self.bot_config.pair.clone(),
-                    OrderSide::Buy,
-                    self.bot_config.lot,
-                    buy_price,
-                ));
-            }
-
-            if can_sell {
-                wanna_place_orders.push(DesiredLimitOrder::limit(
-                    self.bot_config.pair.clone(),
-                    OrderSide::Sell,
-                    self.bot_config.lot.checked_add(btc_amount_remainder)?,
-                    sell_price,
-                ));
-            }
-
-            log::debug!("wanna_place_orders: {:?}", wanna_place_orders);
-            log::info!(
-                "evaluated asset: {}",
-                sell_price.notional(btc_amount)?.checked_add(jpy_amount)?
-            );
             bitbankutil_rs::order_manager::place_wanna_orders_concurrent(
                 wanna_place_orders,
                 current_orders,
@@ -354,18 +376,20 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
     let mode = args.get(1).map(String::as_str);
     env_logger::builder()
-        .filter_level(if mode == Some("--backtest") {
-            LevelFilter::Warn
-        } else {
-            LevelFilter::Info
-        })
+        .filter_level(
+            if matches!(mode, Some("--backtest" | "--backtest-commands")) {
+                LevelFilter::Warn
+            } else {
+                LevelFilter::Info
+            },
+        )
         .format_timestamp_millis()
         .init();
 
     let expected_len = match mode {
         Some("--live") => 7,
         Some("--paper") => 10,
-        Some("--backtest") => {
+        Some("--backtest" | "--backtest-commands") => {
             if args.len() == 12 {
                 12
             } else {
@@ -384,9 +408,12 @@ async fn main() {
         log::error!(
             "   or: cargo run --release --example best_mm -- --backtest PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL LOOKAHEAD_MS MANIFEST [REPEATS]"
         );
+        log::error!(
+            "   --backtest-commands uses the experimental synchronous event/command API with the same arguments"
+        );
         std::process::exit(2);
     }
-    if mode == Some("--backtest") {
+    if matches!(mode, Some("--backtest" | "--backtest-commands")) {
         if let Err(error) = run_backtest(&args).await {
             eprintln!("{error}");
             std::process::exit(1);
@@ -507,6 +534,64 @@ async fn run_backtest(args: &[String]) -> Result<(), String> {
         serde_json::json!({"prepare_seconds":parsed_seconds,"compile_seconds":started.elapsed().as_secs_f64(),"records":prepared.len()})
     );
     for repeat in 0..repeats {
+        if args[1] == "--backtest-commands" {
+            use bitbankutil_rs::{
+                event_strategy::EventRunner,
+                paper_execution::{OwnedPaperExecution, PaperClock},
+            };
+            let config =
+                PaperExecutionConfig::bitbank_spot_default(pair).map_err(|e| format!("{e:?}"))?;
+            let engine = PaperExecutionEngine::new(
+                config,
+                PaperClock::Replay { now_ms: 0 },
+                vec![
+                    BalanceSnapshot {
+                        asset: pair.split('_').next().unwrap().into(),
+                        free_amount: base_initial,
+                        locked_amount: literal("0"),
+                        onhand_amount: base_initial,
+                    },
+                    BalanceSnapshot {
+                        asset: "jpy".into(),
+                        free_amount: jpy_initial,
+                        locked_amount: literal("0"),
+                        onhand_amount: jpy_initial,
+                    },
+                ],
+                None,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            let execution = OwnedPaperExecution::new(
+                engine,
+                Default::default(),
+                SimulationConfig { lookahead_ms },
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            let mut runner = EventRunner::new(
+                CommandBot::new(MyBot::new(pair.clone(), tick_size, refresh, lot, max_lot)),
+                execution,
+            );
+            let started = Instant::now();
+            let report = compiled
+                .run_commands(
+                    &mut runner,
+                    ReplayOptions {
+                        recovery: true,
+                        end_time_ms: None,
+                    },
+                    &AtomicBool::new(false),
+                )
+                .await;
+            let elapsed = started.elapsed().as_secs_f64();
+            println!(
+                "{}",
+                serde_json::json!({"repeat":repeat,"seconds":elapsed,"records":report.records,"error":report.error,"incomplete":report.incomplete,"final_time_ms":report.final_time_ms,"balances":runner.execution().balances(),"orders":runner.execution().open_orders()})
+            );
+            if let Some(error) = report.error {
+                return Err(error);
+            }
+            continue;
+        }
         let (venue, _) = paper_venue(pair, base_initial, jpy_initial, lookahead_ms)?;
         let mut runner = BotRunner::new(
             MyBot::new(pair.clone(), tick_size, refresh, lot, max_lot),
@@ -535,6 +620,10 @@ async fn run_backtest(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[path = "best_mm/commands.rs"]
+mod commands;
+use commands::CommandBot;
 
 #[cfg(test)]
 #[path = "best_mm/tests.rs"]
