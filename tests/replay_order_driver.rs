@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     bitbank_bot::{BotContext, BotEvent, BotRunner, BotStrategy},
     market_event::MarketEvent,
@@ -232,6 +233,7 @@ async fn joinset_orders_do_not_skip_intervening_input_or_sleep_in_realtime() {
             },
         ),
     ];
+    support::configure(runner.venue(), 0);
     let report = run_replay_with_options(
         &mut runner,
         input,
@@ -276,6 +278,7 @@ async fn evaluation_boundary_reports_unfinished_handler_without_finishing_order(
             },
         ),
     ];
+    support::configure(runner.venue(), 0);
     let report = run_replay_with_options(
         &mut runner,
         input,
@@ -404,6 +407,25 @@ async fn same_ms_market_inputs_register_before_due_order_activation() {
         ),
     ];
     input.extend(markets);
+    let mut heartbeat = capture(
+        3,
+        1150,
+        CapturePayload::Message {
+            message: serde_json::Value::Null,
+        },
+    )
+    .unwrap();
+    input.push(Ok(heartbeat.clone()));
+    heartbeat.0 = 1;
+    heartbeat.1.sequence = 4;
+    heartbeat.1.exchange = "bitbank".into();
+    heartbeat.1.stream = "public".into();
+    heartbeat.1.session_id = "market".into();
+    heartbeat.1.payload = CapturePayload::Message {
+        message: serde_json::json!(["heartbeat"]),
+    };
+    input.push(Ok(heartbeat));
+    support::configure(runner.venue(), 50);
     let report = run_replay_with_options(
         &mut runner,
         input,
@@ -417,7 +439,7 @@ async fn same_ms_market_inputs_register_before_due_order_activation() {
     let second_market = records
         .iter()
         .position(|r| {
-            r.kind == "input_registered"
+            r.kind == "simulation_market"
                 && r.input_id
                     .as_ref()
                     .is_some_and(|i| i.session_id == "market" && i.sequence == 3)

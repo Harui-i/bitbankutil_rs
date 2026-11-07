@@ -282,8 +282,14 @@ fn paper_venue(
     pair: &str,
     base_initial: Decimal,
     jpy_initial: Decimal,
-    max_trade_delay_ms: i64,
-) -> Result<PaperTradingVenue, String> {
+    lookahead_ms: i64,
+) -> Result<
+    (
+        PaperTradingVenue,
+        bitbankutil_rs::paper_execution::PaperDiagnostics,
+    ),
+    String,
+> {
     if base_initial < Decimal::ZERO || jpy_initial < Decimal::ZERO {
         return Err("paper initial balances must be non-negative".to_owned());
     }
@@ -312,13 +318,13 @@ fn paper_venue(
         balances,
         None,
     )
-    .map_err(|err| format!("{err:?}"))?
-    .with_max_trade_delay_ms(max_trade_delay_ms)
     .map_err(|err| format!("{err:?}"))?;
-    log::info!(
-        "paper assumes max trade delay {max_trade_delay_ms} ms; stream completeness is unverified"
-    );
-    Ok(PaperTradingVenue::new(engine))
+    log::info!("paper lookahead {lookahead_ms} ms; stream completeness is assumed");
+    let (venue, diagnostics) = PaperTradingVenue::with_diagnostics(engine);
+    let venue = venue
+        .with_simulation_config(bitbankutil_rs::simulation::SimulationConfig { lookahead_ms })
+        .map_err(|e| format!("{e:?}"))?;
+    Ok((venue, diagnostics))
 }
 
 #[tokio::main]
@@ -340,7 +346,7 @@ async fn main() {
             "usage: cargo run --example best_mm -- --live PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT"
         );
         log::error!(
-            "   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL MAX_TRADE_DELAY_MS"
+            "   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL LOOKAHEAD_MS"
         );
         std::process::exit(2);
     }
@@ -377,10 +383,9 @@ async fn main() {
         Some("--paper") => {
             let base_initial: Decimal = args[7].parse().expect("invalid base initial balance");
             let jpy_initial: Decimal = args[8].parse().expect("invalid JPY initial balance");
-            let max_trade_delay_ms = args[9].parse().expect("invalid max trade delay");
-            let venue = paper_venue(&pair, base_initial, jpy_initial, max_trade_delay_ms)
+            let lookahead_ms = args[9].parse().expect("invalid max trade delay");
+            let (venue, engine) = paper_venue(&pair, base_initial, jpy_initial, lookahead_ms)
                 .expect("invalid paper setup");
-            let engine = venue.engine();
             let runtime = spawn_bot(
                 venue,
                 pair,
@@ -399,8 +404,7 @@ async fn main() {
         tokio::time::sleep(Duration::from_secs(1)).await;
         if let Some(engine) = &paper_engine {
             // 各イベントは記録時にログ出力済み。取得済みの履歴を定期的に破棄する。
-            let mut engine = engine.lock().expect("paper engine lock poisoned");
-            engine.drain_events();
+            let engine = engine.snapshot();
             log::debug!(
                 "paper settlement (provisional): {:?}",
                 engine.settlement_status()

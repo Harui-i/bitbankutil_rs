@@ -5,7 +5,7 @@ use crate::bitbank_bot::{
 };
 use crate::bitbank_structs::*;
 use crate::trading_venue::TradingVenue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -13,7 +13,7 @@ use std::{
     path::Path,
 };
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CaptureRecord {
     pub format_version: u32,
     pub exchange: String,
@@ -25,7 +25,7 @@ pub struct CaptureRecord {
     #[serde(flatten)]
     pub payload: CapturePayload,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CapturePayload {
     Connected {
@@ -355,6 +355,7 @@ pub struct ReplayOptions {
 #[derive(Debug, Default, serde::Serialize)]
 pub struct ReplayReport {
     pub settlement: Option<crate::paper_execution::PaperSettlementStatus>,
+    pub simulation: Option<crate::simulation::SimulationReport>,
     pub end_reason: ReplayEndReason,
     pub input_exhausted: bool,
     pub final_time_ms: Option<i64>,
@@ -459,6 +460,9 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
     cancel: &std::sync::atomic::AtomicBool,
     mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
 ) -> ReplayReport {
+    if runner.venue().simulation_config().is_some() {
+        return run_simulation_replay(runner, input, options, cancel, custom).await;
+    }
     let recovery = options.recovery;
     let mut report = ReplayReport::default();
     let mut adapter = ReplayAdapter::default();
@@ -644,6 +648,323 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
             "pending_handler":report.pending_handler,"pending_deliveries":report.pending_deliveries,
             "records":report.records,"incomplete":report.incomplete,"interrupted":report.interrupted,
             "gaps":report.gaps,"last_input":report.last_input,"error":report.error}));
+    }
+    report
+}
+
+// sourceごとの安全な終端を先に確定するための、一時ファイルによる2-pass入力。
+// 一般のIteratorを全件メモリ保持せず、元JSONも戦略への配送まで保持する。
+struct SimulationSpool {
+    file: Option<std::io::BufWriter<std::fs::File>>,
+    path: std::path::PathBuf,
+}
+impl SimulationSpool {
+    fn new() -> io::Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "bb-simulation-{}-{}.jsonl",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(file) => {
+                    return Ok(Self {
+                        file: Some(std::io::BufWriter::new(file)),
+                        path,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    fn append(&mut self, source: usize, record: &CaptureRecord) -> io::Result<()> {
+        use std::io::Write;
+        let file = self.file.as_mut().unwrap();
+        serde_json::to_writer(&mut *file, &(source, record)).map_err(invalid)?;
+        file.write_all(b"\n")
+    }
+    fn reader(
+        &mut self,
+    ) -> io::Result<impl Iterator<Item = io::Result<(usize, CaptureRecord)>> + '_> {
+        use std::io::{Seek, Write};
+        let file = self.file.as_mut().unwrap();
+        file.flush()?;
+        file.get_mut().rewind()?;
+        Ok(BufReader::new(file.get_ref())
+            .lines()
+            .map(|line| serde_json::from_str(&line?).map_err(invalid)))
+    }
+}
+impl Drop for SimulationSpool {
+    fn drop(&mut self) {
+        self.file.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// captureを検証してsourceごとの末尾を確定し、同じ先読みドライバへ渡す。
+async fn run_simulation_replay<S: BotStrategy<V>, V: TradingVenue>(
+    runner: &mut BotRunner<S, V>,
+    input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
+    options: ReplayOptions,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
+) -> ReplayReport {
+    let mut report = ReplayReport::default();
+    let config = runner.venue().simulation_config().unwrap();
+    let mut validation = ReplayValidation::default();
+    let mut spool = match SimulationSpool::new() {
+        Ok(spool) => spool,
+        Err(error) => {
+            runner
+                .venue()
+                .mark_market_incomplete("simulation spool creation failed");
+            report.error = Some(error.to_string());
+            report.end_reason = ReplayEndReason::Error;
+            report.incomplete = true;
+            return report;
+        }
+    };
+    let mut tails = BTreeMap::new();
+    // EOFのsource別時刻を調べる。入力は一時ファイルへ退避し、メモリへ蓄積しない。
+    for item in input {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            report.interrupted = true;
+            break;
+        }
+        match item.and_then(|(source, record)| {
+            validation.validate(source, &record)?;
+            Ok((source, record))
+        }) {
+            Ok((source, record)) => {
+                let Ok(time) = i64::try_from(record.received_at_micros / 1000) else {
+                    report.error = Some("time overflow".into());
+                    break;
+                };
+                tails.insert(source, time);
+                if let Err(error) = spool.append(source, &record) {
+                    report.error = Some(error.to_string());
+                    break;
+                }
+            }
+            Err(e) => {
+                report.error = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    report.input_exhausted = report.error.is_none() && !report.interrupted;
+    let mut driver = match crate::simulation::SimulationDriver::new(
+        config,
+        runner.venue().simulation_time_model(),
+    ) {
+        Ok(driver) => driver,
+        Err(e) => {
+            report.error = Some(format!("{e:?}"));
+            report.end_reason = ReplayEndReason::Error;
+            report.incomplete = true;
+            runner
+                .venue()
+                .mark_market_incomplete("invalid simulation configuration");
+            report.settlement = runner.venue().paper_settlement_status();
+            return report;
+        }
+    };
+    if let Err(e) = runner.venue().begin_simulation() {
+        report.error = Some(format!("{e:?}"));
+    }
+    let end = tails
+        .values()
+        .min()
+        .and_then(|t| config.progress_limit(*t).ok())
+        .map(|end| {
+            options
+                .end_time_ms
+                .map_or(end, |requested| requested.min(end))
+        });
+    if end.zip(runner.now_ms()).is_some_and(|(end, now)| end < now) {
+        report.error = Some("evaluation end precedes runner clock".into());
+    }
+    if report.error.is_none() && !report.interrupted {
+        let reader = spool.reader();
+        if let Err(error) = &reader {
+            report.error = Some(error.to_string());
+        }
+        let mut records = reader.into_iter().flatten().peekable();
+        while let Some(item) = records.next() {
+            let (source, record) = match item {
+                Ok(item) => item,
+                Err(error) => {
+                    report.error = Some(error.to_string());
+                    break;
+                }
+            };
+            let received = (record.received_at_micros / 1000) as i64;
+            if end
+                .and_then(|t| t.checked_add(config.lookahead_ms))
+                .is_some_and(|through| received > through)
+            {
+                break;
+            }
+            let id = InputId {
+                session_id: record.session_id.clone(),
+                sequence: record.sequence,
+            };
+            report.last_input = Some(id.clone());
+            let admitted = match &record.payload {
+                CapturePayload::Connected { subscriptions, .. } => {
+                    let subscriptions = subscriptions
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let candidates = report
+                        .gaps
+                        .iter_mut()
+                        .filter(|g| {
+                            g.source_index == source
+                                && g.end.is_none()
+                                && !subscriptions.is_empty()
+                                && g.subscriptions == subscriptions
+                        })
+                        .collect::<Vec<_>>();
+                    if candidates.len() == 1 {
+                        candidates.into_iter().next().unwrap().end = Some(id.clone());
+                    }
+                    Ok(())
+                }
+                CapturePayload::Disconnected { reason } => {
+                    driver.mark_incomplete(format!("source {source} disconnected: {reason}"));
+                    if !options.recovery {
+                        runner.venue().mark_market_incomplete(reason);
+                    }
+                    report.gaps.push(ReplayGap {
+                        source_index: source,
+                        connection_id: record.connection_id.clone(),
+                        reason: reason.clone(),
+                        subscriptions: validation.sources[&source].subscriptions
+                            [&record.connection_id]
+                            .clone(),
+                        start: id.clone(),
+                        end: None,
+                    });
+                    if !options.recovery {
+                        report.end_reason = ReplayEndReason::Disconnected;
+                    }
+                    Ok(())
+                }
+                CapturePayload::Message { message } if record.exchange == "bitbank" => {
+                    match decode_bitbank(message) {
+                        Ok(Some((pair, message))) => driver.admit_bitbank(
+                            received,
+                            Some(id),
+                            format!("{source}:{}", record.connection_id),
+                            pair,
+                            message,
+                        ),
+                        Ok(None) => Ok(()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                CapturePayload::Message { .. } => match custom(&record) {
+                    Ok(Some(event)) => {
+                        driver.admit_event(received, Some(id), BotEvent::Custom(event))
+                    }
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                },
+            };
+            report.records += 1;
+            if let Err(e) = admitted {
+                report.error = Some(e);
+                break;
+            }
+            if report.end_reason == ReplayEndReason::Disconnected {
+                break;
+            }
+            // 同msの全入力を登録してから境界を進める。
+            if records.peek().is_none_or(|item| {
+                item.as_ref()
+                    .is_ok_and(|(_, r)| r.received_at_micros / 1000 > received as u64)
+            }) {
+                if let Err(e) = driver.advance_to(runner, received, end, cancel).await {
+                    report.interrupted = cancel.load(std::sync::atomic::Ordering::Relaxed);
+                    if !report.interrupted {
+                        report.error = Some(e);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if report.error.is_none()
+        && !report.interrupted
+        && report.end_reason != ReplayEndReason::Disconnected
+    {
+        if let Some(end) = end {
+            match end.checked_add(config.lookahead_ms) {
+                Some(through) => {
+                    if let Err(error) = driver.advance_to(runner, through, Some(end), cancel).await
+                    {
+                        report.interrupted = cancel.load(std::sync::atomic::Ordering::Relaxed);
+                        if !report.interrupted {
+                            report.error = Some(error);
+                        }
+                    }
+                }
+                None => report.error = Some("simulation horizon overflow".into()),
+            }
+        }
+    }
+    if report.error.is_some() || report.interrupted {
+        runner
+            .venue()
+            .mark_market_incomplete("simulation error or interruption");
+    }
+    if report.error.is_some() {
+        report.end_reason = ReplayEndReason::Error;
+    } else if report.interrupted {
+        report.end_reason = ReplayEndReason::Interrupted;
+    } else if report.end_reason != ReplayEndReason::Disconnected
+        && options
+            .end_time_ms
+            .zip(end)
+            .is_some_and(|(requested, end)| requested == end)
+    {
+        report.end_reason = ReplayEndReason::EndTime;
+    }
+    report.final_time_ms = runner.now_ms();
+    report.pending_scheduled = runner.pending_scheduled();
+    report.pending_handler = runner.handler_pending();
+    report.pending_deliveries = runner.pending_delivery_count();
+    report.simulation = Some(driver.report());
+    report.settlement = runner.venue().paper_settlement_status();
+    report.incomplete = report.error.is_some()
+        || report.interrupted
+        || !report.gaps.is_empty()
+        || report.pending_handler
+        || report.pending_deliveries > 0
+        || report.settlement.as_ref().is_some_and(|s| s.unsettled);
+    runner.stop_pending_handler();
+    runner.venue().record_paper_settlement();
+    if let Some(recorder) = runner.venue().recorder() {
+        recorder.record_lazy("replay_outcome", || {
+            let mut value = serde_json::to_value(&report).unwrap();
+            value["settlement"] = report
+                .settlement
+                .as_ref()
+                .map(|s| s.recording_summary())
+                .unwrap_or(Value::Null);
+            value
+        });
     }
     report
 }

@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     bitbank_bot::{BotContext, BotEvent, BotRunner, BotStrategy},
     execution_recording::{ExecutionRecorder, JsonlSink},
@@ -12,6 +13,7 @@ use bitbankutil_rs::{
 };
 use serde_json::json;
 use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+use support::TestDiagnostics;
 
 fn engine(clock: PaperClock, recording: bool) -> PaperExecutionEngine {
     offset_engine(clock, recording, 0)
@@ -212,6 +214,7 @@ async fn replay(recording: bool, slow: bool, delta: i64) -> (AccountSnapshot, Ve
                 {"transaction_id":2,"side":"buy","price":"100","amount":"0.5","executed_at":1111}
             ]}}}]}),
         ),
+        (1600, json!({"kind":"message", "message":["heartbeat"]})),
     ];
     let input = messages.into_iter().enumerate().map(|(i, (time, payload))| {
         if slow { std::thread::sleep(std::time::Duration::from_millis(3)); }
@@ -220,14 +223,15 @@ async fn replay(recording: bool, slow: bool, delta: i64) -> (AccountSnapshot, Ve
         r.as_object_mut().unwrap().extend(payload.as_object().unwrap().clone());
         Ok((0, serde_json::from_value::<CaptureRecord>(r).unwrap()))
     });
+    support::configure(runner.venue(), 300);
     let report = run_replay(&mut runner, input, false, &AtomicBool::new(false), |_| {
         Ok(None)
     })
     .await;
     assert!(report.error.is_none(), "{:?}", report.error);
-    assert_eq!(report.records, 4);
+    assert_eq!(report.records, 5);
     assert_eq!(report.settlement.as_ref().unwrap().time_model, model(delta));
-    assert!(report.incomplete); // EOFはストリーム完了の証明にならない。
+    assert!(!report.incomplete); // 待機時間を引いた境界まで評価済み。
     v.advance_trade_watermark(1300).unwrap(); // この合成入力の既知の完了境界。
     let mut account = v.account_snapshot("btc_jpy").await.unwrap();
     // 比較対象は取引結果。ローカル採取時刻のδ依存は照会の専用テストで検証する。

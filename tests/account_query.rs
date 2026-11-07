@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     bitbank_bot::*, execution_recording::*, market_event::*, order_domain::*, paper_execution::*,
     replay::*, trading_venue::*,
@@ -10,6 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use support::TestDiagnostics;
 
 #[derive(Clone, Default)]
 struct Records(Arc<Mutex<Vec<ExecutionRecord>>>);
@@ -281,11 +283,18 @@ fn inputs(delta: i64) -> Vec<io::Result<(usize, CaptureRecord)>> {
                 message: serde_json::json!(2),
             },
         ),
+        capture(
+            4,
+            1100 - delta,
+            CapturePayload::Message {
+                message: serde_json::Value::Null,
+            },
+        ),
     ]
 }
 fn custom(r: &CaptureRecord) -> io::Result<Option<u8>> {
     Ok(match &r.payload {
-        CapturePayload::Message { message } => Some(message.as_u64().unwrap() as u8),
+        CapturePayload::Message { message } => message.as_u64().map(|n| n as u8),
         _ => None,
     })
 }
@@ -312,6 +321,7 @@ async fn query_wait_preserves_receive_time_fifo_price_and_context_without_wall_s
                 },
                 v.clone(),
             );
+            support::configure(runner.venue(), 0);
             let report = run_replay_with_options(
                 &mut runner,
                 inputs(delta),
@@ -337,7 +347,7 @@ async fn query_wait_preserves_receive_time_fifo_price_and_context_without_wall_s
                 Some(110.into())
             );
             assert_eq!(snapshots.lock().unwrap().len(), 1);
-            assert_eq!(report.settlement.unwrap().uncertain_query_observations, 2);
+            assert_eq!(report.settlement.unwrap().uncertain_query_observations, 0);
             if recording {
                 let records = records.0.lock().unwrap();
                 for kind in [
@@ -400,6 +410,7 @@ async fn query_end_disconnect_and_interruption_keep_pending_requests() {
             }
             r
         });
+        support::configure(runner.venue(), 0);
         let report = run_replay_with_options(
             &mut runner,
             iter,
@@ -420,7 +431,7 @@ async fn query_end_disconnect_and_interruption_keep_pending_requests() {
         assert_eq!(
             report.end_reason,
             match mode {
-                0 => ReplayEndReason::EndTime,
+                0 => ReplayEndReason::Eof,
                 1 => ReplayEndReason::Disconnected,
                 _ => ReplayEndReason::Interrupted,
             }
@@ -529,6 +540,15 @@ async fn real_market_applies_once_during_query_and_same_ms_sampling_is_after_mar
     input.insert(1, Ok(connected));
     input.push(market_record(2,1025,serde_json::json!(["message",{"room_name":"transactions_btc_jpy","message":{"data":{"transactions":[{"transaction_id":1,"side":"buy","price":"101","amount":"1","executed_at":1025}]}}}])));
     input.push(market_record(3,1030,serde_json::json!(["message",{"room_name":"transactions_btc_jpy","message":{"data":{"transactions":[{"transaction_id":2,"side":"sell","price":"100","amount":"1","executed_at":1030}]}}}])));
+    input.push(capture(
+        3,
+        1100,
+        CapturePayload::Message {
+            message: serde_json::Value::Null,
+        },
+    ));
+    input.push(market_record(4, 1100, serde_json::json!(["heartbeat"])));
+    support::configure(runner.venue(), 0);
     let report = run_replay_with_options(
         &mut runner,
         input,
@@ -545,7 +565,7 @@ async fn real_market_applies_once_during_query_and_same_ms_sampling_is_after_mar
     let s = &samples[0];
     assert_eq!(s.open_orders[0].order_id, OrderId(1)); // 1020に採取。
     assert_eq!(balance(s, "jpy"), Decimal::from(100)); // 1030の確定後に採取。
-    assert_eq!(s.query.as_ref().unwrap().balances.watermark_ms, Some(1029));
+    assert_eq!(s.query.as_ref().unwrap().balances.watermark_ms, Some(1030));
     let events = v.engine().lock().unwrap().drain_events();
     assert_eq!(
         events
@@ -558,7 +578,7 @@ async fn real_market_applies_once_during_query_and_same_ms_sampling_is_after_mar
     assert_eq!(
         records
             .iter()
-            .filter(|r| r.kind == "input_registered"
+            .filter(|r| r.kind == "simulation_market"
                 && r.input_id
                     .as_ref()
                     .is_some_and(|id| id.session_id == "bb" && id.sequence > 1))
@@ -614,6 +634,9 @@ async fn paper_runtime_awaits_queries_and_preserves_sequential_delivery() {
     }
     let v = venue(PaperClock::Realtime, 0, None);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let v = v
+        .with_simulation_config(bitbankutil_rs::simulation::SimulationConfig { lookahead_ms: 0 })
+        .unwrap();
     let runtime = BitbankBotBuilder::new(RuntimeStrategy(tx), v).spawn();
     let sender = runtime.event_sender();
     sender.send(BotEvent::Custom(1)).await.unwrap();
@@ -682,13 +705,11 @@ async fn lightweight_sampling_preserves_issues_and_recording_parity() {
         v.on_market_event(&trade(950)).unwrap();
         v.advance_trade_watermark(1000).unwrap();
         v.mark_market_incomplete("settlement issue first");
-        v.engine()
-            .lock()
-            .unwrap()
-            .apply_market_event(&MarketEvent::DepthUpdated {
-                pair: "btc_jpy".into(),
-                depth: MarketDepthSnapshot::new(Default::default(), Default::default(), 1000),
-            });
+        v.on_market_event_recovering(&MarketEvent::DepthUpdated {
+            pair: "btc_jpy".into(),
+            depth: MarketDepthSnapshot::new(Default::default(), Default::default(), 1000),
+        })
+        .unwrap();
         let status = v.paper_settlement_status().unwrap();
         assert!(!status.issues.is_empty() && !status.model_issues.is_empty());
         let issues: Vec<_> = status

@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     bitbank_bot::*,
     execution_recording::*,
@@ -10,6 +11,7 @@ use bitbankutil_rs::{
 };
 use rust_decimal::Decimal;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use support::TestDiagnostics;
 
 fn engine(
     clock: PaperClock,
@@ -278,6 +280,7 @@ async fn end_boundary_retains_sent_operation_without_activating_or_unlocking_it(
             },
         )),
     ];
+    support::configure(runner.venue(), 0);
     let report = run_replay_with_options(
         &mut runner,
         input,
@@ -291,7 +294,7 @@ async fn end_boundary_retains_sent_operation_without_activating_or_unlocking_it(
     .await;
     assert!(report.error.is_none(), "{:?}", report.error);
     assert!(report.pending_handler && report.incomplete);
-    assert_eq!(report.final_time_ms, Some(1030));
+    assert_eq!(report.final_time_ms, Some(1000));
     assert_eq!(venue.pending_operations().len(), 2);
     assert_eq!(venue.engine().lock().unwrap().open_orders().len(), 1);
     assert_eq!(
@@ -326,7 +329,7 @@ async fn realtime_operations_progress_without_market_input_and_share_handles() {
         },
     )
     .unwrap();
-    let shared = PaperTradingVenue::from_shared(venue.engine());
+    let shared = venue.clone();
     let id = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         venue.place_order(sell(100).into()),

@@ -97,7 +97,8 @@ async fn runtime_applies_trade_before_bot_reads_account() {
 
 #[tokio::test]
 async fn paper_mode_needs_no_credentials_and_exposes_initial_balances() {
-    let venue = paper_venue("btc_jpy", Decimal::ZERO, Decimal::new(1_000_000, 0), 1000).unwrap();
+    let (venue, _) =
+        paper_venue("btc_jpy", Decimal::ZERO, Decimal::new(1_000_000, 0), 1000).unwrap();
     let snapshot = venue.account_snapshot("btc_jpy").await.unwrap();
     assert!(snapshot.open_orders.is_empty());
     assert_eq!(

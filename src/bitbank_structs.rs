@@ -475,7 +475,7 @@ pub struct BitbankDepthWhole {
     /// Unixタイムスタンプ（ミリ秒）。
     pub timestamp: i64,
     /// シーケンスID。
-    sequenceId: String,
+    pub(crate) sequenceId: String,
 }
 
 /// 板情報（差分と全体の統合管理）。

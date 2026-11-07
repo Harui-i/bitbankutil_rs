@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::{
     bitbank_bot::{BotContext, BotEvent, BotRunner, BotStrategy},
     market_event::{MarketDepthSnapshot, MarketEvent, MarketTrade},
@@ -12,6 +13,7 @@ use bitbankutil_rs::{
 use rust_decimal::Decimal;
 use serde_json::json;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use support::TestDiagnostics;
 
 fn engine(base: i64, quote: i64, fee: Decimal) -> PaperExecutionEngine {
     let mut config = PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap();
@@ -335,11 +337,7 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
                     .await
                     .map_err(|e| format!("{e:?}"))?;
             }
-            BotEvent::Custom(Action::Settle) => {
-                ctx.venue()
-                    .advance_trade_watermark(1400)
-                    .map_err(|e| format!("{e:?}"))?;
-            }
+            BotEvent::Custom(Action::Settle) => {}
             BotEvent::Market(MarketEvent::Transactions { transactions, .. }) => {
                 assert_eq!(ctx.now_ms(), 1400);
                 assert_eq!(transactions[0].executed_at, 1100);
@@ -351,7 +349,7 @@ impl BotStrategy<PaperTradingVenue> for Strategy {
                         .unwrap()
                         .balances[1]
                         .free_amount,
-                    Decimal::ZERO
+                    Decimal::from(99)
                 );
             }
             _ => {}
@@ -379,6 +377,11 @@ async fn strategy_path(replay: bool) -> (Vec<(i64, AccountSnapshot)>, Vec<PaperE
         venue.clone(),
     );
     if !replay {
+        use bitbankutil_rs::simulation::{SimulationConfig, SimulationDriver};
+        venue.begin_simulation().unwrap();
+        let mut driver =
+            SimulationDriver::new(SimulationConfig { lookahead_ms: 400 }, Default::default())
+                .unwrap();
         for (time, event) in [
             (1000, BotEvent::Custom(Action::Place)),
             (1200, BotEvent::Custom(Action::Cancel)),
@@ -392,8 +395,12 @@ async fn strategy_path(replay: bool) -> (Vec<(i64, AccountSnapshot)>, Vec<PaperE
             ),
             (1500, BotEvent::Custom(Action::Settle)),
         ] {
-            runner.process(time, None, event).await.unwrap();
+            driver.admit_event(time, None, event).unwrap();
         }
+        driver
+            .advance_to(&mut runner, 1900, Some(1500), &AtomicBool::new(false))
+            .await
+            .unwrap();
     } else {
         let mut input = Vec::new();
         let mut seq = [0, 0];
@@ -424,6 +431,9 @@ async fn strategy_path(replay: bool) -> (Vec<(i64, AccountSnapshot)>, Vec<PaperE
             json!({"kind":"message","message":["message",{"room_name":"transactions_btc_jpy","message":{"data":{"transactions":[{"transaction_id":1,"side":"buy","price":"101","amount":"1","executed_at":1100}]}}}]}),
         );
         push(1, 1500, json!({"kind":"message","message":"settle"}));
+        push(0, 1900, json!({"kind":"message","message":["heartbeat"]}));
+        push(1, 1900, json!({"kind":"message","message":null}));
+        support::configure(runner.venue(), 400);
         let report = run_replay(
             &mut runner,
             input,
@@ -431,18 +441,20 @@ async fn strategy_path(replay: bool) -> (Vec<(i64, AccountSnapshot)>, Vec<PaperE
             &AtomicBool::new(false),
             |record| {
                 Ok(match &record.payload {
-                    CapturePayload::Message { message } => Some(match message.as_str().unwrap() {
-                        "place" => Action::Place,
-                        "cancel" => Action::Cancel,
-                        _ => Action::Settle,
-                    }),
+                    CapturePayload::Message { message } if message.is_string() => {
+                        Some(match message.as_str().unwrap() {
+                            "place" => Action::Place,
+                            "cancel" => Action::Cancel,
+                            _ => Action::Settle,
+                        })
+                    }
                     _ => None,
                 })
             },
         )
         .await;
         assert!(report.error.is_none(), "{:?}", report.error);
-        assert!(report.incomplete); // 1400より先の末尾はまだ未確定。
+        assert!(!report.incomplete, "{report:?}"); // 先読み末尾を除いた境界まで評価済み。
     }
     let events = venue.engine().lock().unwrap().drain_events();
     let observations = observations.lock().unwrap().clone();
@@ -658,10 +670,7 @@ async fn paper_runtime_delivers_market_after_known_disconnect_without_releasing_
         .await
         .unwrap();
     runtime.shutdown().await.unwrap();
-    assert_eq!(
-        *observations.lock().unwrap(),
-        [Decimal::ZERO, Decimal::ZERO]
-    );
+    assert_eq!(*observations.lock().unwrap(), Vec::<Decimal>::new());
     assert_eq!(
         venue.account_snapshot("btc_jpy").await.unwrap().balances,
         before
