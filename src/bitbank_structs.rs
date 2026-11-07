@@ -477,7 +477,7 @@ pub struct BitbankDepthWhole {
     pub(crate) sequenceId: String,
 }
 
-pub(crate) type SharedDepthLevels = Arc<crate::book_units::Levels>;
+pub(crate) type SharedDepthLevels = Arc<crate::depth_levels::DepthLevels>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DepthDelta {
@@ -507,10 +507,10 @@ pub struct BitbankDepth {
 
 impl Depth for BitbankDepth {
     fn asks(&self) -> &BTreeMap<Price, Quantity> {
-        &self.asks
+        self.asks.materialize()
     }
     fn bids(&self) -> &BTreeMap<Price, Quantity> {
-        &self.bids
+        self.bids.materialize()
     }
     fn best_ask(&self) -> Option<(&Price, &Quantity)> {
         self.asks.first_key_value()
@@ -540,8 +540,8 @@ impl BitbankDepth {
             diff_buffer: BTreeMap::new(),
             last_whole: None,
             last_diff: None,
-            asks: Arc::new(crate::book_units::Levels::new()),
-            bids: Arc::new(crate::book_units::Levels::new()),
+            asks: Arc::new(crate::depth_levels::DepthLevels::default()),
+            bids: Arc::new(crate::depth_levels::DepthLevels::default()),
             last_timestamp: 0,
             is_complete: false,
             revision: Arc::new(()),
@@ -572,6 +572,16 @@ impl BitbankDepth {
             ] {
                 changes.extend(levels.iter().map(|&(price, amount)| (side, price, amount)));
             }
+            // 同一価格の最終値だけをqueueへ渡す。差分の適用順と一致させる。
+            changes.sort_by_key(|&(side, price, _)| (side, price));
+            changes.dedup_by(|later, earlier| {
+                if (later.0, later.1) == (earlier.0, earlier.1) {
+                    earlier.2 = later.2;
+                    true
+                } else {
+                    false
+                }
+            });
             if !asks.is_empty() {
                 Self::apply_levels(Arc::make_mut(&mut self.asks), &asks);
             }
@@ -596,9 +606,12 @@ impl BitbankDepth {
         if self.last_whole.is_some_and(|s| seq <= s) {
             return Ok(());
         }
+        let previous = self
+            .is_complete
+            .then(|| (self.revision.clone(), self.asks.clone(), self.bids.clone()));
         self.diff_buffer.retain(|s, _| *s > seq);
-        self.asks = Arc::new(crate::book_units::Levels::new());
-        self.bids = Arc::new(crate::book_units::Levels::new());
+        self.asks = Arc::new(crate::depth_levels::DepthLevels::default());
+        self.bids = Arc::new(crate::depth_levels::DepthLevels::default());
         Self::apply_levels(Arc::make_mut(&mut self.asks), &asks);
         Self::apply_levels(Arc::make_mut(&mut self.bids), &bids);
         self.revision = Arc::new(());
@@ -608,6 +621,46 @@ impl BitbankDepth {
         self.last_diff = Some(self.last_diff.unwrap_or(seq).max(seq));
         self.process_diff_buffer();
         self.is_complete = true;
+        // 全体配信でも、同じ接続の直前板との差は一度計算すれば反復再生で共有できる。
+        // 消えた価格の0更新も含め、queue側の全価格再走査を避ける。
+        if let Some((previous, old_asks, old_bids)) = previous {
+            let mut changes = Vec::new();
+            for (side, old, new) in [
+                (crate::order_domain::OrderSide::Sell, old_asks, &self.asks),
+                (crate::order_domain::OrderSide::Buy, old_bids, &self.bids),
+            ] {
+                let mut old = old.iter().peekable();
+                let mut new = new.iter().peekable();
+                while old.peek().is_some() || new.peek().is_some() {
+                    match (old.peek(), new.peek()) {
+                        (Some((op, oq)), Some((np, nq))) if op == np => {
+                            if oq != nq {
+                                changes.push((side, **np, **nq));
+                            }
+                            old.next();
+                            new.next();
+                        }
+                        (Some((op, _)), Some((np, _))) if op < np => {
+                            changes.push((side, **op, Quantity::ZERO));
+                            old.next();
+                        }
+                        (Some((op, _)), None) => {
+                            changes.push((side, **op, Quantity::ZERO));
+                            old.next();
+                        }
+                        (_, Some((np, nq))) => {
+                            changes.push((side, **np, **nq));
+                            new.next();
+                        }
+                        (None, None) => break,
+                    }
+                }
+            }
+            self.changes = Some(DepthDelta {
+                previous,
+                levels: changes.into(),
+            });
+        }
         Ok(())
     }
     fn parse_levels(levels: &[Vec<String>], whole: bool) -> Result<Vec<(Price, Quantity)>, String> {
@@ -628,7 +681,7 @@ impl BitbankDepth {
         }
         Ok(parsed)
     }
-    fn apply_levels(book: &mut crate::book_units::Levels, levels: &[(Price, Quantity)]) {
+    fn apply_levels(book: &mut crate::depth_levels::DepthLevels, levels: &[(Price, Quantity)]) {
         if levels.is_empty() {
             return;
         }

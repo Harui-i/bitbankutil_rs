@@ -47,7 +47,9 @@ pub struct SimulationReport {
     pub issues: Vec<String>,
 }
 
+#[derive(Clone)]
 enum MarketInput {
+    Compiled(Result<Option<MarketEvent>, String>),
     Raw {
         stream: String,
         pair: String,
@@ -55,6 +57,7 @@ enum MarketInput {
     },
     Event(MarketEvent),
 }
+#[derive(Clone)]
 struct InternalMarket {
     input_sequence: u64,
     id: Option<InputId>,
@@ -62,9 +65,22 @@ struct InternalMarket {
     exchange_at_ms: i64,
     input: MarketInput,
 }
+#[derive(Clone)]
 struct Delivery<C> {
     id: Option<InputId>,
     event: BotEvent<C>,
+}
+
+/// 戦略・口座に依存しない入力処理を事前計算した結果。
+#[derive(Clone)]
+pub(crate) struct PreparedAdmission<C> {
+    sequence: u64,
+    market_sequence: u64,
+    last_receipt_ms: Option<i64>,
+    markets: Vec<((i64, u64, u64), InternalMarket)>,
+    deliveries: Vec<((i64, u64), Delivery<C>)>,
+    issues: Vec<String>,
+    error: Option<String>,
 }
 #[derive(Default)]
 struct InternalBook {
@@ -92,6 +108,51 @@ pub struct SimulationDriver<C> {
     market_ids: BTreeMap<u64, u64>,
 }
 impl<C: Send + 'static> SimulationDriver<C> {
+    pub(crate) fn take_admission(&mut self, result: Result<(), String>) -> PreparedAdmission<C> {
+        PreparedAdmission {
+            sequence: self.sequence,
+            market_sequence: self.market_sequence,
+            last_receipt_ms: self.last_receipt_ms,
+            markets: std::mem::take(&mut self.markets).into_iter().collect(),
+            deliveries: std::mem::take(&mut self.deliveries).into_iter().collect(),
+            issues: std::mem::take(&mut self.report.issues),
+            error: result.err(),
+        }
+    }
+    pub(crate) fn compile_markets(&mut self, admissions: &mut [Option<PreparedAdmission<C>>]) {
+        let mut order = Vec::new();
+        for (record, admission) in admissions.iter().enumerate() {
+            if let Some(admission) = admission {
+                order.extend(
+                    admission
+                        .markets
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (key, _))| (*key, record, index)),
+                );
+            }
+        }
+        order.sort_unstable_by_key(|(key, _, _)| *key);
+        for (_, record, index) in order {
+            let input = &mut admissions[record].as_mut().unwrap().markets[index].1.input;
+            let raw = std::mem::replace(input, MarketInput::Compiled(Ok(None)));
+            *input = MarketInput::Compiled(self.convert_internal(raw));
+        }
+    }
+    pub(crate) fn admit_prepared(&mut self, admission: &PreparedAdmission<C>) -> Result<(), String>
+    where
+        C: Clone,
+    {
+        self.sequence = admission.sequence;
+        self.market_sequence = admission.market_sequence;
+        self.last_receipt_ms = admission.last_receipt_ms;
+        self.markets.extend(admission.markets.iter().cloned());
+        self.deliveries.extend(admission.deliveries.iter().cloned());
+        for issue in &admission.issues {
+            self.mark_incomplete(issue.clone());
+        }
+        admission.error.clone().map_or(Ok(()), Err)
+    }
     pub fn new(
         config: SimulationConfig,
         time_model: PaperTimeModel,
@@ -361,6 +422,7 @@ impl<C: Send + 'static> SimulationDriver<C> {
     }
     fn convert_internal(&mut self, input: MarketInput) -> Result<Option<MarketEvent>, String> {
         match input {
+            MarketInput::Compiled(event) => event,
             MarketInput::Event(event) => Ok(Some(event)),
             MarketInput::Raw {
                 stream,

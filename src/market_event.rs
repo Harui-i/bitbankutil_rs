@@ -71,14 +71,46 @@ pub struct MarketDepthSnapshot {
 }
 
 impl MarketDepthSnapshot {
+    /// 全板をBTreeMapへ実体化せず、指定sideを価格昇順に走査する。
+    pub fn levels(&self, side: OrderSide) -> impl Iterator<Item = (&Price, &Quantity)> {
+        match side {
+            OrderSide::Buy => &self.bids,
+            OrderSide::Sell => &self.asks,
+        }
+        .iter()
+    }
+    pub fn lowest_price(&self, side: OrderSide) -> Option<Price> {
+        match side {
+            OrderSide::Buy => &self.bids,
+            OrderSide::Sell => &self.asks,
+        }
+        .first_key_value()
+        .map(|(p, _)| *p)
+    }
+    pub fn highest_price(&self, side: OrderSide) -> Option<Price> {
+        match side {
+            OrderSide::Buy => &self.bids,
+            OrderSide::Sell => &self.asks,
+        }
+        .last_key_value()
+        .map(|(p, _)| *p)
+    }
+    pub fn quantity_at(&self, side: OrderSide, price: &Price) -> Option<Quantity> {
+        match side {
+            OrderSide::Buy => &self.bids,
+            OrderSide::Sell => &self.asks,
+        }
+        .get(price)
+        .copied()
+    }
     pub fn new(
         asks: crate::book_units::Levels,
         bids: crate::book_units::Levels,
         last_timestamp: i64,
     ) -> Self {
         Self {
-            asks: Arc::new(asks),
-            bids: Arc::new(bids),
+            asks: Arc::new(asks.into()),
+            bids: Arc::new(bids.into()),
             revision: Arc::new(()),
             changes: None,
             last_timestamp,
@@ -88,8 +120,8 @@ impl MarketDepthSnapshot {
 
     pub fn empty() -> Self {
         Self {
-            asks: Arc::new(crate::book_units::Levels::new()),
-            bids: Arc::new(crate::book_units::Levels::new()),
+            asks: Arc::new(crate::depth_levels::DepthLevels::default()),
+            bids: Arc::new(crate::depth_levels::DepthLevels::default()),
             revision: Arc::new(()),
             changes: None,
             last_timestamp: 0,
@@ -99,7 +131,8 @@ impl MarketDepthSnapshot {
 
     /// 直前の板から継続した更新なら変更価格だけを返す。
     /// 要素は(side, 10^-8単位の価格, 10^-8単位の数量)。数量0は削除。
-    /// 全体板・接続切替・更新の取りこぼしではNoneを返すため全体を再同期する。
+    /// 接続切替・更新の取りこぼしではNoneを返すため全体を再同期する。
+    /// 同じ接続の全体板についても、直前の復元板との差分を返す。
     pub fn changes_since(&self, previous: &Self) -> Option<&[(OrderSide, Price, Quantity)]> {
         if Arc::ptr_eq(&self.revision, &previous.revision) {
             return Some(&[]);
@@ -129,10 +162,10 @@ impl PartialEq for MarketDepthSnapshot {
 
 impl Depth for MarketDepthSnapshot {
     fn asks(&self) -> &BTreeMap<Price, Quantity> {
-        &self.asks
+        self.asks.materialize()
     }
     fn bids(&self) -> &BTreeMap<Price, Quantity> {
-        &self.bids
+        self.bids.materialize()
     }
     fn best_ask(&self) -> Option<(&Price, &Quantity)> {
         self.asks.first_key_value()

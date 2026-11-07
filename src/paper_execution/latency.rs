@@ -82,6 +82,83 @@ struct ScheduledInternal {
 }
 
 #[derive(Debug)]
+enum PendingOperation {
+    Place {
+        id: u64,
+        requested: i64,
+        effective: i64,
+        exchange: Option<i64>,
+        response: i64,
+        order: DesiredLimitOrder,
+        accepted: Option<Option<OrderId>>,
+    },
+    Cancel {
+        id: u64,
+        requested: i64,
+        effective: i64,
+        exchange: Option<i64>,
+        response: i64,
+        orders: Vec<OrderId>,
+    },
+    Query {
+        id: u64,
+        kind: &'static str,
+        pair: String,
+        requested: i64,
+        sample: i64,
+        response: i64,
+        sampled: Option<i64>,
+    },
+}
+impl PendingOperation {
+    fn json(&self) -> serde_json::Value {
+        match self {
+            Self::Place {
+                id,
+                requested,
+                effective,
+                exchange,
+                response,
+                order,
+                accepted,
+            } => {
+                let mut value = serde_json::json!({"id":id,"kind":"place","requested_at_ms":requested,"effective_local_ms":effective,"effective_exchange_ms":exchange,"response_at_ms":response,"order":order});
+                if let Some(accepted) = accepted {
+                    value["order_id"] = serde_json::json!(accepted);
+                    value["phase"] = serde_json::json!("awaiting_response");
+                }
+                value
+            }
+            Self::Cancel {
+                id,
+                requested,
+                effective,
+                exchange,
+                response,
+                orders,
+            } => {
+                serde_json::json!({"id":id,"kind":"cancel","requested_at_ms":requested,"effective_local_ms":effective,"effective_exchange_ms":exchange,"response_at_ms":response,"orders":orders})
+            }
+            Self::Query {
+                id,
+                kind,
+                pair,
+                requested,
+                sample,
+                response,
+                sampled,
+            } => {
+                let mut value = serde_json::json!({"id":id,"kind":kind,"pair":pair,"requested_at_ms":requested,"sample_at_ms":sample,"response_at_ms":response,"phase":if sampled.is_some(){"awaiting_response"}else{"awaiting_sample"}});
+                if let Some(sampled) = sampled {
+                    value["sampled_at_ms"] = serde_json::json!(sampled);
+                }
+                value
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct State {
     latency: PaperLatencyConfig,
     simulation: crate::simulation::SimulationConfig,
@@ -90,7 +167,7 @@ pub(super) struct State {
     events: BTreeMap<(i64, u8, u64), ScheduledInternal>,
     sequence: u64,
     operation: u64,
-    operations: BTreeMap<u64, serde_json::Value>,
+    operations: BTreeMap<u64, PendingOperation>,
     /// ローカル口座は取引所の状態遷移の一貫したprefixを通知する。
     publication_floor: i64,
     waker: Option<Waker>,
@@ -121,7 +198,11 @@ impl State {
         let mut status = engine.settlement_status();
         status.latency_model = self.latency;
         status.simulation = self.simulation_active.then_some(self.simulation);
-        status.pending_operation_details = self.operations.values().cloned().collect();
+        status.pending_operation_details = self
+            .operations
+            .values()
+            .map(PendingOperation::json)
+            .collect();
         status.pending_operations = self.operations.len()
             + self
                 .events
@@ -400,7 +481,7 @@ impl PaperTradingVenue {
             .unwrap()
             .operations
             .values()
-            .cloned()
+            .map(PendingOperation::json)
             .collect()
     }
 
@@ -535,12 +616,26 @@ impl PaperTradingVenue {
             .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
         let (tx, rx) = oneshot::channel();
         s.operation = id;
-        let info = serde_json::json!({"id":id,"kind":"place","requested_at_ms":now,
-            "effective_local_ms":entry,"effective_exchange_ms":self.engine.lock().unwrap().config.time_model.local_to_exchange_ms(entry).ok(),"response_at_ms":response,"order":order});
+        let info = PendingOperation::Place {
+            id,
+            requested: now,
+            effective: entry,
+            exchange: self
+                .engine
+                .lock()
+                .unwrap()
+                .config
+                .time_model
+                .local_to_exchange_ms(entry)
+                .ok(),
+            response,
+            order: order.clone(),
+            accepted: None,
+        };
         record(
             &self.engine.lock().unwrap(),
             "paper_operation_requested",
-            || info.clone(),
+            || info.json(),
         );
         s.operations.insert(id, info);
         s.enqueue(
@@ -573,12 +668,25 @@ impl PaperTradingVenue {
             .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
         let (tx, rx) = oneshot::channel();
         s.operation = id;
-        let info = serde_json::json!({"id":id,"kind":"cancel","requested_at_ms":now,
-            "effective_local_ms":entry,"effective_exchange_ms":self.engine.lock().unwrap().config.time_model.local_to_exchange_ms(entry).ok(),"response_at_ms":response,"orders":orders});
+        let info = PendingOperation::Cancel {
+            id,
+            requested: now,
+            effective: entry,
+            exchange: self
+                .engine
+                .lock()
+                .unwrap()
+                .config
+                .time_model
+                .local_to_exchange_ms(entry)
+                .ok(),
+            response,
+            orders: orders.clone(),
+        };
         record(
             &self.engine.lock().unwrap(),
             "paper_operation_requested",
-            || info.clone(),
+            || info.json(),
         );
         s.operations.insert(id, info);
         s.enqueue(
@@ -733,9 +841,10 @@ impl TradingVenue for PaperTradingVenue {
                         } => {
                             let result = e.place_order(order).map_err(TradingVenueError::Paper);
                             let accepted_id = result.as_ref().ok().and_then(|v| v.order_id);
-                            if let Some(info) = s.operations.get_mut(&id) {
-                                info["order_id"] = serde_json::json!(accepted_id);
-                                info["phase"] = serde_json::json!("awaiting_response");
+                            if let Some(PendingOperation::Place { accepted, .. }) =
+                                s.operations.get_mut(&id)
+                            {
+                                *accepted = Some(accepted_id);
                             }
                             record(&e, "paper_operation_effective", || {
                                 serde_json::json!({"id":id,"local_ms":executed,"scheduled_local_ms":at,
@@ -865,8 +974,12 @@ impl TradingVenue for PaperTradingVenue {
             data["latency_model"] = serde_json::json!(s.latency);
             data["simulation"] = serde_json::json!(s.simulation_active.then_some(s.simulation));
             data["pending_operations"] = serde_json::json!(pending);
-            data["pending_operation_details"] =
-                serde_json::json!(s.operations.values().collect::<Vec<_>>());
+            data["pending_operation_details"] = serde_json::json!(
+                s.operations
+                    .values()
+                    .map(PendingOperation::json)
+                    .collect::<Vec<_>>()
+            );
             data["unsettled"] = serde_json::json!(data["unsettled"] == true || pending > 0);
             data
         });
@@ -880,6 +993,9 @@ impl TradingVenue for PaperTradingVenue {
     fn account_snapshot<'a>(&'a self, pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
         Box::pin(async move {
             let recorder = self.recorder();
+            if recorder.is_none() {
+                return self.query_account(pair).await;
+            }
             crate::execution_recording::operation(
                 recorder.as_ref(),
                 "account_snapshot",
@@ -892,6 +1008,12 @@ impl TradingVenue for PaperTradingVenue {
     fn place_order(&self, request: PlacementRequest) -> TradingVenueFuture<'_, PlacedOrder> {
         Box::pin(async move {
             let recorder = self.recorder();
+            if recorder.is_none() {
+                return self
+                    .submit_place(request.order)?
+                    .await
+                    .map_err(|_| TradingVenueError::Unavailable)?;
+            }
             crate::execution_recording::operation(
                 recorder.as_ref(),
                 "place_order",
@@ -912,6 +1034,12 @@ impl TradingVenue for PaperTradingVenue {
     ) -> TradingVenueFuture<'a, ()> {
         Box::pin(async move {
             let recorder = self.recorder();
+            if recorder.is_none() {
+                return self
+                    .submit_cancel(pair.into(), orders)?
+                    .await
+                    .map_err(|_| TradingVenueError::Unavailable)?;
+            }
             crate::execution_recording::operation(
                 recorder.as_ref(),
                 "cancel_orders",
@@ -963,9 +1091,11 @@ impl PaperTradingVenue {
                 .engine
                 .lock()
                 .map_err(|_| TradingVenueError::StatePoisoned)?;
-            let before = snapshot(&e);
+            // delay境界を自動確定しない入力登録では口座は変わらない。
+            // simulationの口座通知はsettle_simulationが確定時に生成する。
+            let before = e.max_trade_delay_ms.map(|_| snapshot(&e));
             e.apply_timed_market_event(event, received_at_ms);
-            if snapshot(&e) != before {
+            if before.is_some_and(|before| snapshot(&e) != before) {
                 s.publish_market(&e, local_now(&e)?)?;
             }
         }

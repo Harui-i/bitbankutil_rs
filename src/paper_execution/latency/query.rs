@@ -66,13 +66,19 @@ impl PaperTradingVenue {
             .ok_or(TradingVenueError::Paper(PaperExecutionError::InvalidClock))?;
         let (tx, rx) = oneshot::channel();
         s.operation = id;
-        let info = serde_json::json!({"id":id,"kind":endpoint.name(),"pair":pair,
-            "requested_at_ms":now,"sample_at_ms":sample_at,"response_at_ms":response_at,
-            "phase":"awaiting_sample"});
+        let info = PendingOperation::Query {
+            id,
+            kind: endpoint.name(),
+            pair: pair.into(),
+            requested: now,
+            sample: sample_at,
+            response: response_at,
+            sampled: None,
+        };
         record(
             &self.engine.lock().unwrap(),
             "paper_query_requested",
-            || info.clone(),
+            || info.json(),
         );
         s.operations.insert(id, info);
         let enqueued = s.enqueue(
@@ -201,9 +207,8 @@ pub(super) fn process(
                 "local_ms":executed,"success":result.is_ok(),
                 "observation":result.as_ref().ok().map(|p|&p.observation)})
             });
-            if let Some(info) = state.operations.get_mut(&id) {
-                info["phase"] = serde_json::json!("awaiting_response");
-                info["sampled_at_ms"] = serde_json::json!(executed);
+            if let Some(PendingOperation::Query { sampled, .. }) = state.operations.get_mut(&id) {
+                *sampled = Some(executed);
             }
             match add(executed, response_delay) {
                 Ok(at) => {

@@ -4,6 +4,7 @@ pub mod bitbank_public;
 pub mod bitbank_structs;
 #[doc = include_str!("../docs/numeric-types.md")]
 pub mod book_units;
+mod depth_levels;
 pub mod market_event;
 pub mod order_domain;
 pub mod order_manager;
