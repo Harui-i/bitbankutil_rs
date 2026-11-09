@@ -125,7 +125,7 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 
 ```toml
 [dependencies]
-bitbankutil_rs = "0.4.0"
+bitbankutil_rs = "0.4.1"
 ```
 
 API通信には、bitbank対応を追加した`crypto-botters`のforkである
