@@ -5,7 +5,7 @@
 
 |型|内部整数|小数桁|用途|
 |---|---|---:|---|
-|`Price`|i64|8|価格、tick、スプレッド|
+|`Price`|i128|8|価格、tick、スプレッド|
 |`Quantity`|i64|8|板・注文・公開約定の数量、lot|
 |`Rate`|i64|8|手数料率。負値はリベート|
 |`Amount`|i128|24|売買代金、手数料、各資産の残高・拘束額|
@@ -25,7 +25,8 @@ assert_eq!(quantity.to_amount().to_quantity()?, quantity);
 `NumericError::Precision`、範囲超過は`Overflow`です。NaN・Infinity・空白付き数値は拒否します。
 `from_units`は小数点を省いた内部整数から構築します。例えば`Price::from_units(1)`は0.00000001です。
 `From<i32>`は整数の通貨・数量単位から安全に構築します。型間の変換には専用メソッドを使います。
-8桁型の正の上限は92,233,720,368.54775807、Amountは約170兆です。
+Priceの正の上限は約1.7 × 10^30、Quantity・Rateは92,233,720,368.54775807、Amountは約170兆です。
+`Price::from_units`の引数と`Price::units`の戻り値はi128です。
 
 加減算・符号反転は`checked_add`／`checked_sub`／`checked_neg`を使います。
 売買代金のraw値は`price_raw × quantity_raw × 10^8`、手数料は

@@ -181,20 +181,20 @@ macro_rules! fixed {
         }
     };
 }
-fixed!(Price, i64, 8);
+fixed!(Price, i128, 8);
 fixed!(Quantity, i64, 8);
 fixed!(Rate, i64, 8);
 fixed!(Amount, i128, 24);
 impl Price {
     pub fn notional(self, quantity: Quantity) -> Result<Amount, NumericError> {
-        (self.0 as i128)
+        self.0
             .checked_mul(quantity.0 as i128)
             .and_then(|n| n.checked_mul(100_000_000))
             .map(Amount)
             .ok_or(NumericError::Overflow)
     }
     pub fn fee(self, quantity: Quantity, rate: Rate) -> Result<Amount, NumericError> {
-        (self.0 as i128)
+        self.0
             .checked_mul(quantity.0 as i128)
             .and_then(|n| n.checked_mul(rate.0 as i128))
             .map(Amount)
@@ -248,13 +248,16 @@ mod tests {
         ] {
             assert_eq!(s.parse::<Quantity>().unwrap().units(), expected);
         }
-        assert_eq!("92233720368.54775807".parse::<Price>().unwrap(), Price::MAX);
+        assert_eq!(
+            "92233720368.54775807".parse::<Quantity>().unwrap(),
+            Quantity::MAX
+        );
         assert_eq!(
             "-92233720368.54775808".parse::<Quantity>().unwrap(),
             Quantity::MIN
         );
         assert_eq!(
-            "92233720368.54775808".parse::<Price>(),
+            "92233720368.54775808".parse::<Quantity>(),
             Err(NumericError::Overflow)
         );
         for s in ["1e-9", "1.00000000000000000000000000001"] {
@@ -271,6 +274,61 @@ mod tests {
         ] {
             assert_eq!(value.to_string().parse::<Amount>().unwrap(), value);
         }
+    }
+    #[test]
+    fn wide_prices_preserve_exact_boundaries_and_json() {
+        for (text, expected) in [
+            (
+                "92233720368.54775808",
+                Price::from_units(9_223_372_036_854_775_808),
+            ),
+            (
+                "111111111111.00000001",
+                Price::from_units(11_111_111_111_100_000_001),
+            ),
+            (
+                "123456789012",
+                Price::from_units(12_345_678_901_200_000_000),
+            ),
+            ("1701411834604692317316873037158.84105727", Price::MAX),
+            ("-1701411834604692317316873037158.84105728", Price::MIN),
+        ] {
+            assert_eq!(text.parse::<Price>().unwrap(), expected);
+            assert_eq!(expected.to_string(), text);
+            for json in [text.to_owned(), format!("\"{text}\"")] {
+                assert_eq!(serde_json::from_str::<Price>(&json).unwrap(), expected);
+            }
+            assert_eq!(
+                serde_json::to_string(&expected).unwrap(),
+                format!("\"{text}\"")
+            );
+        }
+        for text in [
+            "1701411834604692317316873037158.84105728",
+            "-1701411834604692317316873037158.84105729",
+        ] {
+            assert_eq!(text.parse::<Price>(), Err(NumericError::Overflow));
+        }
+        let price: Price = literal("123456789012");
+        let quantity: Quantity = literal("0.0002");
+        assert_eq!(price.notional(quantity).unwrap(), literal("24691357.8024"));
+        assert_eq!(
+            price.fee(quantity, literal("-0.0002")).unwrap(),
+            literal("-4938.27156048")
+        );
+        assert_eq!(
+            Price::MAX.checked_add(Price::from_units(1)),
+            Err(NumericError::Overflow)
+        );
+        assert_eq!(Price::MIN.checked_neg(), Err(NumericError::Overflow));
+        assert_eq!(
+            Price::MAX.notional(Quantity::from_units(1)),
+            Err(NumericError::Overflow)
+        );
+        assert_eq!(
+            Price::MAX.fee(Quantity::ONE, Rate::ONE),
+            Err(NumericError::Overflow)
+        );
     }
     #[test]
     fn all_24_digits_and_signed_fees_are_preserved() {
