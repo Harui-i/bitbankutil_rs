@@ -64,19 +64,17 @@ impl BitbankPrivateApiClient {
     }
 
     // ポジションを確認するために使用する。
+    #[tracing::instrument(skip_all)]
     pub async fn get_assets(&self) -> Result<BitbankAssetsData, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<
-                &str,
-                crypto_botters::bitbank::BitbankHandleError,
-            >,
+            crypto_botters::http::RequestError<&str, crypto_botters::bitbank::BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::GET,
+                crypto_botters::http::Method::GET,
                 "/user/assets",
                 None::<&()>,
                 None::<()>,
@@ -84,12 +82,17 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("get_assets request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "get_assets",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
         crate::response_handler::handle_response("get_assets", res)
     }
 
     // 注文情報を取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-order-information
+    #[tracing::instrument(skip_all)]
     pub async fn get_order(
         &self,
         pair: &str,
@@ -98,12 +101,12 @@ impl BitbankPrivateApiClient {
         let start_time = Instant::now();
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::GET,
+                crypto_botters::http::Method::GET,
                 "/user/spot/order",
                 Some(&serde_json::json!({"pair": pair, "order_id": order_id})),
                 None::<()>,
@@ -111,12 +114,17 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("get_order request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "get_order",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
         crate::response_handler::handle_response("get_order", res)
     }
 
     // 新規注文を作成する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#create-new-order
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), pair = %crate::telemetry::safe(pair)))]
     pub async fn post_order(
         &self,
         pair: &str,
@@ -129,6 +137,9 @@ impl BitbankPrivateApiClient {
     ) -> Result<BitbankCreateOrderResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         validate_post_order_args(side, r#type, post_only);
+        tracing::info!(event = "order_api_started", operation = "place", side = %crate::telemetry::safe(side),
+            order_type = %crate::telemetry::safe(r#type), price = price.map(crate::telemetry::safe),
+            amount = %crate::telemetry::safe(amount), post_only);
 
         let mut body_map = serde_json::Map::new();
 
@@ -155,12 +166,12 @@ impl BitbankPrivateApiClient {
 
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::POST,
+                crypto_botters::http::Method::POST,
                 "/user/spot/order",
                 None::<&()>,
                 Some(&serde_json::Value::Object(body_map)),
@@ -168,12 +179,25 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("post_order request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "post_order",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
-        crate::response_handler::handle_response("post_order", res)
+        let result: Result<BitbankCreateOrderResponse, _> =
+            crate::response_handler::handle_response("post_order", res);
+        match &result {
+            Ok(response) => {
+                tracing::info!(event = "order_api_finished", outcome = "accepted", order_id = response.order_id.as_u64(), status = %crate::telemetry::safe(&response.status));
+            }
+            Err(error) => crate::telemetry::api_failure(error),
+        }
+        result
     }
 
     // 取引履歴を取得する: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-trade-history
+    #[tracing::instrument(skip_all)]
     pub async fn get_trade_history(
         &self,
         pair: Option<&str>,    // ペア
@@ -212,12 +236,12 @@ impl BitbankPrivateApiClient {
 
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::GET,
+                crypto_botters::http::Method::GET,
                 "/user/spot/trade_history",
                 Some(&serde_json::Value::Object(request_body)),
                 None::<()>,
@@ -225,26 +249,32 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("trade_history request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "trade_history",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
         crate::response_handler::handle_response("get_trade_history", res)
     }
 
     // 注文をキャンセルする。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-order
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), pair = %crate::telemetry::safe(pair)))]
     pub async fn post_cancel_order(
         &self,
         pair: &str,
         order_id: u64,
     ) -> Result<BitbankCancelOrderResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
+        tracing::info!(event = "order_api_started", operation = "cancel", order_id);
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::POST,
+                crypto_botters::http::Method::POST,
                 "/user/spot/cancel_order",
                 None::<&()>,
                 Some(&serde_json::json!({"pair": pair, "order_id": order_id})),
@@ -252,12 +282,25 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("post_cancel_order request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "post_cancel_order",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
-        crate::response_handler::handle_response("post_cancel_order", res)
+        let result: Result<BitbankCancelOrderResponse, _> =
+            crate::response_handler::handle_response("post_cancel_order", res);
+        match &result {
+            Ok(response) => {
+                tracing::info!(event = "order_api_finished", outcome = "accepted", order_id = response.order_id.as_u64(), status = %crate::telemetry::safe(&response.status));
+            }
+            Err(error) => crate::telemetry::api_failure(error),
+        }
+        result
     }
 
     // 複数の注文をキャンセルする。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#cancel-multiple-orders
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), pair = %crate::telemetry::safe(pair)))]
     pub async fn post_cancel_orders(
         &self,
         pair: &str,
@@ -265,15 +308,16 @@ impl BitbankPrivateApiClient {
     ) -> Result<BitbankCancelOrdersResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         assert!(!order_ids.is_empty() && order_ids.len() <= 30_usize);
+        tracing::info!(event = "order_api_started", operation = "cancel_batch", order_ids = ?order_ids);
 
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::POST,
+                crypto_botters::http::Method::POST,
                 "/user/spot/cancel_orders",
                 None::<&()>,
                 Some(&serde_json::json!({"pair": pair, "order_ids": order_ids})),
@@ -281,9 +325,28 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("post_cancel_orders request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "post_cancel_orders",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
-        crate::response_handler::handle_response("post_cancel_orders", res)
+        let result: Result<BitbankCancelOrdersResponse, _> =
+            crate::response_handler::handle_response("post_cancel_orders", res);
+        match &result {
+            Ok(response) => {
+                tracing::info!(
+                    event = "order_api_finished",
+                    outcome = "accepted",
+                    returned_order_count = response.orders.len()
+                );
+                for order in &response.orders {
+                    tracing::info!(event = "cancel_order_observed", order_id = order.order_id.as_u64(), status = %crate::telemetry::safe(&order.status));
+                }
+            }
+            Err(error) => crate::telemetry::api_failure(error),
+        }
+        result
     }
 
     // TODO
@@ -293,6 +356,7 @@ impl BitbankPrivateApiClient {
     }
 
     // 有効な注文を取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-active-orders
+    #[tracing::instrument(skip_all)]
     pub async fn get_active_orders(
         &self,
         pair: Option<&str>,
@@ -327,12 +391,12 @@ impl BitbankPrivateApiClient {
 
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::GET,
+                crypto_botters::http::Method::GET,
                 "/user/spot/active_orders",
                 Some(&serde_json::Value::Object(request_body)),
                 None::<()>,
@@ -340,12 +404,17 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("get_active_orders request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "get_active_orders",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
         crate::response_handler::handle_response("get_active_orders", res)
     }
 
     // 取引所のステータスを取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
+    #[tracing::instrument(skip_all)]
     pub async fn get_status(
         &self,
     ) -> Result<BitbankSpotStatusResponse, Option<BitbankHandleError>> {
@@ -353,12 +422,12 @@ impl BitbankPrivateApiClient {
 
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::GET,
+                crypto_botters::http::Method::GET,
                 "/spot/status",
                 None::<&()>,
                 None::<()>,
@@ -366,12 +435,17 @@ impl BitbankPrivateApiClient {
             .await;
 
         let duration = start_time.elapsed();
-        log::debug!("get_status request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "get_status",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
         crate::response_handler::handle_response("get_status", res)
     }
 
     // プライベートストリーム用のチャンネルとトークンを取得する。 cf: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#private-stream
+    #[tracing::instrument(skip_all)]
     pub async fn get_channel_and_token(
         &self,
     ) -> Result<BitbankChannelAndTokenResponse, Option<BitbankHandleError>> {
@@ -379,19 +453,23 @@ impl BitbankPrivateApiClient {
 
         let res: Result<
             BitbankApiResponse,
-            crypto_botters::generic_api_client::http::RequestError<&str, BitbankHandleError>,
+            crypto_botters::http::RequestError<&str, BitbankHandleError>,
         > = self
             .transport
             .request(
                 &self.options,
-                crypto_botters::generic_api_client::http::Method::GET,
+                crypto_botters::http::Method::GET,
                 "/user/subscribe",
                 None::<&()>,
                 None::<()>,
             )
             .await;
         let duration = start_time.elapsed();
-        log::debug!("get_channel_and_token request took {:?}", duration);
+        tracing::debug!(
+            event = "api_call_finished",
+            api = "get_channel_and_token",
+            elapsed_ms = duration.as_secs_f64() * 1000.0
+        );
 
         crate::response_handler::handle_response("get_channel_and_token", res)
     }
@@ -492,7 +570,7 @@ mod recording_tests {
         );
         c.options
             .update(BitbankOption::HttpUrl(BitbankHttpUrl::None));
-        let mut config = crypto_botters::generic_api_client::http::RequestConfig::default();
+        let mut config = crypto_botters::http::RequestConfig::default();
         config.url_prefix = format!("http://{addr}");
         config.max_try = retries;
         config.retry_cooldown = std::time::Duration::ZERO;
@@ -612,6 +690,8 @@ mod recording_tests {
 
     #[tokio::test]
     async fn timeout_is_a_failed_attempt_and_recording_does_not_change_retry_policy() {
+        let capture = crate::telemetry::tests::Capture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
         for recording in [false, true] {
             let (mut c, m, _, server) = client(
                 vec![
@@ -633,6 +713,14 @@ mod recording_tests {
                 .iter()
                 .filter(|r| r.kind == "http_finished")
                 .collect();
+            let events = capture.events();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e["fields"]["event"] == "venue_http_attempt_finished"
+                        && e["fields"]["timeout"] == true
+                        && e["fields"]["will_retry"] == true)
+            );
             if !recording {
                 assert!(calls.is_empty());
                 continue;
@@ -762,5 +850,79 @@ mod recording_tests {
         let text = String::from_utf8(m.0.lock().unwrap().clone()).unwrap();
         assert!(!text.contains("token-sentinel"));
         assert!(!text.contains("secret-value-sentinel"));
+    }
+    #[tokio::test]
+    async fn tracing_http_ids_errors_and_secrets() {
+        use crate::telemetry::tests::{Capture, span_field};
+        for recording in [false, true] {
+            let capture = Capture::default();
+            let _guard = tracing::subscriber::set_default(capture.subscriber());
+            let (mut c, memory, _, server) = client(
+                vec![
+                    Some((
+                        429,
+                        r#"{"success":0,"data":{"code":10009,"echo":"secret-value-sentinel"}}"#,
+                    )),
+                    Some((
+                        200,
+                        r#"{"success":1,"data":{"pubnub_channel":"channel","pubnub_token":"token-sentinel"}}"#,
+                    )),
+                ],
+                1,
+            );
+            if !recording {
+                c.transport.recorder = None;
+            }
+            assert!(c.get_assets().await.is_err());
+            let _ = c.get_channel_and_token().await;
+            server.join().unwrap();
+            let events = capture.events();
+            let calls: Vec<_> = events
+                .iter()
+                .filter(|e| e["fields"]["event"] == "venue_http_attempt_finished")
+                .collect();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0]["fields"]["http_status"], 429);
+            assert_eq!(calls[0]["fields"]["exchange_code"], 10009);
+            assert_eq!(calls[0]["fields"]["stage"], "response");
+            assert_ne!(
+                calls[0]["fields"]["venue_request_id"],
+                calls[1]["fields"]["venue_request_id"]
+            );
+            for call in &calls {
+                let op = span_field(call, "operation_id").unwrap();
+                let id = &call["fields"]["venue_request_id"];
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| e["fields"]["event"] == "venue_http_attempt_started"
+                            && e["fields"]["venue_request_id"] == *id)
+                );
+                // The transport has its own ID; both IDs must survive in nested spans.
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| e["fields"]["event"] == "http_request_finished"
+                            && span_field(e, "venue_request_id").as_ref() == Some(id)
+                            && span_field(e, "request_id").is_some()
+                            && span_field(e, "venue_attempt") == Some(serde_json::json!(1)))
+                );
+                if recording {
+                    let records = read_records(&memory.0.lock().unwrap()[..]).unwrap();
+                    assert!(records.iter().any(|r| r.kind == "http_finished"
+                        && r.data["request_id"] == *id
+                        && r.operation_id == op.as_u64()));
+                }
+            }
+            let text = capture.text();
+            for secret in [
+                "secret-key-sentinel",
+                "secret-value-sentinel",
+                "token-sentinel",
+                "ACCESS-SIGNATURE",
+            ] {
+                assert!(!text.contains(secret), "leaked {secret}");
+            }
+        }
     }
 }

@@ -2,8 +2,7 @@ use std::env;
 use std::time::Duration;
 
 use bitbankutil_rs::bitbank_bot::{BitbankBotBuilder, BotContext, BotEvent, BotStrategy};
-use crypto_botters::generic_api_client::websocket::WebSocketConfig;
-use log::LevelFilter;
+use crypto_botters::websocket::WebSocketConfig;
 
 struct MyBot {}
 
@@ -27,7 +26,7 @@ impl BotStrategy for MyBot {
             depth,
         }) = event
         {
-            log::info!("pair: {}, depth: {}", pair, depth);
+            tracing::info!("pair: {}, depth: {}", pair, depth);
         }
         Ok(())
     }
@@ -35,15 +34,17 @@ impl BotStrategy for MyBot {
 
 #[tokio::main]
 async fn main() {
-    env_logger::builder()
-        .filter_level(LevelFilter::Debug)
-        .format_timestamp_millis()
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(std::io::stderr)
         .init();
 
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2_usize {
-        log::error!("there should be one or more arguments: pairs (like `btc_jpy` `xrp_jpy`).");
+        tracing::error!("there should be one or more arguments: pairs (like `btc_jpy` `xrp_jpy`).");
         std::process::exit(-1);
     }
 

@@ -9,6 +9,8 @@
 
 価格・数量・率・残高は専用の固定小数点整数型で扱います。型と精度・移行方法は[数値型ガイド](docs/numeric-types.md)を参照してください。
 
+運用ログの設定とイベント一覧は[ログガイド](docs/logging.md)を参照してください。ライブラリはsubscriberを初期化せず、呼び出し側が出力先・形式・フィルターを設定します。
+
 ## Examples
 
 ### bitbankのPrivate APIを利用した処理(現在の残高の取得など)
@@ -31,7 +33,7 @@
 ```rust
     let public_client = BitbankPublicApiClient::new();
     let res = public_client.get_tickers().await;
-    log::debug!("{:?}", res);
+    tracing::debug!("{:?}", res);
 ```
 
 以上のような処理には、取引所のjson形式のAPIレスポンスをRustで扱えるようにするために`serde_json`などを使ってデシリアライズする必要がありますが、そういった処理は`src/bitbank_structs.rs`で実装されているため、簡単に利用できます。

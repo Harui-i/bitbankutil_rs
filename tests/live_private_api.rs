@@ -9,10 +9,7 @@ use bitbankutil_rs::bitbank_structs::{
 };
 
 fn logging_init() {
-    let _ = env_logger::builder()
-        .format_timestamp_millis()
-        .is_test(true)
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 }
 
 fn init_client() -> BitbankPrivateApiClient {
@@ -28,7 +25,7 @@ async fn test_private_get_assets() {
 
     let bb_client = init_client();
     let assets: BitbankAssetsData = bb_client.get_assets().await.unwrap();
-    log::info!("{:?}", assets);
+    tracing::info!("{:?}", assets);
 }
 
 #[tokio::test]
@@ -41,7 +38,7 @@ async fn test_private_get_active_orders() {
         .await
         .unwrap();
 
-    log::info!("active orders response: {:?}", active_orders_res);
+    tracing::info!("active orders response: {:?}", active_orders_res);
 }
 
 #[tokio::test]
@@ -53,7 +50,7 @@ async fn test_private_get_trade_history() {
         .get_trade_history(Some("eth_jpy"), None, None, None, None, Some("asc"))
         .await
         .unwrap();
-    log::info!("Bitbank trade history: {:?}", history);
+    tracing::info!("Bitbank trade history: {:?}", history);
 }
 
 #[tokio::test]
@@ -62,7 +59,7 @@ async fn test_private_get_status() {
     let bb_client = init_client();
 
     let status: BitbankSpotStatusResponse = bb_client.get_status().await.unwrap();
-    log::info!("Bitbank spot status: {:?}", status);
+    tracing::info!("Bitbank spot status: {:?}", status);
 }
 
 #[tokio::test]
@@ -70,7 +67,7 @@ async fn test_private_get_channel_and_token() {
     logging_init();
     let bb_client = init_client();
 
-    let channel_and_token: BitbankChannelAndTokenResponse =
+    let _channel_and_token: BitbankChannelAndTokenResponse =
         bb_client.get_channel_and_token().await.unwrap();
-    log::info!("Bitbank channel and token: {:?}", channel_and_token);
+    tracing::info!(event = "channel_token_received", success = true);
 }

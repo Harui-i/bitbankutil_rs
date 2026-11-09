@@ -8,12 +8,13 @@ use crate::market_event::{
 use crate::trading_venue::{NoTradingVenue, TradingVenue};
 use crate::websocket_handler::run_websocket;
 use crypto_botters::bitbank::BitbankOption;
-use crypto_botters::generic_api_client::websocket::WebSocketConfig;
-use log::{error, warn};
+use crypto_botters::websocket::WebSocketConfig;
 use std::convert::Infallible;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
+use tracing::{error, warn};
 
 /// ボットが受け取る市場データ、またはユーザー定義のイベント。
 /// 市場データはまずvenueに渡し（復旧経路では `on_market_event_recovering`）、その後で戦略に渡す。
@@ -179,7 +180,14 @@ impl<E: Send + 'static> BotHandle<E> {
             let _ = tx.send(());
         }
         match self.join_handle.take() {
-            Some(handle) => handle.await.map_err(|e| e.to_string())?,
+            Some(handle) => handle.await.map_err(|e| {
+                tracing::error!(
+                    event = "bot_join_failed",
+                    canceled = e.is_cancelled(),
+                    panicked = e.is_panic()
+                );
+                e.to_string()
+            })?,
             _ => Ok(()),
         }
     }
@@ -204,7 +212,10 @@ where
     let (tx, mut event_rx) = mpsc::channel(buffer);
     let event_tx = BotEventSender { tx };
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let run_span = tracing::info_span!("bot", run_id = crate::telemetry::next_id());
     let join_handle = tokio::spawn(async move {
+        let _lifetime = crate::telemetry::TaskLifetime("bot");
+        tracing::info!(event = "bot_started", library_version = env!("CARGO_PKG_VERSION"));
         let mut runner = BotRunner::new(strategy, venue);
         let mut stopping = false;
         let wake = runner.wake.clone();
@@ -214,13 +225,14 @@ where
                     .venue()
                     .mark_market_incomplete("bot processing failed");
                 runner.record_settlement();
+                tracing::error!(event = "bot_failed", stage = "processing");
                 return Err(format!("bot processing failed: {err:?}"));
             }
             select! {
                 biased;
                 _ = &mut shutdown_rx, if !stopping => { stopping = true; event_rx.close(); }
                 maybe_event = event_rx.recv(), if !runner.handler_pending() || runner.venue().has_pending_operations() => {
-                    let Some((_received, event)) = maybe_event else {
+                    let Some((received, event)) = maybe_event else {
                         // 将来の市場入力がなければwatermark待ちを完了できない。
                         // 送信済み操作はvenueに残し、shutdownを無期限に待たせない。
                         if runner.handler_pending() {
@@ -230,14 +242,18 @@ where
                             } else if let Err(err)=runner.drive_direct(false).await {
                                 runner.venue().mark_market_incomplete("bot processing failed");
                                 runner.record_settlement();
-                                return Err(format!("bot processing failed: {err:?}"));
+                                tracing::error!(event = "bot_failed", stage = "processing");
+                return Err(format!("bot processing failed: {err:?}"));
                             }
                         }
                         break;
                     };
+                    tracing::debug!(event = "bot_input_received", received_at_ms = received,
+                        processed_at_ms = crate::execution_recording::timestamp_ms());
                     if let Err(err) = runner.ingest(None, event, true, None, false) {
                         runner.venue().mark_market_incomplete("bot input failed");
                         runner.record_settlement();
+                        tracing::error!(event = "bot_failed", stage = "input");
                         return Err(format!("bot input failed: {err:?}"));
                     }
                 }
@@ -245,8 +261,9 @@ where
             }
         }
         runner.record_settlement();
+        tracing::info!(event = "bot_stopped", requested = stopping);
         Ok(())
-    });
+    }.instrument(run_span));
 
     BotHandle {
         event_tx,
@@ -344,38 +361,38 @@ async fn run_bitbank_pair_feed<E>(
     E: Send + 'static,
 {
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<BitbankInboundMessage>(128);
-    let ws_task = tokio::spawn(run_websocket(
-        pair.clone(),
-        client_options,
-        websocket_config,
-        inbound_tx,
-        observation,
-    ));
+    let ws_task = tokio::spawn(
+        run_websocket(
+            pair.clone(),
+            client_options,
+            websocket_config,
+            inbound_tx,
+            observation,
+        )
+        .in_current_span(),
+    );
 
     let mut converter = BitbankMarketEventConverter::new(pair.clone());
     while let Some(message) = inbound_rx.recv().await {
         let event = match converter.convert(message) {
             Ok(event) => event,
-            Err(err) => {
-                warn!(
-                    "bitbank feed for pair {} dropped an invalid market event: {:?}",
-                    pair, err
-                );
+            Err(_err) => {
+                warn!(event = "market_conversion_failed", pair = %crate::telemetry::safe(&pair));
                 continue;
             }
         };
 
         if let Some(event) = event {
             if event_tx.send(BotEvent::Market(event)).await.is_err() {
-                warn!(
-                    "bitbank feed for pair {} stopped because downstream receiver closed",
-                    pair
-                );
+                tracing::debug!(event = "feed_stopped", pair = %crate::telemetry::safe(&pair), reason = "downstream_closed");
                 break;
             }
         }
     }
 
+    if ws_task.is_finished() {
+        tracing::error!(event = "feed_terminated", pair = %crate::telemetry::safe(&pair), reason = "websocket_task_finished");
+    }
     ws_task.abort();
 }
 
@@ -468,8 +485,11 @@ where
     }
 
     pub fn spawn(self) -> BitbankBotRuntime<S::CustomEvent> {
+        let runtime_span =
+            tracing::info_span!("bot_runtime", runtime_id = crate::telemetry::next_id());
+        let _entered = runtime_span.enter();
         if self.pairs.is_empty() {
-            warn!("spawning a Bitbank bot without any subscribed pair");
+            warn!(event = "bot_no_subscriptions");
         }
 
         let simulation = self.venue.simulation_config().is_some();
@@ -496,21 +516,24 @@ where
             let observation = self.websocket_observation.clone();
             let raw_tx = raw_tx.clone();
             let failed = input_failed.clone();
-            let handle = tokio::spawn(async move {
-                if simulation {
-                    crate::websocket_handler::run_simulation_websocket(
-                        pair,
-                        pair_options,
-                        config,
-                        raw_tx,
-                        failed,
-                        observation,
-                    )
-                    .await;
-                } else {
-                    run_bitbank_pair_feed(pair, pair_options, config, tx, observation).await;
+            let handle = tokio::spawn(
+                async move {
+                    if simulation {
+                        crate::websocket_handler::run_simulation_websocket(
+                            pair,
+                            pair_options,
+                            config,
+                            raw_tx,
+                            failed,
+                            observation,
+                        )
+                        .await;
+                    } else {
+                        run_bitbank_pair_feed(pair, pair_options, config, tx, observation).await;
+                    }
                 }
-            });
+                .in_current_span(),
+            );
             feed_handles.push(handle);
         }
 
@@ -579,21 +602,15 @@ pub async fn forward_bitbank_messages<E>(
     while let Some(message) = inbound_rx.recv().await {
         let event = match converter.convert(message) {
             Ok(event) => event,
-            Err(err) => {
-                error!(
-                    "forwarder dropping invalid market event while replaying {}: {:?}",
-                    pair, err
-                );
+            Err(_err) => {
+                error!(event = "market_conversion_failed", pair = %crate::telemetry::safe(&pair));
                 continue;
             }
         };
 
         if let Some(event) = event {
             if event_tx.send(BotEvent::Market(event)).await.is_err() {
-                error!(
-                    "forwarder stopping: downstream closed while replaying {}",
-                    pair
-                );
+                tracing::debug!(event = "feed_stopped", pair = %crate::telemetry::safe(&pair), reason = "downstream_closed");
                 break;
             }
         }
@@ -1590,29 +1607,62 @@ impl<S: BotStrategy<V>, V: TradingVenue> BotRunner<S, V> {
         let input_id = entry.input_id.clone();
         let market_id = entry.market_id;
         let close = ClosePending(pending.clone());
-        let future = Box::pin(async move {
-            let _close = close;
-            if let Some(r) = recorder {
-                let kind = if matches!(entry.event, BotEvent::Market(_)) {
-                    "market_event"
-                } else {
-                    "custom_event"
-                };
-                let event_type = match &entry.event {
-                    BotEvent::Market(MarketEvent::Ticker { .. }) => "ticker",
-                    BotEvent::Market(MarketEvent::Transactions { .. }) => "transactions",
-                    BotEvent::Market(MarketEvent::DepthUpdated { .. }) => "depth",
-                    BotEvent::Market(MarketEvent::CircuitBreakInfo { .. }) => "circuit_break_info",
-                    BotEvent::Custom(_) => "custom",
-                };
-                r.record_lazy(kind, || {
-                    serde_json::json!({"id":market_id,"input_id":input_id,"type":event_type,
-                        "received_at_ms":ctx.received_at_ms(),"processed_at_ms":ctx.now_ms()})
-                });
+        let event_time_ms = match &entry.event {
+            BotEvent::Market(MarketEvent::DepthUpdated { depth, .. }) => {
+                Some(depth.last_timestamp())
             }
-            let result = strategy.handle_event(entry.event, &ctx).await;
-            (strategy, result)
-        });
+            BotEvent::Market(MarketEvent::Ticker { ticker, .. }) => ticker.timestamp.as_i64(),
+            BotEvent::Market(MarketEvent::Transactions { transactions, .. }) => {
+                transactions.last().map(|t| t.executed_at)
+            }
+            BotEvent::Market(MarketEvent::CircuitBreakInfo { info, .. }) => info.timestamp.as_i64(),
+            BotEvent::Custom(_) => None,
+        };
+        let decision_span = tracing::info_span!(
+            "strategy_decision",
+            decision_id = crate::telemetry::next_id(),
+            market_event_id = market_id,
+            received_at_ms = entry.received_at_ms,
+            event_time_ms
+        );
+        let future = Box::pin(
+            async move {
+                let _close = close;
+                if let Some(r) = recorder {
+                    let kind = if matches!(entry.event, BotEvent::Market(_)) {
+                        "market_event"
+                    } else {
+                        "custom_event"
+                    };
+                    let event_type = match &entry.event {
+                        BotEvent::Market(MarketEvent::Ticker { .. }) => "ticker",
+                        BotEvent::Market(MarketEvent::Transactions { .. }) => "transactions",
+                        BotEvent::Market(MarketEvent::DepthUpdated { .. }) => "depth",
+                        BotEvent::Market(MarketEvent::CircuitBreakInfo { .. }) => {
+                            "circuit_break_info"
+                        }
+                        BotEvent::Custom(_) => "custom",
+                    };
+                    r.record_lazy(kind, || {
+                        serde_json::json!({"id":market_id,"input_id":input_id,"type":event_type,
+                        "received_at_ms":ctx.received_at_ms(),"processed_at_ms":ctx.now_ms()})
+                    });
+                }
+                tracing::debug!(event = "strategy_started");
+                let started = std::time::Instant::now();
+                let result = strategy.handle_event(entry.event, &ctx).await;
+                if result.is_err() {
+                    tracing::error!(event = "strategy_failed");
+                }
+                tracing::debug!(
+                    event = "strategy_finished",
+                    success = result.is_ok(),
+                    elapsed_ms = started.elapsed().as_secs_f64() * 1000.0
+                );
+                (strategy, result)
+            }
+            .instrument(decision_span),
+        );
         self.active = Some(ActiveHandler {
             future,
             pending,
@@ -1731,7 +1781,14 @@ fn spawn_simulation_actor<S: BotStrategy<V>, V: TradingVenue>(
     let (tx, mut event_rx) = mpsc::channel(buffer);
     let event_tx = BotEventSender { tx };
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let span = tracing::info_span!(
+        "bot",
+        run_id = crate::telemetry::next_id(),
+        mode = "simulation"
+    );
     let join_handle = tokio::spawn(async move {
+        let _lifetime = crate::telemetry::TaskLifetime("bot");
+        tracing::info!(event = "bot_started", library_version = env!("CARGO_PKG_VERSION"));
         let mut driver = crate::simulation::SimulationDriver::new(
             venue.simulation_config().unwrap(),
             venue.simulation_time_model(),
@@ -1789,6 +1846,7 @@ fn spawn_simulation_actor<S: BotStrategy<V>, V: TradingVenue>(
                         || serde_json::json!({"simulation":driver.report(),"error":error}),
                     );
                 }
+                tracing::error!(event = "bot_failed", stage = "simulation");
                 return Err(error);
             }
         }
@@ -1804,8 +1862,9 @@ fn spawn_simulation_actor<S: BotStrategy<V>, V: TradingVenue>(
                     "pending_scheduled":runner.pending_scheduled(),"final_time_ms":runner.now_ms()}),
             );
         }
+        tracing::info!(event = "bot_stopped", requested = true);
         Ok(())
-    });
+    }.instrument(span));
     BotHandle {
         event_tx,
         shutdown_tx: Some(shutdown_tx),

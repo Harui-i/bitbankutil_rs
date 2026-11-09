@@ -2,7 +2,7 @@
 use bitbankutil_rs::{bitbank_structs::BitbankApiResponse, response_handler::handle_response};
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankOption, BitbankOptions},
-    generic_api_client::http::{Bytes, HeaderMap, RequestError, RequestHandler, StatusCode},
+    http::{Bytes, HeaderMap, RequestError, RequestHandler, StatusCode},
     traits::HttpOption,
 };
 use serde_json::{Value, json};

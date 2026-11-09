@@ -8,10 +8,7 @@ use bitbankutil_rs::bitbank_structs::{
 };
 
 fn logging_init() {
-    let _ = env_logger::builder()
-        .format_timestamp_millis()
-        .is_test(true)
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 }
 
 fn init_client() -> BitbankPrivateApiClient {
@@ -40,7 +37,7 @@ async fn test_private_get_order() {
         .post_order("btc_jpy", "1", Some("12"), "buy", "limit", Some(true), None)
         .await
         .unwrap();
-    log::info!("post order: {:?}", post_order_res);
+    tracing::info!("post order: {:?}", post_order_res);
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -49,14 +46,14 @@ async fn test_private_get_order() {
         .await
         .unwrap();
 
-    log::info!("fetched order information: {:?}", get_order_res);
+    tracing::info!("fetched order information: {:?}", get_order_res);
 
     let cancel_res = bb_client
         .post_cancel_order("btc_jpy", post_order_res.order_id.as_u64().unwrap())
         .await
         .unwrap();
 
-    log::info!("cancelled response: {:?}", cancel_res);
+    tracing::info!("cancelled response: {:?}", cancel_res);
 }
 
 // このテストは不安定だ！
@@ -70,7 +67,7 @@ async fn test_private_post_cancel_order() {
         .await
         .unwrap();
 
-    log::info!("order posted: {:?}", post_order_res);
+    tracing::info!("order posted: {:?}", post_order_res);
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -79,7 +76,7 @@ async fn test_private_post_cancel_order() {
         .await
         .unwrap();
 
-    log::info!("cancel order response : {:?}", cancel_order_res);
+    tracing::info!("cancel order response : {:?}", cancel_order_res);
 }
 
 #[tokio::test]
@@ -92,14 +89,14 @@ async fn test_private_post_cancel_orders() {
         .await
         .unwrap();
 
-    log::info!("post_order_res1: {:?}", post_order_res1);
+    tracing::info!("post_order_res1: {:?}", post_order_res1);
 
     let post_order_res2: BitbankCreateOrderResponse = bb_client
         .post_order("btc_jpy", "1", Some("13"), "buy", "limit", Some(true), None)
         .await
         .unwrap();
 
-    log::info!("post_order_res1: {:?}", post_order_res2);
+    tracing::info!("post_order_res1: {:?}", post_order_res2);
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -114,7 +111,7 @@ async fn test_private_post_cancel_orders() {
         .await
         .unwrap();
 
-    log::info!("cancel orders respones: {:?}", cancel_orders_res);
+    tracing::info!("cancel orders respones: {:?}", cancel_orders_res);
 }
 
 // 意図的にレート制限を超える。実行したい場合だけテスト名を指定してください。

@@ -13,8 +13,7 @@ use bitbankutil_rs::paper_execution::{
     PaperExecutionConfig, PaperExecutionEngine, PaperTradingVenue,
 };
 use bitbankutil_rs::trading_venue::{BitbankTradingVenue, TradingVenue};
-use crypto_botters::generic_api_client::websocket::WebSocketConfig;
-use log::LevelFilter;
+use crypto_botters::websocket::WebSocketConfig;
 
 struct MyBot {
     bot_config: MyBotConfig,
@@ -22,6 +21,7 @@ struct MyBot {
     last_updated: u128,
     last_bestbid: Price,
     last_bestask: Price,
+    waiting_for_depth: bool,
 }
 
 struct MyBotConfig {
@@ -52,6 +52,7 @@ impl MyBot {
             last_updated: 0,
             last_bestbid: literal("0"),
             last_bestask: literal("0"),
+            waiting_for_depth: false,
         }
     }
 
@@ -74,15 +75,18 @@ impl MyBot {
             .iter()
             .find(|asset| asset.asset == asset_name)
         else {
-            log::error!("account snapshot is missing {}", asset_name);
+            tracing::error!("account snapshot is missing {}", asset_name);
             return Ok(None);
         };
         let Some(jpy_balance_snapshot) = account.balances.iter().find(|asset| asset.asset == "jpy")
         else {
-            log::error!("account snapshot is missing jpy");
+            tracing::error!("account snapshot is missing jpy");
             return Ok(None);
         };
-        log::debug!("active orders: {:?}", current_orders);
+        tracing::debug!(
+            event = "strategy_account",
+            open_order_count = current_orders.len()
+        );
 
         let mut btc_locked_jpy_amount: Amount = literal("0");
         // このペアのロックされたjpyを計算する
@@ -106,20 +110,6 @@ impl MyBot {
         let btc_amount_remainder = btc_amount.checked_remainder(self.bot_config.lot)?;
         let jpy_free_amount = jpy_balance_snapshot.free_amount;
         let jpy_amount = jpy_free_amount.checked_add(btc_locked_jpy_amount)?;
-
-        log::debug!(
-            "btc_free_amount: {:?}, btc_locked_amount: {:?}, jpy_free_amount{:?}, btc_locked_jpy_amount: {:?}",
-            btc_free_amount,
-            btc_locked_amount,
-            jpy_free_amount,
-            btc_locked_jpy_amount
-        );
-        log::info!(
-            "{}_amount: {}, jpy_amount: {}",
-            self.bot_config.pair.clone(),
-            btc_amount,
-            jpy_amount
-        );
 
         let best_ask_price = self.depth.best_ask().unwrap().0.clone();
         let best_bid_price = self.depth.best_bid().unwrap().0.clone();
@@ -156,7 +146,7 @@ impl MyBot {
             }
         };
 
-        log::debug!("target spread: {}", sell_price.checked_sub(buy_price)?);
+        tracing::debug!("target spread: {}", sell_price.checked_sub(buy_price)?);
 
         let can_buy = jpy_amount >= buy_price.notional(self.bot_config.lot)?
             && btc_amount.checked_add(self.bot_config.lot)? <= self.bot_config.max_lot;
@@ -182,8 +172,24 @@ impl MyBot {
             ));
         }
 
-        log::debug!("wanna_place_orders: {:?}", wanna_place_orders);
-        log::info!(
+        tracing::debug!(event = "strategy_evaluated", reason = "best_quote_market_making",
+            best_bid = %best_bid_price, best_ask = %best_ask_price,
+            buy_price = %buy_price, sell_price = %sell_price,
+            lot = %self.bot_config.lot, max_lot = %self.bot_config.max_lot,
+            tick_size = %self.bot_config.tick_size, refresh_cycle_ms = self.bot_config.refresh_cycle,
+            market_time_ms = self.depth.last_timestamp(),
+            base_free = %btc_free_amount, quote_free = %jpy_free_amount,
+            can_buy, can_sell, target_order_count = wanna_place_orders.len());
+        if wanna_place_orders.is_empty() {
+            tracing::debug!(
+                event = "strategy_skipped",
+                reason = "balance_or_inventory_limit"
+            );
+        }
+        for order in &wanna_place_orders {
+            tracing::info!(event = "strategy_target_order", side = order.side.as_str(), price = %order.price, amount = %order.amount);
+        }
+        tracing::debug!(
             "evaluated asset: {}",
             sell_price.notional(btc_amount)?.checked_add(jpy_amount)?
         );
@@ -194,6 +200,7 @@ impl MyBot {
             jpy_free_amount,
         )))
     }
+    #[tracing::instrument(skip_all, fields(pair = %self.bot_config.pair.escape_default(), decision_time_ms = now))]
     async fn update_orders<V: TradingVenue>(
         &mut self,
         venue: &V,
@@ -204,24 +211,36 @@ impl MyBot {
         assert!(self.last_updated <= now);
 
         if now - self.last_updated >= self.bot_config.refresh_cycle {
-            log::debug!(
+            tracing::debug!(
                 "{} milliseconds have passed since the last order update",
                 now - self.last_updated
             );
 
             if !self.depth.is_complete() {
-                log::info!("depth is not complete");
+                if !self.waiting_for_depth {
+                    tracing::info!(event = "strategy_waiting", reason = "depth_incomplete");
+                    self.waiting_for_depth = true;
+                } else {
+                    tracing::debug!(event = "strategy_waiting", reason = "depth_incomplete");
+                }
                 return Ok(());
             }
 
+            if self.waiting_for_depth {
+                tracing::info!(event = "strategy_ready", reason = "depth_complete");
+                self.waiting_for_depth = false;
+            }
             // APIの呼び出し頻度が高くなりすぎないように、ここで `self.last_updated` を更新する
             // ここでは可変参照が必要である。
             self.last_updated = now;
 
             let account = match venue.account_snapshot(&self.bot_config.pair).await {
                 Ok(account) => account,
-                Err(err) => {
-                    log::error!("account snapshot failed: {:?}", err);
+                Err(_err) => {
+                    tracing::warn!(
+                        event = "strategy_skipped",
+                        reason = "account_snapshot_failed"
+                    );
                     return Ok(());
                 }
             };
@@ -240,7 +259,7 @@ impl MyBot {
             )
             .await?;
         }
-        log::debug!(
+        tracing::debug!(
             "update_orders has finished within {} ms",
             now_inst.elapsed().as_millis()
         );
@@ -262,20 +281,20 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
         };
         match event {
             MarketEvent::Transactions { transactions, .. } => {
-                log::debug!("transaction updated: {:?}", transactions);
+                tracing::trace!(event = "market_transactions", count = transactions.len());
                 self.update_orders(ctx.venue(), ctx.now_ms() as u128)
                     .await
                     .map_err(|e| e.to_string())?;
             }
             MarketEvent::DepthUpdated { depth, .. } => {
-                log::debug!("depth updated");
+                tracing::debug!("depth updated");
 
                 if depth.is_complete() {
                     let bestask = depth.best_ask().unwrap().0.clone();
                     let bestbid = depth.best_bid().unwrap().0.clone();
 
                     if bestask != self.last_bestask || bestbid != self.last_bestbid {
-                        log::debug!(
+                        tracing::debug!(
                             "best ask diff: {}, best bid diff: {}",
                             bestask
                                 .checked_sub(self.last_bestask)
@@ -297,7 +316,7 @@ impl<V: TradingVenue> BotStrategy<V> for MyBot {
                 }
             }
             MarketEvent::CircuitBreakInfo { info, .. } => {
-                log::debug!("circuit break info updated: {:?}", info);
+                tracing::debug!(event = "circuit_break_updated", mode = %info.mode.chars().take(128).flat_map(char::escape_default).collect::<String>(), market_time_ms = info.timestamp.as_i64());
             }
             // Tickerイベントはこの戦略では意図的に無視される。
             MarketEvent::Ticker { .. } => {}
@@ -363,7 +382,7 @@ fn paper_venue(
         None,
     )
     .map_err(|err| format!("{err:?}"))?;
-    log::info!("paper lookahead {lookahead_ms} ms; stream completeness is assumed");
+    tracing::info!("paper lookahead {lookahead_ms} ms; stream completeness is assumed");
     let (venue, diagnostics) = PaperTradingVenue::with_diagnostics(engine);
     let venue = venue
         .with_simulation_config(bitbankutil_rs::simulation::SimulationConfig { lookahead_ms })
@@ -375,15 +394,11 @@ fn paper_venue(
 async fn main() {
     let args: Vec<String> = env::args().collect();
     let mode = args.get(1).map(String::as_str);
-    env_logger::builder()
-        .filter_level(
-            if matches!(mode, Some("--backtest" | "--backtest-commands")) {
-                LevelFilter::Warn
-            } else {
-                LevelFilter::Info
-            },
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .format_timestamp_millis()
+        .with_writer(std::io::stderr)
         .init();
 
     let expected_len = match mode {
@@ -399,16 +414,16 @@ async fn main() {
         _ => 0,
     };
     if args.len() != expected_len {
-        log::error!(
+        tracing::error!(
             "usage: cargo run --example best_mm -- --live PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT"
         );
-        log::error!(
+        tracing::error!(
             "   or: cargo run --example best_mm -- --paper PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL LOOKAHEAD_MS"
         );
-        log::error!(
+        tracing::error!(
             "   or: cargo run --release --example best_mm -- --backtest PAIR TICK_SIZE REFRESH_MS LOT MAX_LOT BASE_INITIAL JPY_INITIAL LOOKAHEAD_MS MANIFEST [REPEATS]"
         );
-        log::error!(
+        tracing::error!(
             "   --backtest-commands uses the experimental synchronous event/command API with the same arguments"
         );
         std::process::exit(2);
@@ -475,7 +490,7 @@ async fn main() {
         if let Some(engine) = &paper_engine {
             // 各イベントは記録時にログ出力済み。取得済みの履歴を定期的に破棄する。
             let engine = engine.snapshot();
-            log::debug!(
+            tracing::debug!(
                 "paper settlement (provisional): {:?}",
                 engine.settlement_status()
             );

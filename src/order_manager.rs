@@ -1,5 +1,6 @@
 use crate::book_units::Amount;
 use std::collections::BTreeSet;
+use tracing::Instrument;
 
 use crate::{
     execution_recording::{current_context, scope},
@@ -17,7 +18,7 @@ impl<T> OperationSet<T> {
         Self { tasks: Vec::new() }
     }
     fn spawn(&mut self, future: impl std::future::Future<Output = T> + Send + 'static) {
-        self.tasks.push(Box::pin(future));
+        self.tasks.push(Box::pin(future.in_current_span()));
     }
     async fn join_next(&mut self) -> Option<Result<T, std::convert::Infallible>> {
         std::future::poll_fn(|cx| {
@@ -63,17 +64,29 @@ pub fn plan_orders(
 
         // この注文はキャンセルされるべき
         if matched_wanna_order_index.is_none() && cur_order.pair == pair {
-            log::debug!("this order will be cancelled. {:?}", cur_order);
+            tracing::debug!(
+                event = "order_planned",
+                action = "cancel",
+                reason = "not_desired",
+                order_id = cur_order.order_id.0
+            );
             cancels.push(cur_order.order_id);
         }
         // この現在の注文はwanna_place_ordersにある（つまり、すでに発注済み）
         else if let Some(matched_wanna_order_index) = matched_wanna_order_index {
             // 1つだけ削除したいので、最初に一致した希望注文を削除する。
-            log::debug!("this order already exists: {:?}", cur_order);
+            tracing::debug!(
+                event = "order_planned",
+                action = "keep",
+                reason = "matches_desired",
+                order_id = cur_order.order_id.0
+            );
             wanna_place_orders.remove(matched_wanna_order_index);
         }
     }
 
+    tracing::debug!(event = "order_plan_created", pair = %crate::telemetry::safe(pair),
+        cancel_count = cancels.len(), placement_count = wanna_place_orders.len());
     OrderPlan {
         cancels,
         placements: wanna_place_orders,
@@ -104,22 +117,22 @@ pub fn plan_concurrent_orders_from_open_orders(
             let consumed_jpy = sord.limit_price().notional(sord.amount)?;
 
             if next_jpy_free_amount >= consumed_jpy {
-                log::debug!("{:?} posted firstly.", sord);
+                tracing::debug!(event = "order_planned", action = "place", phase = "first", side = sord.side.as_str(), price = %sord.price, amount = %sord.amount);
                 first_placements.insert(sord);
                 next_jpy_free_amount = next_jpy_free_amount.checked_sub(consumed_jpy)?;
             } else {
-                log::debug!("{:?} posted secondly.", sord);
+                tracing::debug!(event = "order_planned", action = "place", phase = "second", side = sord.side.as_str(), price = %sord.price, amount = %sord.amount);
                 second_placements.insert(sord);
             }
         } else if sord.side == OrderSide::Sell {
             let consumed_btc = sord.amount.to_amount();
 
             if next_btc_free_amount >= consumed_btc {
-                log::debug!("{:?} posted firstly.", sord);
+                tracing::debug!(event = "order_planned", action = "place", phase = "first", side = sord.side.as_str(), price = %sord.price, amount = %sord.amount);
                 first_placements.insert(sord);
                 next_btc_free_amount = next_btc_free_amount.checked_sub(consumed_btc)?;
             } else {
-                log::debug!("{:?} posted secondly.", sord);
+                tracing::debug!(event = "order_planned", action = "place", phase = "second", side = sord.side.as_str(), price = %sord.price, amount = %sord.amount);
                 second_placements.insert(sord);
             }
         } else {
@@ -137,6 +150,7 @@ pub fn plan_concurrent_orders_from_open_orders(
     })
 }
 
+#[tracing::instrument(skip_all, fields(pair = %crate::telemetry::safe(&pair), plan_id = crate::telemetry::next_id()))]
 pub async fn place_wanna_orders(
     wanna_place_orders: BTreeSet<DesiredLimitOrder>,
     current_orders: Vec<OpenOrder>,
@@ -144,6 +158,8 @@ pub async fn place_wanna_orders(
     venue: impl TradingVenue,
 ) {
     let start = Instant::now();
+    let mut success_count = 0usize;
+    let mut failure_count = 0usize;
     let mut js = OperationSet::new();
     let OrderPlan {
         cancels,
@@ -155,17 +171,21 @@ pub async fn place_wanna_orders(
     );
 
     if !cancels.is_empty() {
-        let cancel_order_response_result = venue.cancel_orders(&pair, cancels).await;
+        let cancel_order_response_result = planned_cancel(&venue, &pair, cancels).await;
 
-        if let Err(err) = cancel_order_response_result {
-            log::error!(
-                "in place_wanna_orders, cancel_orders has returned error: {:?}",
-                err
+        if cancel_order_response_result.is_err() {
+            tracing::warn!(
+                event = "order_plan_finished",
+                outcome = "aborted",
+                reason = "cancel_failed",
+                success_count,
+                failure_count = 1,
+                elapsed_ms = start.elapsed().as_secs_f64() * 1000.0
             );
             return;
         }
 
-        log::debug!("cancel current orders.");
+        success_count += 1;
     }
 
     // side、lot、price
@@ -173,16 +193,22 @@ pub async fn place_wanna_orders(
     for sord in placements {
         let venue2 = venue.clone();
         js.spawn(scope(current_context(), async move {
-            venue2.place_order(PlacementRequest::from(sord)).await
+            planned_place(&venue2, sord).await
         }));
     }
 
     while let Some(js_res) = js.join_next().await {
         let bcor = js_res.unwrap();
-        log::debug!("order result: {:?}", bcor);
+        success_count += usize::from(bcor.is_ok());
+        failure_count += usize::from(bcor.is_err());
     }
 
-    log::debug!("Replaced orders within {} ms.", start.elapsed().as_millis());
+    tracing::info!(
+        event = "order_plan_finished",
+        success_count,
+        failure_count,
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 /* 現在発注済みの注文（`current_orders`）と希望する注文状態（`wanna_place_orders`）を受け取り、新規注文または注文のキャンセルを実行する。
@@ -195,6 +221,7 @@ wanna_place_orders
 `jpy_free_amount`：注文に使用されていない日本円の量。
 `jpy_btc_locked_amount`：取引ペアの注文に使用されている日本円の量。
 */
+#[tracing::instrument(skip_all, fields(pair = %crate::telemetry::safe(&pair), plan_id = crate::telemetry::next_id()))]
 pub async fn place_wanna_orders_concurrent(
     wanna_place_orders: Vec<DesiredLimitOrder>,
     current_orders: Vec<OpenOrder>,
@@ -204,6 +231,8 @@ pub async fn place_wanna_orders_concurrent(
     venue: impl TradingVenue,
 ) -> Result<(), crate::book_units::NumericError> {
     let start = Instant::now();
+    let mut success_count = 0usize;
+    let mut failure_count = 0usize;
     let ConcurrentOrderPlan {
         cancels,
         first_placements,
@@ -230,7 +259,7 @@ pub async fn place_wanna_orders_concurrent(
         let pair2 = pair.clone();
 
         first_js.spawn(scope(current_context(), async move {
-            FirstJoinSetResponse::CancelResponse(venue2.cancel_orders(&pair2, cancels).await)
+            FirstJoinSetResponse::CancelResponse(planned_cancel(&venue2, &pair2, cancels).await)
         }));
     }
 
@@ -238,9 +267,7 @@ pub async fn place_wanna_orders_concurrent(
         let venue2 = venue.clone();
 
         first_js.spawn(scope(current_context(), async move {
-            FirstJoinSetResponse::PostResponse(
-                venue2.place_order(PlacementRequest::from(sord)).await,
-            )
+            FirstJoinSetResponse::PostResponse(planned_place(&venue2, sord).await)
         }));
     }
 
@@ -249,16 +276,12 @@ pub async fn place_wanna_orders_concurrent(
 
         match fjsr {
             FirstJoinSetResponse::CancelResponse(cancel_response) => {
-                log::debug!(
-                    "cancel order response in first_joinset: {:?}",
-                    cancel_response
-                );
+                success_count += usize::from(cancel_response.is_ok());
+                failure_count += usize::from(cancel_response.is_err());
             }
             FirstJoinSetResponse::PostResponse(create_order_response) => {
-                log::debug!(
-                    "create order response in first_joinset: {:?}",
-                    create_order_response
-                );
+                success_count += usize::from(create_order_response.is_ok());
+                failure_count += usize::from(create_order_response.is_err());
             }
         }
     }
@@ -269,21 +292,91 @@ pub async fn place_wanna_orders_concurrent(
         for sord in second_placements {
             let venue2 = venue.clone();
             second_js.spawn(scope(current_context(), async move {
-                venue2.place_order(PlacementRequest::from(sord)).await
+                planned_place(&venue2, sord).await
             }));
         }
 
         while let Some(second_js_res) = second_js.join_next().await {
             let bcor = second_js_res.unwrap();
-            log::debug!("post order response in second_js: {:?}", bcor);
+            success_count += usize::from(bcor.is_ok());
+            failure_count += usize::from(bcor.is_err());
         }
     }
 
-    log::debug!(
-        "Replaced orders(concurrently) within {} ms.",
-        start.elapsed().as_millis()
+    tracing::info!(
+        event = "order_plan_finished",
+        success_count,
+        failure_count,
+        elapsed_ms = start.elapsed().as_secs_f64() * 1000.0
     );
     Ok(())
+}
+
+#[tracing::instrument(skip_all, fields(planned_order_id = crate::telemetry::next_id(),
+    pair = %crate::telemetry::safe(&order.pair), side = order.side.as_str(), price = %order.price, amount = %order.amount))]
+async fn planned_place<V: TradingVenue>(
+    venue: &V,
+    order: DesiredLimitOrder,
+) -> Result<PlacedOrder, TradingVenueError> {
+    tracing::info!(event = "planned_order_started");
+    let result = venue.place_order(PlacementRequest::from(order)).await;
+    if let Ok(order) = &result {
+        tracing::info!(
+            event = "planned_order_accepted",
+            order_id = order.order_id.map(|id| id.0)
+        );
+    } else {
+        report_result("place", &result);
+    }
+    result
+}
+
+#[tracing::instrument(skip_all, fields(cancel_batch_id = crate::telemetry::next_id(), pair = %crate::telemetry::safe(pair)))]
+async fn planned_cancel<V: TradingVenue>(
+    venue: &V,
+    pair: &str,
+    ids: Vec<OrderId>,
+) -> Result<(), TradingVenueError> {
+    tracing::info!(event = "planned_cancel_started", order_ids = ?ids);
+    let result = venue.cancel_orders(pair, ids).await;
+    if result.is_ok() {
+        tracing::info!(
+            event = "planned_cancel_accepted",
+            confirmation = "batch_api_returned_success"
+        );
+    } else {
+        report_result("cancel", &result);
+    }
+    result
+}
+
+fn report_result<T>(operation: &str, result: &Result<T, TradingVenueError>) {
+    match result {
+        Ok(_) => tracing::debug!(
+            event = "planned_operation_finished",
+            operation,
+            outcome = "accepted"
+        ),
+        Err(error) => {
+            let outcome = crate::telemetry::outcome(error);
+            let error_category = crate::telemetry::category(error);
+            if outcome == "unknown" {
+                tracing::error!(
+                    event = "planned_operation_finished",
+                    operation,
+                    outcome,
+                    error_category
+                );
+            } else {
+                tracing::warn!(
+                    event = "planned_operation_finished",
+                    operation,
+                    outcome,
+                    error_category
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -675,5 +768,70 @@ mod tests {
         assert!(calls.contains(&VenueCall::Place(first_buy)));
         assert!(calls.contains(&VenueCall::Place(second_buy)));
         assert_eq!(calls.len(), 3);
+    }
+    #[tokio::test]
+    async fn planned_operations_keep_spans_and_report_cancel_failure() {
+        use crate::telemetry::tests::{Capture, span_field};
+        let capture = Capture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        let orders = vec![
+            desired_order("btc_jpy", OrderSide::Buy, literal("1"), literal("100")),
+            desired_order("btc_jpy", OrderSide::Sell, literal("1"), literal("110")),
+        ];
+        let venue = FakeTradingVenue::default();
+        place_wanna_orders_concurrent(
+            orders.clone(),
+            vec![],
+            literal("10"),
+            literal("1000"),
+            "btc_jpy".into(),
+            venue.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(venue.calls().len(), 2);
+        let events = capture.events();
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|e| e["fields"]["event"] == "planned_order_started")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_ne!(
+            span_field(starts[0], "planned_order_id"),
+            span_field(starts[1], "planned_order_id")
+        );
+        for start in starts {
+            assert!(span_field(start, "plan_id").is_some());
+            let id = span_field(start, "planned_order_id");
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e["fields"]["event"] == "planned_order_accepted"
+                        && span_field(e, "planned_order_id") == id)
+            );
+        }
+        let current = open_order(
+            10,
+            "btc_jpy",
+            OrderSide::Sell,
+            literal("1"),
+            literal("120"),
+            None,
+        );
+        place_wanna_orders(
+            set_of(orders),
+            vec![current],
+            "btc_jpy".into(),
+            crate::trading_venue::NoTradingVenue,
+        )
+        .await;
+        let events = capture.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["fields"]["event"] == "order_plan_finished"
+                    && e["fields"]["reason"] == "cancel_failed"
+                    && e["fields"]["failure_count"] == 1)
+        );
     }
 }

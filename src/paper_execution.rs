@@ -999,7 +999,29 @@ impl PaperExecutionEngine {
 
     fn record_event_with_account(&mut self, event: PaperEvent, account: Option<AccountSnapshot>) {
         self.record_queue(false);
-        log::info!("paper event: {:?}", event);
+        match &event {
+            PaperEvent::OrderAccepted {
+                order_id, order, ..
+            } => {
+                tracing::info!(event = "paper_order_accepted", order_id = order_id.0, pair = %crate::telemetry::safe(&order.pair), side = order.side.as_str(), price = %order.price, amount = %order.amount)
+            }
+            PaperEvent::OrderRejected { .. } => tracing::warn!(event = "paper_order_rejected"),
+            PaperEvent::OrderCancelPending { order_id, .. } => {
+                tracing::info!(event = "paper_cancel_pending", order_id = order_id.0)
+            }
+            PaperEvent::OrderCancelled { order_id, .. } => {
+                tracing::info!(event = "paper_order_cancelled", order_id = order_id.0)
+            }
+            PaperEvent::OrderFilled {
+                order_id,
+                price,
+                amount,
+                fee_amount_quote,
+                ..
+            } => {
+                tracing::info!(event = "paper_order_filled", order_id = order_id.0, price = %price, amount = %amount, fee_amount_quote = %fee_amount_quote)
+            }
+        }
         if let Some(r) = &self.recorder {
             r.record_lazy("paper_event", || {
                 let account = account.unwrap_or_else(|| AccountSnapshot {

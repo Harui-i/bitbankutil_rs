@@ -5,10 +5,7 @@ pub fn handle_response<T: serde::de::DeserializeOwned>(
     api_name: &str,
     res: Result<
         crate::bitbank_structs::BitbankApiResponse,
-        crypto_botters::generic_api_client::http::RequestError<
-            &str,
-            crypto_botters::bitbank::BitbankHandleError,
-        >,
+        crypto_botters::http::RequestError<&str, crypto_botters::bitbank::BitbankHandleError>,
     >,
 ) -> Result<T, Option<crypto_botters::bitbank::BitbankHandleError>> {
     match res {
@@ -24,43 +21,33 @@ pub fn handle_response<T: serde::de::DeserializeOwned>(
                 Ok(ret) => {
                     // api_responseにあったフィールドが、retには含まれていなかった場合警告する
                     if !ignored.is_empty() {
-                        log::warn!(
-                            "unknown fields in {} ({}): {:?}",
-                            api_name,
-                            ignored.len(),
-                            ignored
-                        );
+                        tracing::warn!(event = "response_unknown_fields", api = %crate::telemetry::safe(api_name), count = ignored.len());
                     }
                     Ok(ret)
                 }
                 Err(err) => {
-                    log::error!(
-                        "failed to convert api_response into certain type.\
-                            api_response: {:?}, Error: {:?}",
-                        api_response.clone(),
-                        err
-                    );
+                    tracing::error!(event = "response_decode_failed", api = %crate::telemetry::safe(api_name), line = err.line(), column = err.column());
 
                     Err(None)
                 }
             }
         }
         Err(err) => match err {
-            crypto_botters::generic_api_client::http::RequestError::SendRequest(error) => {
-                log::error!("Send request error on {}. error: {:?}", api_name, error);
+            crypto_botters::http::RequestError::SendRequest(error) => {
+                tracing::warn!(event = "response_failed", api = %crate::telemetry::safe(api_name), stage = "send", timeout = error.is_timeout());
 
                 Err(None)
             }
-            crypto_botters::generic_api_client::http::RequestError::ReceiveResponse(error) => {
-                log::error!("Receive response error on {}. error: {:?}", api_name, error);
+            crypto_botters::http::RequestError::ReceiveResponse(error) => {
+                tracing::warn!(event = "response_failed", api = %crate::telemetry::safe(api_name), stage = "receive", timeout = error.is_timeout());
                 Err(None)
             }
-            crypto_botters::generic_api_client::http::RequestError::BuildRequestError(error) => {
-                log::error!("Build request error on {}. error: {:?}", api_name, error);
+            crypto_botters::http::RequestError::BuildRequestError(_error) => {
+                tracing::warn!(event = "response_failed", api = %crate::telemetry::safe(api_name), stage = "build");
                 Err(None)
             }
-            crypto_botters::generic_api_client::http::RequestError::ResponseHandleError(error) => {
-                log::error!("Bitbank handle error on {}. error : {:?}", api_name, error);
+            crypto_botters::http::RequestError::ResponseHandleError(error) => {
+                tracing::warn!(event = "response_failed", api = %crate::telemetry::safe(api_name), stage = "exchange");
                 Err(Some(error))
             }
         },
