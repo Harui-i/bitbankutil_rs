@@ -186,6 +186,16 @@ pub(crate) mod tests {
     }
     impl Capture {
         pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+            // A callsite first used by an unobserved thread can be cached as disabled
+            // when tracing sees only one registered, thread-local subscriber.
+            // Keep a second dispatch registered so interest is computed across
+            // subscribers, including this capture. Do not install a global subscriber:
+            // other tests must remain free to run without collecting logs.
+            static REGISTRATION_GUARD: std::sync::OnceLock<tracing::Dispatch> =
+                std::sync::OnceLock::new();
+            REGISTRATION_GUARD.get_or_init(|| {
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
+            });
             let writer = self.clone();
             tracing_subscriber::fmt()
                 .json()
@@ -212,6 +222,19 @@ pub(crate) mod tests {
             .iter()
             .rev()
             .find_map(|s| s.get(field).cloned())
+    }
+
+    #[test]
+    fn capture_records_callsites_first_used_without_a_subscriber() {
+        fn site() {
+            tracing::info!(event = "first_used_without_subscriber");
+        }
+        let capture = Capture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        // Simulate other library tests using this callsite without a subscriber.
+        std::thread::spawn(site).join().unwrap();
+        site();
+        assert_eq!(capture.events().len(), 1);
     }
 
     #[tokio::test]
