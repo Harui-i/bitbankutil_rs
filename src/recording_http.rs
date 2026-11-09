@@ -15,6 +15,7 @@ use tracing::Instrument;
 pub(crate) struct Transport {
     pub recorder: Option<ExecutionRecorder>,
     http: crypto_botters::http::Client,
+    authentication_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 struct Observed<H> {
     response_clock: Mutex<Option<crate::clock_observation::ClockObservation>>,
@@ -85,11 +86,12 @@ impl Transport {
                     .map_or_else(crate::telemetry::next_id, ExecutionRecorder::next_id),
             );
         }
+        let caller_span = tracing::Span::current();
         let span = tracing::info_span!("venue_http_request", operation_id = context.operation_id,
             endpoint = %crate::telemetry::safe(path), method = method.as_str());
         scope(
             context,
-            self.request_inner(options, method, path, query, body)
+            self.request_inner(options, method, path, query, body, caller_span)
                 .instrument(span),
         )
         .await
@@ -102,6 +104,7 @@ impl Transport {
         path: &str,
         query: Option<&Q>,
         body: Option<B>,
+        caller_span: tracing::Span,
     ) -> Result<BitbankApiResponse, RequestError<&'static str, BitbankHandleError>> {
         let handler = <BitbankOption as HttpOption<'_, BitbankApiResponse, &B>>::request_handler(
             options.clone(),
@@ -119,6 +122,7 @@ impl Transport {
                 .as_ref()
                 .map_or_else(crate::telemetry::next_id, ExecutionRecorder::next_id),
         );
+        caller_span.record("venue_request_id", request_id);
         let request_span = tracing::info_span!("venue_request", venue_request_id = request_id);
         // instrument each HTTP future; never hold an entered span across await.
         let request = self.recorder.as_ref().map(|_| {
@@ -143,7 +147,11 @@ impl Transport {
         let query = query
             .map(serde_json::to_value)
             .transpose()
-            .map_err(|_| RequestError::BuildRequestError("invalid query"))?
+            .map_err(|_| {
+                tracing::warn!(parent: &request_span, event = "venue_http_request_finished", stage = "build", success = false,
+                    reason_code = "invalid_query", attempts = 0, send_attempted = false, action = "return_error");
+                RequestError::BuildRequestError("invalid query")
+            })?
             .map(query_strings);
         for attempt in 1..=config.max_try {
             *observed.response_clock.lock().unwrap() = None;
@@ -172,6 +180,25 @@ impl Transport {
                 )
                 .instrument(tracing::info_span!(parent: &request_span, "venue_http_attempt", venue_attempt = attempt))
                 .await;
+            if options.http_auth {
+                let state = match &result {
+                    Ok(_) => Some((1, "authenticated", "success")),
+                    Err(RequestError::ResponseHandleError(error))
+                        if crate::error_diagnostics::api_ref(error).2 =>
+                    {
+                        Some((2, "failed", crate::error_diagnostics::api_ref(error).0))
+                    }
+                    _ => None,
+                };
+                if let Some((state, outcome, reason_code)) = state
+                    && self
+                        .authentication_state
+                        .swap(state, std::sync::atomic::Ordering::Relaxed)
+                        != state
+                {
+                    tracing::info!(parent: &request_span, event = "api_authentication_state", outcome, reason_code, security_relevant = true);
+                }
+            }
             let timing = measurement.finish();
             let timeout = match &result {
                 Err(RequestError::SendRequest(e) | RequestError::ReceiveResponse(e)) => {
@@ -188,15 +215,39 @@ impl Transport {
                 Err(RequestError::BuildRequestError(_)) => "build",
                 Err(RequestError::ResponseHandleError(_)) => "response",
             };
+            let reason_code = match &result {
+                Ok(_) => "success",
+                Err(RequestError::BuildRequestError(_)) => "request_build_failed",
+                Err(RequestError::ResponseHandleError(error)) => {
+                    crate::error_diagnostics::api_ref(error).0
+                }
+                Err(RequestError::SendRequest(e) | RequestError::ReceiveResponse(e)) => {
+                    if e.is_timeout() {
+                        "timeout"
+                    } else if e.is_connect() {
+                        "connect"
+                    } else if e.is_body() {
+                        "body"
+                    } else if e.is_decode() {
+                        "decode"
+                    } else if e.is_request() {
+                        "request"
+                    } else {
+                        "transport"
+                    }
+                }
+            };
             let http_status = *observed.status.lock().unwrap();
             let exchange_code = *observed.code.lock().unwrap();
             let elapsed_us = timing.get("elapsed_us").and_then(Value::as_u64);
             if result.is_ok() {
                 tracing::debug!(parent: &request_span, event = "venue_http_attempt_finished", venue_request_id = request_id,
-                    attempt, stage, http_status, exchange_code, timeout, will_retry, elapsed_us);
+                    attempt, stage, reason_code, http_status, exchange_code, timeout, will_retry,
+                    action = if will_retry { "retry" } else { "return_result" }, retry_delay_ms = if will_retry { Some(config.retry_cooldown.as_millis() as u64) } else { None }, elapsed_us);
             } else {
                 tracing::warn!(parent: &request_span, event = "venue_http_attempt_finished", venue_request_id = request_id,
-                    attempt, stage, http_status, exchange_code, timeout, will_retry, elapsed_us);
+                    attempt, stage, reason_code, http_status, exchange_code, timeout, will_retry,
+                    action = if will_retry { "retry" } else { "return_result" }, retry_delay_ms = if will_retry { Some(config.retry_cooldown.as_millis() as u64) } else { None }, elapsed_us);
             }
             if let Some(r) = &self.recorder {
                 r.record_lazy("http_finished", || json!({

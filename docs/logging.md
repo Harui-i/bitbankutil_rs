@@ -1,6 +1,6 @@
 # 運用ログ
 
-ライブラリは `tracing` のイベントとspanを発行します。subscriberの初期化、出力形式、保存先、フィルターは呼び出し側の責任です。subscriberを設定しなくても取引APIは利用できます。公開関数の引数・戻り値と、注文順序・再試行・停止条件は変更していません。
+ライブラリは `tracing` のイベントとspanを発行します。subscriberの初期化、出力形式、保存先、フィルターは呼び出し側の責任です。subscriberを設定しなくても取引APIは利用できます。注文順序・再試行・停止条件は変更していません。板検証の戻り値には、位置と理由を持つ `DepthValidationError` を使用します。
 
 `ExecutionRecorder` は別の仕組みです。取引記録・再生のJSONL形式と既存の設定を維持します。運用ログはフィルター可能なので、永続的な取引監査記録の代わりにはなりません。
 
@@ -57,11 +57,14 @@ tracing_subscriber::fmt()
 
 ## spanと識別子
 
-- `bot_runtime` / `bot`: `runtime_id` / `run_id`。プロセス内で採番する実行識別子です。再起動をまたぐ検索には、アプリ側で実行名・ホスト名などを持つ親spanを設定してください。
-- `strategy_decision`: `decision_id`、任意の `market_event_id`、`received_at_ms`、観測可能な `event_time_ms`。注文操作はこのspanの子になります。
+- `application`: `process_instance`（PIDとプロセス内の初回生成時のUTC）、`execution_id`、アプリ名・バージョン・ビルド・インスタンス・戦略名・口座の別名。`RunMetadata` で指定します。秘密情報は指定しません。
+- `bot_runtime` / `bot`: `runtime_id` / `run_id`。プロセス内で採番する実行識別子です。再起動をまたぐ検索には親の `process_instance` / `execution_id` を使い、`RunMetadata.instance` でホストやコンテナも識別してください。
+- `market_input`: `input_sequence`、WSコールバックの `received_at_ms`、channel。接続spanの `connection_id` / `generation` とともにキューを越えて保持します。
+- `bot_delivery`: 入力の接続コンテキストとactorの `run_id` を関連づけます。
+- `strategy_decision`: `decision_id`、`event_type`、pair、任意の `market_event_id`、`received_at_ms`、観測可能な `event_time_ms`。注文操作はこのspanの子になります。
 - 注文計画: `plan_id`。個別発注は `planned_order_id`、キャンセルバッチは `cancel_batch_id` で識別します。
 - `operation`: `operation_id`、`operation`。`BitbankTradingVenue` とpaper venueの操作を記録します。
-- Private注文API: `api_call_id`、`pair`。低水準APIを直接呼ぶ場合にも開始・結果を追えます。
+- Public/Private API: `api_call_id` と `venue_request_id`。対象がある場合はpair・order_idも持ちます。低水準APIを直接呼んだ後の応答変換失敗まで、HTTPリクエストと関連づけられます。
 - `venue_http_request` / `venue_request` / `venue_http_attempt`: `operation_id`、`endpoint`、`method`、`venue_request_id`、`venue_attempt`。crypto-botters側の `http_request` spanの `request_id` / `attempt` とは別の識別子です。
 
 recorderがある場合、`operation_id` はJSONLと同じ値で、運用ログの `venue_request_id` はJSONLの `request_id` に対応します。recorderがない場合もプロセス内で採番します。IDの採番元はrecorderごとに異なるため、異なるrecorderの記録は実行コンテキストと合わせて検索してください。並行FutureとBot/WSタスクには親spanを引き継ぎます。呼び出し側でspawnするタスクには `.instrument(span)` / `.in_current_span()` を使ってください。
@@ -83,17 +86,21 @@ spanはINFOで有効になります。JSON出力では `spans` 配列で親子�
 | `cancel_order_observed` | INFO: バッチ応答に実際に含まれた注文 | order_id, status |
 | `venue_http_request_started`, `venue_http_request_finished` | DEBUG: HTTPリクエスト全体 | venue_request_id, attempts, stage, success, timeout, elapsed_us |
 | `venue_http_attempt_started`, `venue_http_attempt_finished` | DEBUG: 通常通信、WARN: 通信失敗/取引所エラー | venue_request_id, attempt, stage, http_status, exchange_code, timeout, will_retry, elapsed_us |
-| `response_unknown_fields`, `response_failed`, `response_decode_failed` | WARN/ERROR: 応答の互換性・変換・通信エラー | api, count, stage, timeout, line, column |
-| `bot_started`, `bot_stopped`, `bot_failed` | INFO: 起動終了、ERROR: 実行失敗 | requested, stage |
+| `response_unknown_fields`, `response_failed`, `response_decode_failed` | WARN/ERROR: 応答の互換性・変換・通信エラー | api, count, fields（最大8件）, truncated, stage, timeout, reason_code, field |
+| `bot_configured`, `bot_started`, `bot_stopped`, `bot_failed` | INFO: 設定・起動終了、ERROR: 実行失敗 | mode, strategy_type, subscriptions（最大32件）, buffer_capacity, requested, stage, reason_code, action, pending_* |
 | `strategy_started`, `strategy_finished`, `strategy_failed` | DEBUG: 判断処理、ERROR: 戦略失敗 | decision span, success, elapsed_ms |
-| `market_feed_start_failed` | ERROR: 市場フィードの開始失敗 | pair |
+| `market_feed_start_failed` | ERROR: 市場フィードの開始失敗 | pair, reason_code（io/tls/http_handshake/protocol/urlなど）, action |
 
 | `ws_decode_failed`, `ws_delivery_failed`, `ws_delivery_closed` | WARN: 不正入力・満杯、DEBUG: 受信先終了 | reason |
-| `market_conversion_failed`, `feed_terminated`, `feed_stopped` | WARN/ERROR: 入力異常、DEBUG: 受信先終了 | pair, reason |
+| `market_conversion_failed` | WARN: 変換できない入力を破棄 | pair, message_type, error_kind, reason_code, field, side, level_index, transaction_index, transaction_id, event_time_ms, sequence_id, action, failure_count, suppressed_count |
+| `feed_terminated`, `feed_stopped` | ERROR: フィードの異常終了、INFO/DEBUG: 受信先終了 | pair, reason_code/reason, action |
+| `market_feed_state`, `market_input_recovered`, `ws_input_recovered` | INFO/WARN: 待機・準備完了・異常・無受信・復旧 | state, reason_code, message_type, failure_count, last_valid_age_ms, pending_deliveries |
+| `input_failure_summary` | INFO: 入力処理の集約結果 | failure_count, suppressed_count, unresolved |
+| `api_authentication_state` | INFO: Private API認証の初回成功・失敗・回復への遷移 | outcome, reason_code, security_relevant |
 | `paper_order_*`, `paper_cancel_pending` | INFO: paperの受理・取消・約定、WARN: 拒否 | order_id, price, amount, fee_amount_quoteなど |
-| `recording_failed` | ERROR: recorderで最初に観測した永続化障害 | error_kind, persistence_uncertain |
+| `recording_failed`, `recording_status` | ERROR: 最初の永続化障害、INFO: 記録状況 | recorder_id, recorder_run_id, stage, error_kind, first_failure_sequence, dropped_records, persistence_uncertain |
 
-`task_ended` はBot/WSタスクの終了をDEBUGで記録します（中断やpanicを含み、成功とは限りません）。`bot_join_failed` はjoin時の異常をERRORで記録します。`bot_input_received` はライブactorがキューから取り出した入力の受信時刻と処理時刻をDEBUGで記録します。既存のlive runnerのdecision spanにある `received_at_ms` はrunnerへの取り込み時刻であり、コールバック時刻とは区別してください。
+`task_ended` はBot/WSタスクの終了をINFOで記録します。`outcome=unobserved` と `panicking` を持ち、中断やpanicを含むため成功を意味しません。`bot_abort_requested` はhandleのDropによる中断要求です。`bot_join_failed` はjoin時の異常をERRORで記録します。`bot_input_received` はライブactorがキューから取り出した入力の受信時刻と処理時刻をDEBUGで記録します。既存のlive runnerのdecision spanにある `received_at_ms` はrunnerへの取り込み時刻であり、コールバック時刻とは区別してください。
 
 `elapsed_ms` / `elapsed_us` は単調時計による経過時間です。市場のイベント時刻とローカル受信時刻は別フィールドです。取引所応答のstatusは、安全に整形した実際の値です。
 
@@ -103,9 +110,9 @@ spanはINFOで有効になります。JSON出力では `spans` 配列で親子�
 
 ## 秘密情報と障害時の確認
 
-APIキー・secret・署名・認証トークン、ヘッダー/本文全体、任意のエラーDebug出力は記録しません。外部文字列は原則128文字までに制限し、制御文字をエスケープします。価格・数量は浮動小数点へ変換しません。ログ自体には注文条件や戦略情報が含まれるため、閲覧権限を制限してください。依存ライブラリや独自subscriberの出力内容は別途確認してください。
+APIキー・secret・署名・認証トークン、ヘッダー/本文全体、任意のエラーDebug出力は記録しません。外部文字列は制御文字などをエスケープした後で128バイト以下に制限します。エスケープ途中では切りません。価格・数量は浮動小数点へ変換しません。ログ自体には注文条件や戦略情報が含まれるため、閲覧権限を制限してください。依存ライブラリや独自subscriberの出力内容は別途確認してください。
 
-recorderの最初のappend/flush障害を `recording_failed` で通知します。以後は同じ障害を繰り返し出力せず、従来どおり `status()` の欠落件数・永続化不確実性と、`flush()` / `finish()` の戻り値で確認できます。運用ログwriterの障害とは別です。
+recorderの最初のappend/flush障害を `recording_failed` で通知します。以後は同じ障害を繰り返し出力せず、`status()` の欠落件数・永続化不確実性と、`flush()` / `finish()` の戻り値で確認できます。`log_status()`・`finish()`・最後のrecorderのDropでは `recording_status` を出し、欠落の進行を確認できます。`first_failure_sequence` は障害を初めて観測した位置であり、実際の永続化済み境界を保証しません。運用ログwriterの障害とは別です。
 
 通知・監視の起点は、注文の `outcome=unknown`、`strategy_failed` / `bot_failed`、`recording_failed`、継続するHTTP失敗や入力欠損です。通知先・閾値は呼び出し側で設定します。
 
@@ -114,3 +121,81 @@ recorderの最初のappend/flush障害を `recording_failed` で通知します�
 通信・接続・再接続の詳細は下位クレートのtracingに任せます。bbutilは注文判断・操作結果・配送失敗・市場入力の完全性を記録します。WSコールバックでは下位側の接続spanを維持し、`connection_id` や再接続 `generation` と関連づけます。paperの再接続状態の監視と不完全性のマーキングは維持します。
 
 bbutilは実行記録のため、下位クライアントの `max_try=1` と外側の再試行ループを維持します。1つの `venue_request_id` に複数の `venue_attempt` が対応し、各試行で下位側の別の `request_id` が発行されます。下位側の `attempt=1` は正常です。bbutilのHTTPイベントは `venue_http_*` として、取引所コード・再試行予定・記録との対応を提供します。JSONLのフィールド名と形式は変更しません。
+
+
+## アプリの実行情報
+
+ビルダーに非機密の実行情報を設定します。`account_alias` は人間が付けた別名で、APIキーや実口座番号ではありません。未指定の文字列は空になります。modeはvenueが `live` / `paper` / `simulation` / `market_data` を提供し、独自venueの既定は `custom` です。
+
+```rust
+use bitbankutil_rs::telemetry::RunMetadata;
+let runtime = builder
+    .run_metadata(RunMetadata {
+        application: "usdtjpy".into(),
+        application_version: env!("CARGO_PKG_VERSION").into(),
+        build: "deployment-revision".into(),
+        instance: "bot6".into(),
+        strategy: "market-maker".into(),
+        account_alias: "primary".into(),
+    })
+    .feed_stale_after(std::time::Duration::from_secs(30))
+    .spawn();
+```
+
+ビルダー以外のAPI操作も含めたい場合は、`RunMetadata::span()` を親としてFutureを `.instrument(span)` してください。`span.enter()` のguardをawaitをまたいで保持しないでください。examplesはsubscriber設定後に `logging_initialized` を出します。
+
+## 理由コードとエラー情報
+
+`reason_code` は安全な分類です。取引所エラーはエラーenumのvariantを固定文字列へ写し、`exchange_code` は応答の `data.code` の数値だけを取り出します。認証関連の失敗には `security_relevant=true` が付きます。HTTP層は `connect` / `timeout` / `body` / `decode` / `request` などの観測可能な分類を記録し、再試行時は `will_retry`・`retry_delay_ms`・`action` を記録します。DNS/TLSの内訳を推測したり、秘密を含み得るエラー全文を出したりはしません。
+
+`order_api_finished` / `operation_finished` / `planned_operation_finished` は拒否と適用結果不明を区別したうえで理由コードを持ちます。従来の `Option<BitbankHandleError>` が `None` の場合は `unavailable_error_detail` となるので、同じ `api_call_id` / `venue_request_id` の `response_failed` / `response_decode_failed` を参照します。`api_call_finished.success` は応答の型変換まで含めた結果です。
+
+板の `DepthValidationError` は `reason_code`・`field`・`side`・0始まりの `level_index` を保持します。例: `reason_code=non_positive_amount, field=amount, side=sell, level_index=0` は全体板の先頭ask数量が正でないという意味です。`numeric_precision` は固定小数点で正確に表せない精度を意味します。外部の不正値そのものは記録しません。
+
+REST/WSの変換失敗は `missing_field` / `invalid_type` / `unknown_variant` などとフィールドパスを持ちます。RESTでは既にJSONのValueへ変換済みなので、元本文のline/columnを原因の代わりには使いません。未知フィールドは値を含めずパスを最大8件まで出します。
+
+戦略固有の失敗を識別する場合は `BotStrategy::error_code` を実装します。既定は `strategy_error` です。戻す文字列は固定の非機密コードにしてください。任意の `Debug` / `Display` をそのままログへ渡さないでください。Botの既知エラーは `time_reversed` / `delivery_limit` などを記録します。ユーザー定義エラーを含むsimulationの自由文は、既知の内部理由に一致する場合だけ具体化し、それ以外は `market_incomplete` に分類します。
+
+注文引数の検証失敗は、panic前に `input_validation_failed` と `field` / `reason_code` / `send_attempted=false` を残します。条件付き注文の開始ログには `trigger_price` も含まれます。paper注文拒否には拒否理由と注文条件・不足資産を残します。
+
+## 入力欠損・復旧・ログ量
+
+`market_conversion_failed` は `action=drop_message` を持ちます。板検証失敗時は直前の板を保持した事実と、最後の板時刻を記録します。`market_feed_state=degraded` から、検証に成功した全体板で `ready` へ戻ります。この状態は運用上の観測で、既存の売買・板適用方針を変更しません。`market_input_recovered` は同じ入力種別で再び変換に成功した意味で、板全体の再同期を保証しません。
+
+WSで有効入力が既定30秒届かなければ `state=stale` を一度記録し、有効入力の再開で `receiving` を記録します。これは全channelを合わせた無受信の監視で、特定channelだけの停止や時刻の正確性を保証しません。最初のスナップショット前は `waiting_snapshot` / `market_snapshot_pending` を確認します。再接続の通信詳細とgenerationは下位クレートのログを参照します。paperの入力異常はbuffer満杯・不正入力・再接続・フィード終了を区別して評価を無効にし、再接続だけで正常な損益へ戻しません。
+
+繰り返す入力エラーは入力種別と理由コードごとに1, 2, 4, 8, 16…回目を出します。理由が変われば最初の一件を残します。イベントの `failure_count` は総失敗件数、`suppressed_count` は省略件数です。`market_input_recovered` / `ws_input_recovered` と終了時の `input_failure_summary` で件数を確認してください。集約キーは内部の固定コードだけなので、未知のchannel名や不正値によってキー数が増えません。liveの配送が1秒以上待たされた場合は `ws_delivery_delayed` と待機時間・保留件数を記録します。
+
+強制killや電源断ではDrop・最終集約・flushを実行できないことがあります。独立した監視でプロセスとログ収集の生存を確認してください。
+
+## 運用ログwriterの監視
+
+`ExecutionRecorder` とsubscriberのwriterは別です。`telemetry::LoggingHealth` はwriterの書き込み/flush失敗、最後のエラー種別、書き込んだバイト数、最後の書き込み成功時刻を追跡します。writer内から再帰的にログを出さず、失敗も呼び出し元へ返します。
+
+```rust
+use bitbankutil_rs::telemetry::LoggingHealth;
+let health = LoggingHealth::default();
+let file = std::fs::OpenOptions::new()
+    .create(true).append(true).open("bot.jsonl")?;
+tracing_subscriber::fmt()
+    .json()
+    .with_env_filter("info,bitbankutil_rs=debug")
+    .with_writer(std::sync::Mutex::new(health.wrap(file)))
+    .init();
+
+// 独立した監視タスクから定期的に確認し、変化したときに別の経路へ通知します。
+let status = health.snapshot();
+if status.write_failures > 0 || status.flush_failures > 0 {
+    eprintln!("logging writer unhealthy: {:?}", status);
+}
+# Ok::<(), std::io::Error>(())
+```
+
+ライブラリは保存先・保存期間・ディスク容量上限を決めません。アプリのデプロイ設定でファイル権限、ローテーション/保持上限、残容量、収集停止、非同期writerを使う場合の欠落件数と終了時flushを設定します。異常を通知する経路は、壊れたwriterと独立させてください。`last_successful_write_ms` の停滞は、アプリが正常時にも出力する頻度と合わせて判定します。ログへのアクセス権、転送・保管の保護もデプロイ先で管理します。
+
+この分担は [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) の Event attributes / Data to exclude / Verification に基づきます。回帰テストでは理由・位置・相関・集約件数・復旧、CR/LFと長い文字列、秘密情報非出力、記録sinkおよび運用writerの失敗を確認します。
+
+
+## 0.5.0への移行
+
+`BitbankDepth::insert_diff` / `update_whole` と `MarketEventConversionError::InvalidDepth` のエラーは、文字列から `DepthValidationError` へ変更しました。`reason_code` / `field` / `side` / `level_index` を参照するか、必要ならDisplayで表示してください。`BotStrategy::error_code` と `TradingVenue::mode` には既定実装があります。運用ログのフィールド・レベル・集約方針はこの文書に合わせて更新してください。

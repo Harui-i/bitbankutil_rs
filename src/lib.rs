@@ -5,12 +5,13 @@ pub mod bitbank_structs;
 #[doc = include_str!("../docs/numeric-types.md")]
 pub mod book_units;
 mod depth_levels;
+mod error_diagnostics;
 pub mod market_event;
 pub mod order_domain;
 pub mod order_manager;
 pub mod paper_execution;
 pub mod response_handler;
-mod telemetry;
+pub mod telemetry;
 pub mod trading_venue;
 pub mod websocket_handler;
 

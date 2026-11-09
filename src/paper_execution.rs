@@ -794,7 +794,16 @@ impl PaperExecutionEngine {
 
     /// 切断・欠損を記録し、以降の確定と新規注文を停止する。再接続だけでは解除しない。
     pub fn mark_incomplete(&mut self, reason: impl Into<String>) {
-        self.settlement_issues.push(reason.into());
+        let reason = reason.into();
+        if !self.settlement_issues.contains(&reason) {
+            tracing::warn!(
+                event = "paper_market_incomplete",
+                reason_code = crate::telemetry::simulation_reason(&reason),
+                issue_count = self.settlement_issues.len() + 1,
+                action = "stop_settlement_and_new_orders"
+            );
+        }
+        self.settlement_issues.push(reason);
         self.record_settlement();
     }
 
@@ -1005,7 +1014,29 @@ impl PaperExecutionEngine {
             } => {
                 tracing::info!(event = "paper_order_accepted", order_id = order_id.0, pair = %crate::telemetry::safe(&order.pair), side = order.side.as_str(), price = %order.price, amount = %order.amount)
             }
-            PaperEvent::OrderRejected { .. } => tracing::warn!(event = "paper_order_rejected"),
+            PaperEvent::OrderRejected { order, reason } => {
+                let reason_code = match reason {
+                    PaperRejectReason::Numeric(e) => crate::error_diagnostics::numeric(e),
+                    PaperRejectReason::PostOnlyWouldTakeLiquidity => {
+                        "post_only_would_take_liquidity"
+                    }
+                    PaperRejectReason::ExecutionModelUnavailable(_) => {
+                        "execution_model_unavailable"
+                    }
+                    PaperRejectReason::PairMismatch { .. } => "pair_mismatch",
+                    PaperRejectReason::NonPositiveOrder { .. } => "non_positive_order",
+                    PaperRejectReason::InsufficientFunds { .. } => "insufficient_funds",
+                    PaperRejectReason::UnsupportedPair(_) => "unsupported_pair",
+                };
+                let asset = match reason {
+                    PaperRejectReason::InsufficientFunds { asset, .. } => {
+                        Some(crate::telemetry::safe(asset))
+                    }
+                    _ => None,
+                };
+                tracing::warn!(event = "paper_order_rejected", reason_code, pair = %crate::telemetry::safe(&order.pair),
+                    side = order.side.as_str(), price = %order.price, amount = %order.amount, asset, action = "reject_order");
+            }
             PaperEvent::OrderCancelPending { order_id, .. } => {
                 tracing::info!(event = "paper_cancel_pending", order_id = order_id.0)
             }

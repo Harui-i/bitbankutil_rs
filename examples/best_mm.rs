@@ -336,6 +336,11 @@ fn spawn_bot<V: TradingVenue>(
 ) -> BitbankBotRuntime<std::convert::Infallible> {
     let bot = MyBot::new(pair.clone(), tick_size, refresh_cycle, lot, max_lot);
     BitbankBotBuilder::new(bot, venue)
+        .run_metadata(bitbankutil_rs::telemetry::RunMetadata {
+            application: "best_mm".into(),
+            application_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
         .add_pair(pair)
         .websocket_config(websocket_config)
         .spawn()
@@ -400,6 +405,11 @@ async fn main() {
         )
         .with_writer(std::io::stderr)
         .init();
+    tracing::info!(
+        event = "logging_initialized",
+        format = "text",
+        writer = "stderr"
+    );
 
     let expected_len = match mode {
         Some("--live") => 7,

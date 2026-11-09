@@ -556,10 +556,17 @@ impl BitbankDepth {
     pub fn last_timestamp(&self) -> i64 {
         self.last_timestamp
     }
-    pub fn insert_diff(&mut self, diff: BitbankDepthDiff) -> Result<(), String> {
-        let seq = diff.s.parse::<u64>().map_err(|e| e.to_string())?;
-        let asks = Self::parse_levels(&diff.a, false)?;
-        let bids = Self::parse_levels(&diff.b, false)?;
+    pub(crate) fn whole_sequence(&self) -> Option<u64> {
+        self.last_whole
+    }
+
+    pub fn insert_diff(&mut self, diff: BitbankDepthDiff) -> Result<(), DepthValidationError> {
+        let seq = diff
+            .s
+            .parse::<u64>()
+            .map_err(|_| DepthValidationError::new("invalid_sequence", "s", None, None))?;
+        let asks = Self::parse_levels(&diff.a, false, "sell")?;
+        let bids = Self::parse_levels(&diff.b, false, "buy")?;
         if self.last_whole.is_some_and(|s| seq <= s) || self.diff_buffer.contains_key(&seq) {
             return Ok(());
         }
@@ -599,10 +606,13 @@ impl BitbankDepth {
         self.diff_buffer.insert(seq, diff);
         Ok(())
     }
-    pub fn update_whole(&mut self, whole: BitbankDepthWhole) -> Result<(), String> {
-        let seq = whole.sequenceId.parse::<u64>().map_err(|e| e.to_string())?;
-        let asks = Self::parse_levels(&whole.asks, true)?;
-        let bids = Self::parse_levels(&whole.bids, true)?;
+    pub fn update_whole(&mut self, whole: BitbankDepthWhole) -> Result<(), DepthValidationError> {
+        let seq = whole
+            .sequenceId
+            .parse::<u64>()
+            .map_err(|_| DepthValidationError::new("invalid_sequence", "sequenceId", None, None))?;
+        let asks = Self::parse_levels(&whole.asks, true, "sell")?;
+        let bids = Self::parse_levels(&whole.bids, true, "buy")?;
         if self.last_whole.is_some_and(|s| seq <= s) {
             return Ok(());
         }
@@ -663,19 +673,36 @@ impl BitbankDepth {
         }
         Ok(())
     }
-    fn parse_levels(levels: &[Vec<String>], whole: bool) -> Result<Vec<(Price, Quantity)>, String> {
+    fn parse_levels(
+        levels: &[Vec<String>],
+        whole: bool,
+        side: &'static str,
+    ) -> Result<Vec<(Price, Quantity)>, DepthValidationError> {
         let mut parsed = Vec::with_capacity(levels.len());
-        for level in levels {
+        for (index, level) in levels.iter().enumerate() {
+            let failure =
+                |reason, field| DepthValidationError::new(reason, field, Some(side), Some(index));
             if level.len() != 2 {
-                return Err("invalid price level".into());
+                return Err(failure("invalid_level_shape", "level"));
             }
-            let price = level[0].parse::<Price>().map_err(|e| e.to_string())?;
-            let amount = level[1].parse::<Quantity>().map_err(|e| e.to_string())?;
-            if price <= Price::ZERO
-                || amount < Quantity::ZERO
-                || (whole && amount == Quantity::ZERO)
-            {
-                return Err("invalid price or amount".into());
+            let price = level[0]
+                .parse::<Price>()
+                .map_err(|e| failure(crate::error_diagnostics::numeric(&e), "price"))?;
+            let amount = level[1]
+                .parse::<Quantity>()
+                .map_err(|e| failure(crate::error_diagnostics::numeric(&e), "amount"))?;
+            if price <= Price::ZERO {
+                return Err(failure("non_positive_price", "price"));
+            }
+            if amount < Quantity::ZERO || (whole && amount == Quantity::ZERO) {
+                return Err(failure(
+                    if whole {
+                        "non_positive_amount"
+                    } else {
+                        "negative_amount"
+                    },
+                    "amount",
+                ));
             }
             parsed.push((price, amount));
         }
@@ -698,13 +725,47 @@ impl BitbankDepth {
         for diff in self.diff_buffer.values() {
             Self::apply_levels(
                 Arc::make_mut(&mut self.asks),
-                &Self::parse_levels(&diff.a, false).expect("validated buffered asks"),
+                &Self::parse_levels(&diff.a, false, "sell").expect("validated buffered asks"),
             );
             Self::apply_levels(
                 Arc::make_mut(&mut self.bids),
-                &Self::parse_levels(&diff.b, false).expect("validated buffered bids"),
+                &Self::parse_levels(&diff.b, false, "buy").expect("validated buffered bids"),
             );
             self.last_timestamp = self.last_timestamp.max(diff.t);
         }
     }
 }
+
+/// 板の検証失敗。外部の値やエラー全文を含めず、安全な位置と理由を保持する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthValidationError {
+    pub reason_code: &'static str,
+    pub field: &'static str,
+    pub side: Option<&'static str>,
+    pub level_index: Option<usize>,
+}
+impl DepthValidationError {
+    fn new(
+        reason_code: &'static str,
+        field: &'static str,
+        side: Option<&'static str>,
+        level_index: Option<usize>,
+    ) -> Self {
+        Self {
+            reason_code,
+            field,
+            side,
+            level_index,
+        }
+    }
+}
+impl std::fmt::Display for DepthValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: field={}, side={:?}, level_index={:?}",
+            self.reason_code, self.field, self.side, self.level_index
+        )
+    }
+}
+impl std::error::Error for DepthValidationError {}

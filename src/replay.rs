@@ -554,15 +554,31 @@ pub fn decode_bitbank(raw: &Value) -> io::Result<Option<(String, BitbankInboundM
         .get(1)
         .and_then(|v| v.get("room_name"))
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid("missing room_name"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                crate::telemetry::DecodeDiagnostic {
+                    reason_code: "missing_field",
+                    field: "room_name".into(),
+                },
+            )
+        })?;
     let data = raw
         .get(1)
         .and_then(|v| v.get("message"))
         .and_then(|v| v.get("data"))
-        .ok_or_else(|| invalid("missing message.data"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                crate::telemetry::DecodeDiagnostic {
+                    reason_code: "missing_field",
+                    field: "message.data".into(),
+                },
+            )
+        })?;
     macro_rules! parse {
         ($t:ty) => {
-            serde_json::from_value::<$t>(data.clone()).map_err(invalid)?
+            crate::telemetry::decode_value::<$t>(data.clone())?
         };
     }
     let (prefix, message) = if room.starts_with("depth_whole_") {
