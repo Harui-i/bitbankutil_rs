@@ -1,6 +1,6 @@
 [package]
 name = "bitbankutil_rs"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Rust utilities for bitbank REST and WebSocket APIs, with trading bot and paper trading support."
@@ -27,6 +27,7 @@ crypto-botters = { package = "crypto-botters-bitbank", version = "0.8.1", featur
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 serde_ignored = "0.1.14"
+serde_path_to_error = "0.1.20"
 
 [[bench]]
 name = "queue_history"

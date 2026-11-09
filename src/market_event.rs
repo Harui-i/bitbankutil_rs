@@ -248,7 +248,7 @@ pub enum MarketEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarketEventConversionError {
-    InvalidDepth(String),
+    InvalidDepth(crate::bitbank_structs::DepthValidationError),
     InvalidTradeSide(ParseOrderError),
 }
 

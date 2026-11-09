@@ -84,6 +84,8 @@ struct QueueHistory {
     previous: Vec<Value>,
 }
 struct State {
+    recorder_id: u64,
+    first_failure_sequence: Option<u64>,
     profile: RecordingProfile,
     queues: std::collections::BTreeMap<u64, QueueHistory>,
     run_id: String,
@@ -172,6 +174,8 @@ impl ExecutionRecorder {
         sink: impl EventSink + 'static,
     ) -> Self {
         let r = Self(Arc::new(Mutex::new(State {
+            recorder_id: crate::telemetry::next_id(),
+            first_failure_sequence: None,
             profile,
             queues: Default::default(),
             run_id: run_id.into(),
@@ -318,7 +322,10 @@ impl ExecutionRecorder {
             data,
         };
         if let Err(e) = s.sink.append(&record) {
-            tracing::error!(event = "recording_failed", error_kind = ?e.kind(), persistence_uncertain = true);
+            s.first_failure_sequence = Some(s.sequence);
+            tracing::error!(event = "recording_failed", recorder_id = s.recorder_id, recorder_run_id = %crate::telemetry::safe(&s.run_id),
+                stage = "append", first_failure_sequence = s.sequence, dropped_records = s.status.dropped_records + 1,
+                error_kind = ?e.kind(), persistence_uncertain = true, action = "disable_recording");
             s.status.error = Some(e.to_string());
             s.status.dropped_records += 1;
             s.status.persistence_uncertain = true;
@@ -338,7 +345,10 @@ impl ExecutionRecorder {
         }
         if s.status.error.is_none() {
             if let Err(e) = s.sink.flush() {
-                tracing::error!(event = "recording_failed", error_kind = ?e.kind(), persistence_uncertain = true);
+                s.first_failure_sequence = Some(s.sequence);
+                tracing::error!(event = "recording_failed", recorder_id = s.recorder_id, recorder_run_id = %crate::telemetry::safe(&s.run_id),
+                    stage = "flush", first_failure_sequence = s.sequence, dropped_records = s.status.dropped_records,
+                    error_kind = ?e.kind(), persistence_uncertain = true, action = "disable_recording");
                 s.status.error = Some(e.to_string());
                 s.status.persistence_uncertain = true;
             }
@@ -350,7 +360,24 @@ impl ExecutionRecorder {
     }
     pub fn finish(&self) -> io::Result<()> {
         self.record_lazy("run_finished", || json!({}));
-        self.flush()
+        let result = self.flush();
+        self.log_status();
+        result
+    }
+    /// Explicit health checkpoint, also emitted by finish and final recorder drop.
+    pub fn log_status(&self) {
+        let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        log_recording_status(&s);
+    }
+}
+fn log_recording_status(s: &State) {
+    tracing::info!(event = "recording_status", recorder_id = s.recorder_id, recorder_run_id = %crate::telemetry::safe(&s.run_id),
+        sequence = s.sequence, first_failure_sequence = s.first_failure_sequence, dropped_records = s.status.dropped_records,
+        persistence_uncertain = s.status.persistence_uncertain, healthy = s.status.error.is_none());
+}
+impl Drop for State {
+    fn drop(&mut self) {
+        log_recording_status(self);
     }
 }
 /// snapshot/delta列を復元する。streamごとに作り、欠損・逆順・形式違いをエラーにする。
@@ -480,6 +507,9 @@ pub(crate) async fn operation<T: Serialize>(
                     outcome = "unknown",
                     pair,
                     error_category = crate::telemetry::category(e),
+                    reason_code = crate::error_diagnostics::venue(e).0,
+                    exchange_code = crate::error_diagnostics::venue(e).1,
+                    security_relevant = crate::error_diagnostics::venue(e).2,
                     elapsed_ms
                 ),
                 Err(e) => tracing::warn!(
@@ -491,6 +521,9 @@ pub(crate) async fn operation<T: Serialize>(
                     },
                     pair,
                     error_category = crate::telemetry::category(e),
+                    reason_code = crate::error_diagnostics::venue(e).0,
+                    exchange_code = crate::error_diagnostics::venue(e).1,
+                    security_relevant = crate::error_diagnostics::venue(e).2,
                     elapsed_ms
                 ),
             }

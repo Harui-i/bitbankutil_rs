@@ -176,6 +176,7 @@ enum MarketInput {
 }
 #[derive(Clone)]
 struct InternalMarket {
+    source_span: tracing::Span,
     input_sequence: u64,
     id: Option<InputId>,
     received_at_ms: i64,
@@ -207,6 +208,7 @@ impl Ord for MarketEntry {
 
 #[derive(Clone)]
 struct Delivery<C> {
+    source_span: tracing::Span,
     id: Option<InputId>,
     event: BotEvent<C>,
 }
@@ -358,6 +360,12 @@ impl<C: Send + 'static> SimulationDriver<C> {
     pub fn mark_incomplete(&mut self, reason: impl Into<String>) {
         let reason = reason.into();
         if !self.report.issues.contains(&reason) {
+            tracing::warn!(
+                event = "simulation_incomplete",
+                reason_code = crate::telemetry::simulation_reason(&reason),
+                action = "invalidate_evaluation",
+                issue_count = self.report.issues.len() + 1
+            );
             self.report.issues.push(reason);
         }
     }
@@ -400,6 +408,7 @@ impl<C: Send + 'static> SimulationDriver<C> {
         self.markets.push(Reverse(MarketEntry {
             key: (at, order, self.market_sequence),
             event: InternalMarket {
+                source_span: tracing::Span::current(),
                 input_sequence: self.sequence,
                 id,
                 received_at_ms: received,
@@ -512,6 +521,7 @@ impl<C: Send + 'static> SimulationDriver<C> {
             self.deliveries.push_back((
                 (received, seq),
                 Delivery {
+                    source_span: tracing::Span::current(),
                     id,
                     event: BotEvent::Market(event),
                 },
@@ -586,8 +596,14 @@ impl<C: Send + 'static> SimulationDriver<C> {
                 }
             }
         }
-        self.deliveries
-            .push_back(((received, seq), Delivery { id, event }));
+        self.deliveries.push_back((
+            (received, seq),
+            Delivery {
+                source_span: tracing::Span::current(),
+                id,
+                event,
+            },
+        ));
         Ok(())
     }
     fn convert_internal(&mut self, input: MarketInput) -> Result<Option<MarketEvent>, String> {
@@ -716,7 +732,9 @@ impl<C: Send + 'static> SimulationDriver<C> {
                     }))
                     });
                 }
-                let event = self.convert_internal(entry.input)?;
+                let event = entry
+                    .source_span
+                    .in_scope(|| self.convert_internal(entry.input))?;
                 if let Some(event) = event {
                     crate::execution_recording::sync_scope(context, || {
                         runner.on_simulation_market(&event, entry.received_at_ms)
@@ -733,7 +751,9 @@ impl<C: Send + 'static> SimulationDriver<C> {
                 } else {
                     None
                 };
-                runner.enqueue_simulation_delivery(time, entry.id, market_id, entry.event, true)?;
+                entry.source_span.in_scope(|| {
+                    runner.enqueue_simulation_delivery(time, entry.id, market_id, entry.event, true)
+                })?;
             }
             // process_next_internalは予約イベントも処理する。市場・口座処理は上で完了済み。
             runner.tick(time).await?;
@@ -757,6 +777,7 @@ mod queue_tests {
         MarketEntry {
             key,
             event: InternalMarket {
+                source_span: tracing::Span::current(),
                 input_sequence: key.2,
                 id: None,
                 received_at_ms: key.2 as i64,

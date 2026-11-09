@@ -42,7 +42,7 @@ impl BitbankPublicApiClient {
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#ticker
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty, pair = %crate::telemetry::safe(pair)))]
     pub async fn get_ticker(
         &self,
         pair: &str,
@@ -62,18 +62,18 @@ impl BitbankPublicApiClient {
             )
             .await;
 
-        let duration = start_time.elapsed();
+        let result = crate::response_handler::handle_response("get_ticker", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_ticker",
-            elapsed_ms = duration.as_secs_f64() * 1000.0
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
-
-        crate::response_handler::handle_response("get_ticker", res)
+        result
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickers
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
     pub async fn get_tickers(
         &self,
     ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
@@ -92,18 +92,18 @@ impl BitbankPublicApiClient {
             )
             .await;
 
-        let duration = start_time.elapsed();
+        let result = crate::response_handler::handle_response("get_tickers", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_tickers",
-            elapsed_ms = duration.as_secs_f64() * 1000.0
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
-
-        crate::response_handler::handle_response("get_tickers", res)
+        result
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#tickersjpy
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
     pub async fn get_tickers_jpy(
         &self,
     ) -> Result<Vec<BitbankTickersDatum>, Option<BitbankHandleError>> {
@@ -122,17 +122,17 @@ impl BitbankPublicApiClient {
             )
             .await;
 
-        let duration = start_time.elapsed();
+        let result = crate::response_handler::handle_response("get_tickers_jpy", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_tickers_jpy",
-            elapsed_ms = duration.as_secs_f64() * 1000.0
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
-
-        crate::response_handler::handle_response("get_tickers_jpy", res)
+        result
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty, pair = %crate::telemetry::safe(pair)))]
     pub async fn get_transactions(
         &self,
         pair: &str,
@@ -162,17 +162,17 @@ impl BitbankPublicApiClient {
             )
             .await;
 
-        let duration = start_time.elapsed();
+        let result = crate::response_handler::handle_response("get_transactions", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_transactions",
-            elapsed_ms = duration.as_secs_f64() * 1000.0
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
-
-        crate::response_handler::handle_response("get_transactions", res)
+        result
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty, pair = %crate::telemetry::safe(pair)))]
     pub async fn get_depth(
         &self,
         pair: &str,
@@ -192,18 +192,18 @@ impl BitbankPublicApiClient {
             )
             .await;
 
-        let duration = start_time.elapsed();
+        let result = crate::response_handler::handle_response("get_depth", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_depth",
-            elapsed_ms = duration.as_secs_f64() * 1000.0
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
-
-        crate::response_handler::handle_response("get_depth", res)
+        result
     }
 
     // https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md#candlestick
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty, pair = %crate::telemetry::safe(pair)))]
     pub async fn get_candlestick(
         &self,
         pair: &str,
@@ -226,17 +226,17 @@ impl BitbankPublicApiClient {
             )
             .await;
 
-        let duration = start_time.elapsed();
+        let result = crate::response_handler::handle_response("get_candlestick", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_candlestick",
-            elapsed_ms = duration.as_secs_f64() * 1000.0
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
-
-        crate::response_handler::handle_response("get_candlestick", res)
+        result
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty, pair = %crate::telemetry::safe(pair)))]
     pub async fn get_circuit_break_info(
         &self,
         pair: &str,
@@ -255,13 +255,13 @@ impl BitbankPublicApiClient {
                 None::<()>,
             )
             .await;
-        let duration = start_time.elapsed();
+        let result = crate::response_handler::handle_response("get_circuit_break_info", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_circuit_break_info",
-            elapsed_ms = duration.as_secs_f64() * 1000.0
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
-
-        crate::response_handler::handle_response("get_circuit_break_info", res)
+        result
     }
 }

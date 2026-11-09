@@ -40,6 +40,11 @@ async fn main() {
         )
         .with_writer(std::io::stderr)
         .init();
+    tracing::info!(
+        event = "logging_initialized",
+        format = "text",
+        writer = "stderr"
+    );
 
     let args: Vec<String> = env::args().collect();
 
@@ -57,6 +62,11 @@ async fn main() {
     let bot = MyBot::new();
 
     let _runtime = BitbankBotBuilder::market_data(bot)
+        .run_metadata(bitbankutil_rs::telemetry::RunMetadata {
+            application: "board_viewer".into(),
+            application_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
         .add_pair(pair)
         .websocket_config(wsc)
         .spawn();

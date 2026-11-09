@@ -360,19 +360,27 @@ fn report_result<T>(operation: &str, result: &Result<T, TradingVenueError>) {
         Err(error) => {
             let outcome = crate::telemetry::outcome(error);
             let error_category = crate::telemetry::category(error);
+            let (reason_code, exchange_code, security_relevant) =
+                crate::error_diagnostics::venue(error);
             if outcome == "unknown" {
                 tracing::error!(
                     event = "planned_operation_finished",
                     operation,
                     outcome,
-                    error_category
+                    error_category,
+                    reason_code,
+                    exchange_code,
+                    security_relevant
                 );
             } else {
                 tracing::warn!(
                     event = "planned_operation_finished",
                     operation,
                     outcome,
-                    error_category
+                    error_category,
+                    reason_code,
+                    exchange_code,
+                    security_relevant
                 );
             }
         }

@@ -71,6 +71,10 @@ pub struct PlacedOrder {
 /// 注文操作と口座取得の共通インターフェース。
 /// Cloneした値も同じ口座・注文状態を共有すること。
 pub trait TradingVenue: Clone + Send + Sync + 'static {
+    /// Non-sensitive execution mode for operational logs.
+    fn mode(&self) -> &'static str {
+        "custom"
+    }
     /// 戦略へ渡す操作窓口。実行基盤の権限を引き継がない。
     fn strategy_view(&self) -> Self {
         self.clone()
@@ -166,6 +170,9 @@ pub trait TradingVenue: Clone + Send + Sync + 'static {
 pub struct NoTradingVenue;
 
 impl TradingVenue for NoTradingVenue {
+    fn mode(&self) -> &'static str {
+        "market_data"
+    }
     fn account_snapshot<'a>(&'a self, _pair: &'a str) -> TradingVenueFuture<'a, AccountSnapshot> {
         Box::pin(async { Err(TradingVenueError::Unavailable) })
     }
@@ -229,6 +236,9 @@ impl BitbankTradingVenue {
 }
 
 impl TradingVenue for BitbankTradingVenue {
+    fn mode(&self) -> &'static str {
+        "live"
+    }
     fn recorder(&self) -> Option<crate::execution_recording::ExecutionRecorder> {
         self.recorder.clone()
     }

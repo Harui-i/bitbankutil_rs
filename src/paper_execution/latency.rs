@@ -628,6 +628,13 @@ impl PaperTradingVenue {
 }
 
 impl TradingVenue for PaperTradingVenue {
+    fn mode(&self) -> &'static str {
+        if self.simulation_config().is_some() {
+            "simulation"
+        } else {
+            "paper"
+        }
+    }
     fn strategy_view(&self) -> Self {
         let mut view = self.clone();
         view.execution_access = false;
