@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use tracing::Instrument;
 
 pub trait EventSink: Send {
     fn append(&mut self, record: &ExecutionRecord) -> io::Result<()>;
@@ -317,6 +318,7 @@ impl ExecutionRecorder {
             data,
         };
         if let Err(e) = s.sink.append(&record) {
+            tracing::error!(event = "recording_failed", error_kind = ?e.kind(), persistence_uncertain = true);
             s.status.error = Some(e.to_string());
             s.status.dropped_records += 1;
             s.status.persistence_uncertain = true;
@@ -336,6 +338,7 @@ impl ExecutionRecorder {
         }
         if s.status.error.is_none() {
             if let Err(e) = s.sink.flush() {
+                tracing::error!(event = "recording_failed", error_kind = ?e.kind(), persistence_uncertain = true);
                 s.status.error = Some(e.to_string());
                 s.status.persistence_uncertain = true;
             }
@@ -414,11 +417,100 @@ pub(crate) async fn operation<T: Serialize>(
     request: Value,
     future: impl std::future::Future<Output = Result<T, crate::trading_venue::TradingVenueError>>,
 ) -> Result<T, crate::trading_venue::TradingVenueError> {
+    let mut c = current_context();
+    let operation_id = recorder.map_or_else(crate::telemetry::next_id, ExecutionRecorder::next_id);
+    c.operation_id = Some(operation_id);
+    let span = tracing::info_span!("operation", operation_id, operation = name);
+    let pair = request
+        .get("pair")
+        .or_else(|| request.pointer("/order/pair"))
+        .and_then(|v| v.as_str())
+        .map(crate::telemetry::safe);
+    let mutation = matches!(name, "place_order" | "cancel_orders");
+    scope(
+        c,
+        async {
+            let started = Instant::now();
+            if mutation {
+                tracing::info!(event = "operation_started", pair, operation = name);
+            } else {
+                tracing::debug!(event = "operation_started", pair, operation = name);
+            }
+            if let Some(order) = request.get("order") {
+                tracing::info!(
+                    event = "order_submit_started",
+                    pair,
+                    side = order.get("side").and_then(|v| v.as_str()),
+                    price = order.get("price").map(|v| v
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string())),
+                    amount = order.get("amount").map(|v| v
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string()))
+                );
+            }
+            if let Some(ids) = request.get("order_ids") {
+                tracing::info!(event = "cancel_submit_started", pair, order_ids = %ids);
+            }
+            let result = recorded_operation(recorder, name, request, future).await;
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            match &result {
+                Ok(value) if mutation => {
+                    let order_id = serde_json::to_value(value)
+                        .ok()
+                        .and_then(|v| v.get("order_id").and_then(Value::as_u64));
+                    tracing::info!(
+                        event = "operation_finished",
+                        outcome = "accepted",
+                        pair,
+                        order_id,
+                        elapsed_ms
+                    );
+                }
+                Ok(_) => tracing::debug!(
+                    event = "operation_finished",
+                    outcome = "success",
+                    pair,
+                    elapsed_ms
+                ),
+                Err(e) if mutation && crate::telemetry::outcome(e) == "unknown" => tracing::error!(
+                    event = "operation_finished",
+                    outcome = "unknown",
+                    pair,
+                    error_category = crate::telemetry::category(e),
+                    elapsed_ms
+                ),
+                Err(e) => tracing::warn!(
+                    event = "operation_finished",
+                    outcome = if mutation {
+                        crate::telemetry::outcome(e)
+                    } else {
+                        "failed"
+                    },
+                    pair,
+                    error_category = crate::telemetry::category(e),
+                    elapsed_ms
+                ),
+            }
+            result
+        }
+        .instrument(span),
+    )
+    .await
+}
+
+async fn recorded_operation<T: Serialize>(
+    recorder: Option<&ExecutionRecorder>,
+    name: &str,
+    request: Value,
+    future: impl std::future::Future<Output = Result<T, crate::trading_venue::TradingVenueError>>,
+) -> Result<T, crate::trading_venue::TradingVenueError> {
     let Some(r) = recorder.filter(|r| r.enabled("operation_started")) else {
         return future.await;
     };
-    let mut c = current_context();
-    c.operation_id = Some(r.next_id());
+    let c = current_context();
     scope(c, async {
         let measurement = Measurement::start();
         r.record_lazy(

@@ -4,16 +4,17 @@ use crate::{
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankOption, BitbankOptions},
-    generic_api_client::http::*,
+    http::*,
     traits::HttpOption,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Mutex;
+use tracing::Instrument;
 #[derive(Clone, Default)]
 pub(crate) struct Transport {
     pub recorder: Option<ExecutionRecorder>,
-    http: crypto_botters::generic_api_client::http::Client,
+    http: crypto_botters::http::Client,
 }
 struct Observed<H> {
     response_clock: Mutex<Option<crate::clock_observation::ClockObservation>>,
@@ -77,14 +78,19 @@ impl Transport {
         body: Option<B>,
     ) -> Result<BitbankApiResponse, RequestError<&'static str, BitbankHandleError>> {
         let mut context = current_context();
-        if let Some(r) = &self.recorder {
-            if context.operation_id.is_none() {
-                context.operation_id = Some(r.next_id());
-            }
+        if context.operation_id.is_none() {
+            context.operation_id = Some(
+                self.recorder
+                    .as_ref()
+                    .map_or_else(crate::telemetry::next_id, ExecutionRecorder::next_id),
+            );
         }
+        let span = tracing::info_span!("venue_http_request", operation_id = context.operation_id,
+            endpoint = %crate::telemetry::safe(path), method = method.as_str());
         scope(
             context,
-            self.request_inner(options, method, path, query, body),
+            self.request_inner(options, method, path, query, body)
+                .instrument(span),
         )
         .await
     }
@@ -108,7 +114,13 @@ impl Transport {
             status: Mutex::new(None),
             code: Mutex::new(None),
         };
-        let request_id = self.recorder.as_ref().map(|r| r.next_id());
+        let request_id = Some(
+            self.recorder
+                .as_ref()
+                .map_or_else(crate::telemetry::next_id, ExecutionRecorder::next_id),
+        );
+        let request_span = tracing::info_span!("venue_request", venue_request_id = request_id);
+        // instrument each HTTP future; never hold an entered span across await.
         let request = self.recorder.as_ref().map(|_| {
             let value = body
                 .as_ref()
@@ -117,6 +129,7 @@ impl Transport {
             safe_request(path, value.as_ref().unwrap_or(&Value::Null))
         });
         let total = Measurement::start();
+        tracing::debug!(parent: &request_span, event = "venue_http_request_started", venue_request_id = request_id);
         if let Some(r) = &self.recorder {
             r.record_lazy("http_request_started", || {
                 json!({
@@ -138,6 +151,7 @@ impl Transport {
             *observed.code.lock().unwrap() = None;
             let request_clock = crate::clock_observation::ClockObservation::now();
             let measurement = Measurement::start();
+            tracing::debug!(parent: &request_span, event = "venue_http_attempt_started", venue_request_id = request_id, attempt);
             if let Some(r) = &self.recorder {
                 r.record_lazy("http_started", || {
                     json!({
@@ -156,6 +170,7 @@ impl Transport {
                     body.as_ref(),
                     &observed,
                 )
+                .instrument(tracing::info_span!(parent: &request_span, "venue_http_attempt", venue_attempt = attempt))
                 .await;
             let timing = measurement.finish();
             let timeout = match &result {
@@ -173,6 +188,16 @@ impl Transport {
                 Err(RequestError::BuildRequestError(_)) => "build",
                 Err(RequestError::ResponseHandleError(_)) => "response",
             };
+            let http_status = *observed.status.lock().unwrap();
+            let exchange_code = *observed.code.lock().unwrap();
+            let elapsed_us = timing.get("elapsed_us").and_then(Value::as_u64);
+            if result.is_ok() {
+                tracing::debug!(parent: &request_span, event = "venue_http_attempt_finished", venue_request_id = request_id,
+                    attempt, stage, http_status, exchange_code, timeout, will_retry, elapsed_us);
+            } else {
+                tracing::warn!(parent: &request_span, event = "venue_http_attempt_finished", venue_request_id = request_id,
+                    attempt, stage, http_status, exchange_code, timeout, will_retry, elapsed_us);
+            }
             if let Some(r) = &self.recorder {
                 r.record_lazy("http_finished", || json!({
                     "request_id": request_id, "attempt": attempt,
@@ -191,6 +216,9 @@ impl Transport {
                 tokio::time::sleep(config.retry_cooldown).await;
             } else {
                 let timing = total.finish();
+                tracing::debug!(parent: &request_span, event = "venue_http_request_finished", venue_request_id = request_id,
+                    attempts = attempt, stage, success = result.is_ok(), timeout,
+                    elapsed_us = timing.get("elapsed_us").and_then(|v| v.as_u64()));
                 if let Some(r) = &self.recorder {
                     r.record_lazy("http_request_finished", || {
                         json!({

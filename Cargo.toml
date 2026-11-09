@@ -1,6 +1,6 @@
 [package]
 name = "bitbankutil_rs"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Rust utilities for bitbank REST and WebSocket APIs, with trading bot and paper trading support."
@@ -21,12 +21,11 @@ live-private-order-api = ["live-private-api"]
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
-crypto-botters = { package = "crypto-botters-bitbank", version = "0.8.0", features = [
+crypto-botters = { package = "crypto-botters-bitbank", version = "0.8.1", features = [
   "bitbank",
 ] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
-env_logger = "0.11.11"
-log = "0.4.35"
+tracing = "0.1"
 serde_ignored = "0.1.14"
 
 [[bench]]
@@ -36,3 +35,6 @@ harness = false
 [[bench]]
 name = "recording"
 harness = false
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

@@ -1,11 +1,11 @@
 use crate::bitbank_bot::BitbankInboundMessage;
-use crypto_botters::{
-    Client, bitbank::BitbankOption, generic_api_client::websocket::WebSocketConfig,
-};
+use crypto_botters::{Client, bitbank::BitbankOption, websocket::WebSocketConfig};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 /// 公開WSを起動する。observationを指定するとJSONコールバック冒頭の時計を記録する。
 /// 詳細は[`crate::clock_observation`]を参照。
+#[tracing::instrument(skip_all, fields(pair = %crate::telemetry::safe(&pair)))]
 pub async fn run_websocket(
     pair: String,
     client_options: Vec<BitbankOption>,
@@ -13,6 +13,7 @@ pub async fn run_websocket(
     tx: mpsc::Sender<BitbankInboundMessage>,
     observation: Option<crate::execution_recording::ExecutionRecorder>,
 ) {
+    let _lifetime = crate::telemetry::TaskLifetime("websocket");
     let mut ws_client = Client::new();
 
     for option in client_options {
@@ -30,7 +31,7 @@ pub async fn run_websocket(
     ];
 
     let observer = observation.map(crate::clock_observation::WsObserver::new);
-    let _transactions_connection = ws_client
+    let connection = ws_client
         .websocket(
             "",
             move |val: serde_json::Value| dispatch_callback(val, observer.as_ref(), &tx),
@@ -39,8 +40,11 @@ pub async fn run_websocket(
                 BitbankOption::WebSocketConfig(wsc),
             ],
         )
-        .await
-        .unwrap();
+        .await;
+    if connection.is_err() {
+        tracing::error!(event = "market_feed_start_failed");
+    }
+    let _transactions_connection = connection.unwrap();
 
     // スリープ
     loop {
@@ -61,12 +65,17 @@ fn dispatch_callback(
     match decoded {
         Ok(Some((_, message))) => {
             let tx = tx.clone();
-            tokio::spawn(async move {
-                let _ = tx.send(message).await;
-            });
+            tokio::spawn(
+                async move {
+                    if tx.send(message).await.is_err() {
+                        tracing::debug!(event = "ws_delivery_closed", reason = "receiver_closed");
+                    }
+                }
+                .in_current_span(),
+            );
         }
         Ok(None) => {}
-        Err(error) => log::warn!("invalid Bitbank callback: {error}"),
+        Err(_error) => tracing::warn!(event = "ws_decode_failed", reason = "invalid_callback"),
     }
 }
 
@@ -78,6 +87,36 @@ mod tests {
         execution_recording::{ExecutionRecorder, JsonlSink, read_records, tests::Memory},
     };
     use serde_json::json;
+    #[tokio::test]
+    async fn closed_receiver_is_observable_without_logging_payload() {
+        let capture = crate::telemetry::tests::Capture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let span = tracing::info_span!("websocket", connection_id = 42);
+        span.in_scope(|| dispatch_callback(
+            json!(["message",{"room_name":"depth_diff_btc_jpy","message":{"data":{"a":[],"b":[],"t":123,"s":"42"},"secret":"secret-sentinel"}}]),
+            None,
+            &tx,
+        ));
+        tokio::task::yield_now().await;
+        assert!(
+            capture
+                .events()
+                .iter()
+                .any(|e| e["fields"]["event"] == "ws_delivery_closed")
+        );
+        let events = capture.events();
+        let closed = events
+            .iter()
+            .find(|e| e["fields"]["event"] == "ws_delivery_closed")
+            .unwrap();
+        assert_eq!(
+            crate::telemetry::tests::span_field(closed, "connection_id"),
+            Some(json!(42))
+        );
+        assert!(!capture.text().contains("secret-sentinel"));
+    }
     #[tokio::test]
     async fn blocked_downstream_keeps_callback_timestamp() {
         let m = Memory::default();
@@ -112,6 +151,7 @@ mod tests {
 
 /// 遅延Paper用。コールバック内で時刻を採取し、その場で順序を保って登録する。
 /// 満杯を子タスクへ逃がすと受信順が崩れるため、overflowは評価異常にする。
+#[tracing::instrument(skip_all, fields(pair = %crate::telemetry::safe(&pair)))]
 pub(crate) async fn run_simulation_websocket(
     pair: String,
     client_options: Vec<BitbankOption>,
@@ -120,6 +160,7 @@ pub(crate) async fn run_simulation_websocket(
     failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     observation: Option<crate::execution_recording::ExecutionRecorder>,
 ) {
+    let _lifetime = crate::telemetry::TaskLifetime("simulation_websocket");
     let mut client = Client::new();
     for option in client_options {
         client.update_default_option(option);
@@ -147,15 +188,25 @@ pub(crate) async fn run_simulation_websocket(
                 }
                 match decoded {
                     Ok(Some((pair, message))) => {
-                        if tx
-                            .try_send((received.unix_us / 1000, pair, message))
-                            .is_err()
-                        {
+                        if let Err(error) = tx.try_send((received.unix_us / 1000, pair, message)) {
+                            match error {
+                                mpsc::error::TrySendError::Full(_) => tracing::warn!(
+                                    event = "ws_delivery_failed",
+                                    reason = "buffer_full"
+                                ),
+                                mpsc::error::TrySendError::Closed(_) => tracing::debug!(
+                                    event = "ws_delivery_closed",
+                                    reason = "receiver_closed"
+                                ),
+                            }
                             callback_failed.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     Ok(None) => {}
-                    Err(_) => callback_failed.store(true, std::sync::atomic::Ordering::Relaxed),
+                    Err(_) => {
+                        tracing::warn!(event = "ws_decode_failed", reason = "invalid_callback");
+                        callback_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             },
             [
@@ -178,6 +229,7 @@ pub(crate) async fn run_simulation_websocket(
             }
         }
         Err(_) => {
+            tracing::error!(event = "market_feed_start_failed");
             failed.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
