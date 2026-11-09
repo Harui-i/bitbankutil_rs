@@ -1156,6 +1156,65 @@ mod tests {
     }
 
     #[test]
+    fn bitbank_converter_preserves_wide_prices_in_snapshots_and_buffered_diffs() {
+        use crate::telemetry::tests::Capture;
+        let capture = Capture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        let mut converter = BitbankMarketEventConverter::new("trx_jpy".to_owned());
+        let high = "111111111111.0000";
+        let diff = |sequence: &str, amount: &str| {
+            serde_json::from_value::<BitbankDepthDiff>(serde_json::json!({
+                "a": [["101", amount], [high, amount]],
+                "b": [["100", amount]],
+                "t": 1235, "s": sequence
+            }))
+            .unwrap()
+        };
+        assert!(
+            converter
+                .convert(BitbankInboundMessage::DepthDiff(diff("11", "0.5")))
+                .unwrap()
+                .is_none()
+        );
+        let whole = serde_json::from_value::<BitbankDepthWhole>(serde_json::json!({
+            "asks": [["101", "1.5"], [high, "0.2103"]],
+            "bids": [["100", "2"]],
+            "asks_over": "0", "bids_under": "0", "asks_under": "0", "bids_over": "0",
+            "ask_market": "0", "bid_market": "0", "timestamp": 1234, "sequenceId": "10"
+        }))
+        .unwrap();
+        let Some(MarketEvent::DepthUpdated { depth, .. }) = converter
+            .convert(BitbankInboundMessage::DepthWhole(whole))
+            .unwrap()
+        else {
+            panic!("expected complete depth including wide prices");
+        };
+        assert!(depth.is_complete());
+        assert_eq!(depth.asks().len(), 2);
+        assert_eq!(depth.bids().len(), 1);
+        assert_eq!(depth.asks()[&literal("101")], literal("0.5"));
+        assert_eq!(depth.asks()[&literal(high)], literal("0.5"));
+        assert_eq!(depth.best_ask().unwrap().0, &literal("101"));
+        assert_eq!(depth.bids()[&literal("100")], literal("0.5"));
+        assert_eq!(depth.last_timestamp(), 1235);
+        let Some(MarketEvent::DepthUpdated { depth, .. }) = converter
+            .convert(BitbankInboundMessage::DepthDiff(diff("12", "0")))
+            .unwrap()
+        else {
+            panic!("expected depth update for deletion");
+        };
+        assert!(depth.is_complete());
+        assert!(depth.asks().is_empty());
+        assert!(depth.bids().is_empty());
+        let events = capture.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e["fields"]["event"] == "market_conversion_failed")
+        );
+    }
+
+    #[test]
     fn bitbank_converter_maps_transactions_to_domain_side() {
         let mut converter = BitbankMarketEventConverter::new("btc_jpy".to_owned());
         let trade = BitbankTransactionDatum {
