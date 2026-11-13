@@ -199,3 +199,39 @@ if status.write_failures > 0 || status.flush_failures > 0 {
 ## 0.5.0への移行
 
 `BitbankDepth::insert_diff` / `update_whole` と `MarketEventConversionError::InvalidDepth` のエラーは、文字列から `DepthValidationError` へ変更しました。`reason_code` / `field` / `side` / `level_index` を参照するか、必要ならDisplayで表示してください。`BotStrategy::error_code` と `TradingVenue::mode` には既定実装があります。運用ログのフィールド・レベル・集約方針はこの文書に合わせて更新してください。
+
+## 注文APIのレイテンシ校正
+
+`post_order` / `post_cancel_order` / `post_cancel_orders` はINFOの
+`order_api_timing` に `request_started_at_ms` と `response_completed_at_ms`
+（ローカルUnix時刻、ミリ秒）、`elapsed_ms`（単調時計）、`success` を記録します。
+開始はtransport呼び出し直前、完了はそのFutureが戻った直後です。署名・通信・再試行・
+バックオフ・JSON読み取りを含み、ソケット送受信だけの時刻ではありません。
+`elapsed_ms` は従来のAPI処理開始からの計測を維持し、引数検証や本文構築、応答型変換も含みます。
+
+成功時の `order_api_finished` は新規注文の `ordered_at`、単一取消の `canceled_at` を
+取引所のUnix時刻（ミリ秒）として記録します。まとめ取消は各 `cancel_order_observed` に
+`order_id` と `canceled_at` を記録します。欠落した取消時刻はフィールドを省略し、
+要求時刻や別注文の時刻で埋めません。返却されなかった注文の取消成功も推定しません。
+既存の必須 `ordered_at` が欠落した新規応答は従来どおり変換失敗になります。
+
+JSON subscriberの `spans` にある `api_call_id` と `venue_request_id` で時刻イベントと
+成功イベントを結合し、まとめ取消はさらに `order_id` で区別してください。
+プロセスを跨ぐ集計には `RunMetadata` の `process_instance` も使用します。
+追加のPrivate API照会は行わず、API呼び出し数・注文や取消の実行順序も変更しません。
+
+校正ではローカル開始を S、完了を R、取引所の注文／取消時刻を E とし、
+独立に推定した時計差 Δ（取引所時計 − ローカル時計）で E' = E − Δ に補正します。
+`entry_ms` の候補は E' − S、`response_ms` の候補は R − E' です。
+この分解には取引所内部の処理も含まれます。Δ の推定誤差が ±u ms なら、
+各候補にも少なくとも ±u ms の不確実性があり、ミリ秒への丸め誤差も加わります。
+時計差未補正の値を片道レイテンシと断定しないでください。
+
+新規・単一取消・まとめ取消を別々に集計し、再試行のない成功応答から分布を確認します。
+`venue_attempt` が複数ある要求は別集計にし、既存注文の取消結果が再返却されたケースは
+今回の受付時刻とみなさず除外します。まとめ取消の R は共通でも E は注文ごとに異なります。
+時計補正後に E' が [S, R] の外に出る観測は、時計差・時計の補正・既存結果などを調べ、
+ゼロへの丸めで隠さないでください。壁時計の R − S と単調時計の所要時間の不整合も確認します。
+RTTだけから entry / response を一意には決定できません。
+観測RTTをそのまま `entry_ms` に代入せず、時計差の根拠・誤差幅・除外条件とともに
+`PaperLatencyConfig` の値を選びます。この計測は設定を自動変更しません。
