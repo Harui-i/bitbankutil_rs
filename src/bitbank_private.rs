@@ -185,6 +185,7 @@ impl BitbankPrivateApiClient {
             );
         }
 
+        let request_started_at_ms = crate::execution_recording::timestamp_ms();
         let res: Result<
             BitbankApiResponse,
             crypto_botters::http::RequestError<&str, BitbankHandleError>,
@@ -198,6 +199,7 @@ impl BitbankPrivateApiClient {
                 Some(&serde_json::Value::Object(body_map)),
             )
             .await;
+        let response_completed_at_ms = crate::execution_recording::timestamp_ms();
 
         let result: Result<BitbankCreateOrderResponse, _> =
             crate::response_handler::handle_response("post_order", res);
@@ -207,9 +209,16 @@ impl BitbankPrivateApiClient {
             success = result.is_ok(),
             elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
+        tracing::info!(
+            event = "order_api_timing",
+            request_started_at_ms,
+            response_completed_at_ms,
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0,
+            success = result.is_ok(),
+        );
         match &result {
             Ok(response) => {
-                tracing::info!(event = "order_api_finished", outcome = "accepted", order_id = response.order_id.as_u64(), status = %crate::telemetry::safe(&response.status));
+                tracing::info!(event = "order_api_finished", outcome = "accepted", order_id = response.order_id.as_u64(), ordered_at = response.ordered_at.as_u64(), status = %crate::telemetry::safe(&response.status));
             }
             Err(error) => crate::telemetry::api_failure(error),
         }
@@ -287,6 +296,7 @@ impl BitbankPrivateApiClient {
     ) -> Result<BitbankCancelOrderResponse, Option<BitbankHandleError>> {
         let start_time = Instant::now();
         tracing::info!(event = "order_api_started", operation = "cancel", order_id);
+        let request_started_at_ms = crate::execution_recording::timestamp_ms();
         let res: Result<
             BitbankApiResponse,
             crypto_botters::http::RequestError<&str, BitbankHandleError>,
@@ -300,6 +310,7 @@ impl BitbankPrivateApiClient {
                 Some(&serde_json::json!({"pair": pair, "order_id": order_id})),
             )
             .await;
+        let response_completed_at_ms = crate::execution_recording::timestamp_ms();
 
         let result: Result<BitbankCancelOrderResponse, _> =
             crate::response_handler::handle_response("post_cancel_order", res);
@@ -309,9 +320,16 @@ impl BitbankPrivateApiClient {
             success = result.is_ok(),
             elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
+        tracing::info!(
+            event = "order_api_timing",
+            request_started_at_ms,
+            response_completed_at_ms,
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0,
+            success = result.is_ok(),
+        );
         match &result {
             Ok(response) => {
-                tracing::info!(event = "order_api_finished", outcome = "accepted", order_id = response.order_id.as_u64(), status = %crate::telemetry::safe(&response.status));
+                tracing::info!(event = "order_api_finished", outcome = "accepted", order_id = response.order_id.as_u64(), canceled_at = response.canceled_at.as_ref().and_then(serde_json::Number::as_u64), status = %crate::telemetry::safe(&response.status));
             }
             Err(error) => crate::telemetry::api_failure(error),
         }
@@ -333,6 +351,7 @@ impl BitbankPrivateApiClient {
         );
         tracing::info!(event = "order_api_started", operation = "cancel_batch", order_ids = ?order_ids);
 
+        let request_started_at_ms = crate::execution_recording::timestamp_ms();
         let res: Result<
             BitbankApiResponse,
             crypto_botters::http::RequestError<&str, BitbankHandleError>,
@@ -346,6 +365,7 @@ impl BitbankPrivateApiClient {
                 Some(&serde_json::json!({"pair": pair, "order_ids": order_ids})),
             )
             .await;
+        let response_completed_at_ms = crate::execution_recording::timestamp_ms();
 
         let result: Result<BitbankCancelOrdersResponse, _> =
             crate::response_handler::handle_response("post_cancel_orders", res);
@@ -355,6 +375,13 @@ impl BitbankPrivateApiClient {
             success = result.is_ok(),
             elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
+        tracing::info!(
+            event = "order_api_timing",
+            request_started_at_ms,
+            response_completed_at_ms,
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0,
+            success = result.is_ok(),
+        );
         match &result {
             Ok(response) => {
                 tracing::info!(
@@ -363,7 +390,7 @@ impl BitbankPrivateApiClient {
                     returned_order_count = response.orders.len()
                 );
                 for order in &response.orders {
-                    tracing::info!(event = "cancel_order_observed", order_id = order.order_id.as_u64(), status = %crate::telemetry::safe(&order.status));
+                    tracing::info!(event = "cancel_order_observed", order_id = order.order_id.as_u64(), canceled_at = order.canceled_at.as_ref().and_then(serde_json::Number::as_u64), status = %crate::telemetry::safe(&order.status));
                 }
             }
             Err(error) => crate::telemetry::api_failure(error),
@@ -574,7 +601,7 @@ mod recording_tests {
                             r#"{"success":1,"data":{"orders":[]}}"#
                         };
                     }
-                    let body = if body == "__order__" {
+                    let body = if body == "__order__" || body == "__latency_order__" {
                         let request = String::from_utf8_lossy(&request);
                         let cancel = request.contains("/cancel_");
                         let mut order = serde_json::json!({
@@ -589,7 +616,17 @@ mod recording_tests {
                         }
                         if request.contains("/cancel_orders") {
                             // 73は返却されない。要求にあったという理由だけで成功扱いしない。
-                            order = serde_json::json!({"orders":[order]});
+                            if body == "__latency_order__" {
+                                let mut second = order.clone();
+                                second["order_id"] = serde_json::json!(74);
+                                second["canceled_at"] = serde_json::json!(3456);
+                                let mut missing = order.clone();
+                                missing["order_id"] = serde_json::json!(75);
+                                missing.as_object_mut().unwrap().remove("canceled_at");
+                                order = serde_json::json!({"orders":[order, second, missing]});
+                            } else {
+                                order = serde_json::json!({"orders":[order]});
+                            }
                         }
                         serde_json::json!({"success":1,"data":order}).to_string()
                     } else {
@@ -644,6 +681,84 @@ mod recording_tests {
         assert!(!text.contains("secret-key-sentinel"));
         assert!(!text.contains("secret-value-sentinel"));
         assert!(!text.contains("ACCESS-"));
+    }
+    #[tokio::test]
+    async fn order_latency_logs_keep_exchange_times_and_request_correlation() {
+        use crate::telemetry::tests::{Capture, span_field};
+        let capture = Capture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        let (c, _, _, server) = client(
+            vec![
+                Some((200, "__order__")),
+                Some((200, "__order__")),
+                Some((200, "__latency_order__")),
+            ],
+            1,
+        );
+        let before = crate::execution_recording::timestamp_ms();
+        c.post_order("btc_jpy", "1", Some("100"), "buy", "limit", None, None)
+            .await
+            .unwrap();
+        c.post_cancel_order("btc_jpy", 72).await.unwrap();
+        c.post_cancel_orders("btc_jpy", vec![72, 74, 75])
+            .await
+            .unwrap();
+        let after = crate::execution_recording::timestamp_ms();
+        server.join().unwrap();
+        let events = capture.events();
+        let timings: Vec<_> = events
+            .iter()
+            .filter(|e| e["fields"]["event"] == "order_api_timing")
+            .collect();
+        assert_eq!(timings.len(), 3);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["fields"]["event"] == "cancel_order_observed")
+                .count(),
+            3
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for timing in timings {
+            let fields = &timing["fields"];
+            assert!(fields["request_started_at_ms"].as_u64().unwrap() >= before);
+            assert!(fields["response_completed_at_ms"].as_u64().unwrap() <= after);
+            assert!(fields["elapsed_ms"].as_f64().unwrap() >= 0.0);
+            let api_id = span_field(timing, "api_call_id").unwrap();
+            ids.insert(api_id.as_u64().unwrap());
+            let request_id = span_field(timing, "venue_request_id").unwrap();
+            let observed: Vec<_> = events
+                .iter()
+                .filter(|e| {
+                    span_field(e, "api_call_id") == Some(api_id.clone())
+                        && (e["fields"]["event"] == "order_api_finished"
+                            || e["fields"]["event"] == "cancel_order_observed")
+                })
+                .collect();
+            for event in &observed {
+                assert_eq!(
+                    span_field(event, "venue_request_id"),
+                    Some(request_id.clone())
+                );
+            }
+            if observed.iter().any(|e| e["fields"]["order_id"] == 71) {
+                assert_eq!(observed[0]["fields"]["ordered_at"], 1234);
+            } else {
+                let orders: Vec<_> = observed
+                    .iter()
+                    .filter(|e| e["fields"]["order_id"].is_number())
+                    .collect();
+                assert_eq!(orders[0]["fields"]["canceled_at"], 2345);
+                if orders.len() > 1 {
+                    assert_eq!(orders.len(), 3);
+                    assert_eq!(orders[1]["fields"]["order_id"], 74);
+                    assert_eq!(orders[1]["fields"]["canceled_at"], 3456);
+                    assert_eq!(orders[2]["fields"]["order_id"], 75);
+                    assert!(orders[2]["fields"].get("canceled_at").is_none());
+                }
+            }
+        }
+        assert_eq!(ids.len(), 3);
     }
     #[tokio::test]
     async fn parallel_order_and_cancel_keep_ids_timestamps_and_missing_results() {
