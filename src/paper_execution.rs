@@ -688,7 +688,7 @@ impl PaperExecutionEngine {
                 if order.remaining_amount > Quantity::ZERO || self.cancel_at.contains_key(&id) {
                     orders.insert(id, order);
                 }
-                let account = self.stage_event_account(&balances, &orders);
+                let account = self.stage_event_account(&event, &balances, &orders);
                 staged.push((event, account));
             }
             self.buffered_trades.pop_first();
@@ -755,7 +755,7 @@ impl PaperExecutionEngine {
                     order_id: *id,
                     order,
                 };
-                let account = self.stage_event_account(&balances, &orders);
+                let account = self.stage_event_account(&event, &balances, &orders);
                 staged.push((event, account));
             }
         }
@@ -981,15 +981,16 @@ impl PaperExecutionEngine {
         Ok(())
     }
 
-    /// ログ用の中間口座。未記録・Disabledでは複製しない。
+    /// ログ用の中間口座。未記録・省略対象では複製しない。
     fn stage_event_account(
         &self,
+        event: &PaperEvent,
         balances: &BTreeMap<String, BalanceSnapshot>,
         orders: &BTreeMap<OrderId, OpenOrder>,
     ) -> Option<AccountSnapshot> {
         self.recorder
             .as_ref()
-            .filter(|r| r.enabled("paper_event"))
+            .filter(|r| r.paper_event_enabled(event))
             .map(|_| AccountSnapshot {
                 balances: balances.values().cloned().collect(),
                 // open_orders()と同じく、取消確定待ちの注文は公開しない。
@@ -1053,7 +1054,11 @@ impl PaperExecutionEngine {
                 tracing::info!(event = "paper_order_filled", order_id = order_id.0, price = %price, amount = %amount, fee_amount_quote = %fee_amount_quote)
             }
         }
-        if let Some(r) = &self.recorder {
+        if let Some(r) = self
+            .recorder
+            .as_ref()
+            .filter(|r| r.paper_event_enabled(&event))
+        {
             r.record_lazy("paper_event", || {
                 let account = account.unwrap_or_else(|| AccountSnapshot {
                     balances: self.balances(), open_orders: self.open_orders(), query: None,
@@ -1227,12 +1232,58 @@ impl From<PaperRejectReason> for PaperExecutionError {
 mod tests {
     use crate::book_units::*;
     #[test]
+    fn replay_skips_staged_cancellation_account_but_preserves_errors() {
+        use super::*;
+        use crate::execution_recording::*;
+        let recorder = ExecutionRecorder::with_profile(
+            "replay",
+            serde_json::json!({}),
+            RecordingProfile::Replay,
+            JsonlSink(std::io::sink()),
+        );
+        let engine = PaperExecutionEngine::new(
+            PaperExecutionConfig::bitbank_spot_default("btc_jpy").unwrap(),
+            PaperClock::Replay { now_ms: 0 },
+            ["btc", "jpy"]
+                .into_iter()
+                .map(|asset| BalanceSnapshot {
+                    asset: asset.into(),
+                    free_amount: 0.into(),
+                    locked_amount: 0.into(),
+                    onhand_amount: 0.into(),
+                })
+                .collect(),
+            Some(recorder),
+        )
+        .unwrap();
+        let pending = PaperEvent::OrderCancelPending {
+            order_id: OrderId(1),
+            effective_at_ms: 0,
+        };
+        assert!(
+            engine
+                .stage_event_account(&pending, &BTreeMap::new(), &BTreeMap::new())
+                .is_none()
+        );
+        let rejected = PaperEvent::OrderRejected {
+            order: DesiredLimitOrder::limit("btc_jpy".into(), OrderSide::Buy, 1.into(), 100.into()),
+            reason: PaperRejectReason::PostOnlyWouldTakeLiquidity,
+        };
+        assert!(
+            engine
+                .stage_event_account(&rejected, &BTreeMap::new(), &BTreeMap::new())
+                .is_some()
+        );
+    }
+
+    #[test]
     fn recording_without_diagnostics_does_not_clone_queue() {
         use crate::execution_recording::{ExecutionRecorder, JsonlSink, RecordingProfile};
         for profile in [
             None,
             Some(RecordingProfile::Disabled),
             Some(RecordingProfile::Financial),
+            Some(RecordingProfile::Replay),
         ] {
             let recorder = profile.map(|p| {
                 ExecutionRecorder::with_profile(

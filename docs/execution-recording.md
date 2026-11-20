@@ -86,7 +86,15 @@ HTTP通信を記録できます。
 | --- | --- |
 | `Disabled` | 保存もflushも行わない。通常はエンジンに `None` を渡すだけでよい |
 | `Financial` | 初期・終了口座、全注文・取消・約定・手数料・拒否・エラー、操作と照会の時刻・ID・watermark・未確定理由。キュー本体と `paper_queue_book/trade` は省略 |
+| `Replay` | Financialから受付・取消待ち・取消完了の `paper_event` を省略。約定・拒否・口座・終了状態・記録エラーは維持 |
 | `Diagnostic { queue }` | Financialの情報に板・約定のモデル根拠と、選択したキュー診断を追加 |
+
+リプレイの記録量を減らす場合は `ExecutionRecorder::with_profile` に
+`RecordingProfile::Replay` を渡します。`PaperEvent::OrderAccepted`、`OrderCancelPending`、
+`OrderCancelled` は記録用口座スナップショットとJSONの構築前に省略します。
+エンジンのイベント履歴や注文処理、tracingログは変わりません。
+`run_started` の `recording` と `omitted_events` に選択内容を保存します。
+省略したイベント直後の口座監査が必要な場合は既定の `Financial` を使ってください。
 
 Financialの `paper_event` は各イベントを適用した直後の残高・拘束資金・未約定注文を持ちます。
 取消受付の `OrderCancelPending` と資金解放の `OrderCancelled` を区別し、約定の手数料を照合できます。
@@ -155,12 +163,27 @@ Countersは復元対象ではありません。壊れた入力で復元状態は
 ### 合成長期入力での測定
 
 `cargo bench --bench recording -- <mode> 10000 128` で比較できます。
-modeは `disabled`（recorderなし）、`financial`、`full`、`periodic`、`delta`、`counters` です。
+modeは `disabled`（recorderなし）、`financial`、`replay`、`full`、`periodic`、`delta`、`counters` です。
 各modeを独立したプロセスで実行します。既定値は2,000更新・片側128価格です。
 板の同価格数量を交互に変え、1つの注文を維持し、更新ごとにwatermarkを進めます。
+`RECORDING_CHURN=1` を付けると各更新で注文・取消・取消確定も行います。
+`RECORDING_JSONL=/tmp/recording.jsonl` で記録を書き出し、`gzip -c` で圧縮後サイズを比較できます。
+書き出し有効時はディスクI/Oも合計時間に含まれます。
 入力生成後からエンジン初期化・全更新・終了記録までを計測し、allocatorで割当回数・累計bytesを数えます。
 sinkは `serde_json::to_vec` の時間とJSONL相当bytesを測り、ディスクI/Oは含めません。
 `total_ms` はpayloadの構築・clone・差分計算も含み、`serialize_ms` は最終レコードのJSON符号化だけです。
+
+Issue #81の測定（release、10,000更新、片側128価格、`RECORDING_CHURN=1`、各1回）:
+
+| profile | 合計ms（I/Oなし） | 割当回数 | 累計割当bytes | JSONL bytes | 記録件数 | gzip bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Financial | 285.883 | 5,180,058 | 861,801,961 | 48,202,594 | 60,006 | 1,057,036 |
+| Replay | 185.346 | 2,869,898 | 602,286,626 | 26,077,093 | 30,006 | 534,059 |
+
+gzipは別実行で出力したJSONLをPython標準ライブラリの `gzip.compress(..., mtime=0)`
+（既定圧縮レベル9）で圧縮しました。その出力あり実行の合計は463.734ms / 275.260msでした。
+入力は同じですが時刻フィールドは実行ごとに異なります。これは合成ワークロードの単発測定で、
+市場データ全体のリプレイや複数回測定の速度保証ではありません。
 
 10,000更新、片側128価格、周期100、releaseビルドでの単発測定例（MBは10^6 bytes）:
 
