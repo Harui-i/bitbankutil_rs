@@ -1,11 +1,11 @@
-//! cargo bench --bench recording -- <disabled|financial|full|periodic|delta|counters> [updates] [levels]
+//! cargo bench --bench recording -- <disabled|financial|replay|full|periodic|delta|counters> [updates] [levels]
 use bitbankutil_rs::book_units::{Price, Quantity, literal};
 use bitbankutil_rs::{
     execution_recording::*, market_event::*, order_domain::*, paper_execution::*,
 };
 use std::{
     alloc::{GlobalAlloc, Layout, System},
-    io,
+    io::{self, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -42,12 +42,16 @@ struct Metrics {
     serialize_ns: u128,
     records: u64,
 }
-struct Sink(Arc<Mutex<Metrics>>);
+struct Sink(Arc<Mutex<Metrics>>, Option<std::fs::File>);
 impl EventSink for Sink {
     fn append(&mut self, record: &ExecutionRecord) -> io::Result<()> {
         let start = Instant::now();
         let bytes = serde_json::to_vec(record)?;
         let elapsed = start.elapsed().as_nanos();
+        if let Some(file) = &mut self.1 {
+            file.write_all(&bytes)?;
+            file.write_all(b"\n")?;
+        }
         let mut m = self.0.lock().unwrap();
         m.bytes += bytes.len() as u64 + 1;
         m.serialize_ns += elapsed;
@@ -66,6 +70,7 @@ fn main() {
     let profile = match mode.as_str() {
         "disabled" => None,
         "financial" => Some(RecordingProfile::Financial),
+        "replay" => Some(RecordingProfile::Replay),
         "full" => Some(RecordingProfile::Diagnostic {
             queue: QueueRecording::Full,
         }),
@@ -112,11 +117,18 @@ fn main() {
         })
         .collect();
     let m = Arc::new(Mutex::new(Metrics::default()));
+    let output = std::env::var_os("RECORDING_JSONL").map(|p| std::fs::File::create(p).unwrap());
+    let churn = std::env::var_os("RECORDING_CHURN").is_some();
     let count = ALLOCS.load(Relaxed);
     let allocated = BYTES.load(Relaxed);
     let start = Instant::now();
     let recorder = profile.map(|p| {
-        ExecutionRecorder::with_profile("benchmark", serde_json::json!({}), p, Sink(m.clone()))
+        ExecutionRecorder::with_profile(
+            "benchmark",
+            serde_json::json!({}),
+            p,
+            Sink(m.clone(), output),
+        )
     });
     let balances = [("btc", 10), ("jpy", 100000)]
         .into_iter()
@@ -147,6 +159,18 @@ fn main() {
         engine.advance_replay_time(i as i64).unwrap();
         engine.apply_market_event(event);
         engine.advance_trade_watermark(i as i64).unwrap();
+        if churn {
+            let placed = engine
+                .place_order(DesiredLimitOrder::limit(
+                    "btc_jpy".into(),
+                    OrderSide::Buy,
+                    1.into(),
+                    9999.into(),
+                ))
+                .unwrap();
+            engine.cancel_orders("btc_jpy", vec![placed.order_id.unwrap()]);
+            engine.advance_trade_watermark(i as i64).unwrap();
+        }
     }
     let venue = PaperTradingVenue::new(engine);
     bitbankutil_rs::trading_venue::TradingVenue::record_paper_settlement(&venue);

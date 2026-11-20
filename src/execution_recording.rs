@@ -60,6 +60,8 @@ pub enum RecordingProfile {
     Disabled,
     #[default]
     Financial,
+    /// リプレイ用。受付・取消待ち・取消完了のpaper_eventを生成しない。
+    Replay,
     Diagnostic {
         queue: QueueRecording,
     },
@@ -186,7 +188,12 @@ impl ExecutionRecorder {
         })));
         r.record_lazy("run_started", || json!({"metadata":metadata,"recording":profile,
             "queue_evidence":"only paper_queue_diagnostic contains queue snapshots/deltas; financial records omit queue internals",
-            "omitted_events": if matches!(profile, RecordingProfile::Financial) { vec!["paper_queue_book", "paper_queue_trade"] } else { vec![] }}));
+            "omitted_events": match profile {
+                RecordingProfile::Financial => vec!["paper_queue_book", "paper_queue_trade"],
+                RecordingProfile::Replay => vec!["paper_queue_book", "paper_queue_trade",
+                    "paper_event.OrderAccepted", "paper_event.OrderCancelPending", "paper_event.OrderCancelled"],
+                _ => vec![],
+            }}));
         r
     }
     pub fn next_id(&self) -> u64 {
@@ -200,11 +207,25 @@ impl ExecutionRecorder {
     pub fn enabled(&self, kind: &str) -> bool {
         match self.profile() {
             RecordingProfile::Disabled => false,
-            RecordingProfile::Financial => !matches!(
+            RecordingProfile::Financial | RecordingProfile::Replay => !matches!(
                 kind,
                 "paper_queue_book" | "paper_queue_trade" | "paper_queue_diagnostic"
             ),
             RecordingProfile::Diagnostic { .. } => true,
+        }
+    }
+    /// PaperEventの型で記録対象を判定する。省略時は口座やJSONを構築しない。
+    pub fn paper_event_enabled(&self, event: &crate::paper_execution::PaperEvent) -> bool {
+        use crate::paper_execution::PaperEvent;
+        match self.profile() {
+            RecordingProfile::Disabled => false,
+            RecordingProfile::Replay => !matches!(
+                event,
+                PaperEvent::OrderAccepted { .. }
+                    | PaperEvent::OrderCancelPending { .. }
+                    | PaperEvent::OrderCancelled { .. }
+            ),
+            RecordingProfile::Financial | RecordingProfile::Diagnostic { .. } => true,
         }
     }
     /// filterを通った場合だけpayloadを構築する。closure内で同じrecorderを呼ばないこと。
@@ -242,8 +263,8 @@ impl ExecutionRecorder {
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let mode = match s.profile {
             RecordingProfile::Disabled => return,
-            RecordingProfile::Financial if !force => return,
-            RecordingProfile::Financial => QueueRecording::Full,
+            RecordingProfile::Financial | RecordingProfile::Replay if !force => return,
+            RecordingProfile::Financial | RecordingProfile::Replay => QueueRecording::Full,
             RecordingProfile::Diagnostic { queue } => queue,
         };
         let history = s.queues.entry(stream_id).or_default();
@@ -1314,7 +1335,11 @@ pub(crate) mod tests {
 
     #[test]
     fn filters_and_periods_do_not_build_payloads() {
-        for profile in [RecordingProfile::Disabled, RecordingProfile::Financial] {
+        for profile in [
+            RecordingProfile::Disabled,
+            RecordingProfile::Financial,
+            RecordingProfile::Replay,
+        ] {
             let r = ExecutionRecorder::with_profile("lazy", json!({}), profile, Broken);
             r.record_lazy("paper_queue_book", || panic!("filtered JSON"));
             r.queue_record(1, false, || panic!("queue clone"), || panic!("counters"));
@@ -1445,10 +1470,12 @@ pub(crate) mod tests {
             market_event::*, order_domain::*, paper_execution::*, trading_venue::TradingVenue,
         };
         let mut baseline = None;
+        let mut retained_financial_events = None;
         for profile in [
             None,
             Some(RecordingProfile::Disabled),
             Some(RecordingProfile::Financial),
+            Some(RecordingProfile::Replay),
             Some(RecordingProfile::Diagnostic {
                 queue: QueueRecording::Full,
             }),
@@ -1543,6 +1570,38 @@ pub(crate) mod tests {
                     continue;
                 }
                 let audit: Vec<_> = records.iter().filter(|r| r.kind == "paper_event").collect();
+                if profile == Some(RecordingProfile::Financial) {
+                    retained_financial_events = Some(
+                        audit
+                            .iter()
+                            .filter(|r| {
+                                r.data["event"].get("OrderFilled").is_some()
+                                    || r.data["event"].get("OrderRejected").is_some()
+                            })
+                            .map(|r| r.data.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                if profile == Some(RecordingProfile::Replay) {
+                    assert_eq!(
+                        audit.iter().map(|r| r.data.clone()).collect::<Vec<_>>(),
+                        *retained_financial_events.as_ref().unwrap()
+                    );
+                    assert_eq!(audit.len(), 2);
+                    assert!(audit[0].data["event"].get("OrderFilled").is_some());
+                    assert!(audit[1].data["event"].get("OrderRejected").is_some());
+                    assert_eq!(
+                        audit[0].data["event"]["OrderFilled"]["fee_amount_quote"],
+                        "0.1"
+                    );
+                    assert_eq!(records[0].data["recording"]["profile"], "replay");
+                    assert_eq!(
+                        records[0].data["omitted_events"].as_array().unwrap().len(),
+                        5
+                    );
+                    assert_eq!(records.last().unwrap().kind, "run_finished");
+                    continue;
+                }
                 assert_eq!(audit.len(), 5); // accepted, partial fill, cancel pending, cancelled, rejected
                 assert_eq!(
                     audit[1].data["event"]["OrderFilled"]["fee_amount_quote"],
@@ -1582,6 +1641,15 @@ pub(crate) mod tests {
     fn sticky_failure() {
         let r = ExecutionRecorder::new("test", json!({}), Broken);
         r.record("custom", json!({}));
+        assert_eq!(r.status().dropped_records, 2);
+        assert!(r.status().persistence_uncertain);
+        assert!(r.finish().is_err());
+    }
+    #[test]
+    fn replay_failure_is_sticky() {
+        let r =
+            ExecutionRecorder::with_profile("test", json!({}), RecordingProfile::Replay, Broken);
+        r.record("paper_settlement", json!({}));
         assert_eq!(r.status().dropped_records, 2);
         assert!(r.status().persistence_uncertain);
         assert!(r.finish().is_err());
