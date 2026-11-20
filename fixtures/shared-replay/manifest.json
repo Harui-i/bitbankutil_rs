@@ -1,0 +1,28 @@
+{
+  "format_version": 1,
+  "synthetic": true,
+  "sources": [
+    {
+      "session_id": "sample-bb",
+      "exchange": "bitbank",
+      "stream": "public",
+      "files": [
+        "bitbank.jsonl"
+      ]
+    },
+    {
+      "session_id": "sample-byb",
+      "exchange": "bybit",
+      "stream": "linear",
+      "files": [
+        "bybit.jsonl"
+      ]
+    }
+  ],
+  "merge_key": [
+    "received_at_micros",
+    "source_index",
+    "sequence"
+  ],
+  "description": "共有compiledケース比較用の合成入力。切断前までと両sourceの先読み用heartbeat。"
+}

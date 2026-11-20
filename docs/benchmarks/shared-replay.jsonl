@@ -1,0 +1,12 @@
+{"prepare_ms": [0.542793], "compile_ms": [0.040444], "cases_ms": [718.944165], "mode": "sequential", "wall_ms": 729.4799929950386, "sampled_peak_rss_kib": 14084}
+{"prepare_ms": [0.44357, 0.65425], "compile_ms": [0.045283, 0.031598], "cases_ms": [359.036703, 357.423119], "mode": "process", "wall_ms": 365.11158401845023, "sampled_peak_rss_kib": 20592}
+{"prepare_ms": [0.450693], "compile_ms": [0.044723], "cases_ms": [365.96218600000003], "mode": "parallel", "wall_ms": 376.4490640023723, "sampled_peak_rss_kib": 15684}
+{"prepare_ms": [0.597034], "compile_ms": [0.048079], "cases_ms": [368.93954099999996], "mode": "parallel", "wall_ms": 380.5991469998844, "sampled_peak_rss_kib": 15672}
+{"prepare_ms": [0.5347379999999999, 0.482643], "compile_ms": [0.036328, 0.035085], "cases_ms": [392.07343, 378.65562400000005], "mode": "process", "wall_ms": 398.8078419934027, "sampled_peak_rss_kib": 18420}
+{"prepare_ms": [0.45499100000000003], "compile_ms": [0.044482], "cases_ms": [714.793821], "mode": "sequential", "wall_ms": 727.5779870105907, "sampled_peak_rss_kib": 14108}
+{"prepare_ms": [0.493623], "compile_ms": [0.039323000000000004], "cases_ms": [731.4157319999999], "mode": "sequential", "wall_ms": 743.2042669970542, "sampled_peak_rss_kib": 14104}
+{"prepare_ms": [0.46491000000000005, 0.42968500000000004], "compile_ms": [0.043451000000000004, 0.030586000000000002], "cases_ms": [361.122178, 363.1299], "mode": "process", "wall_ms": 370.3749340493232, "sampled_peak_rss_kib": 19256}
+{"prepare_ms": [0.457145], "compile_ms": [0.040615000000000005], "cases_ms": [362.824044], "mode": "parallel", "wall_ms": 374.3046299787238, "sampled_peak_rss_kib": 15652}
+{"prepare_ms": [0.646385], "compile_ms": [0.04356], "cases_ms": [366.885283], "mode": "parallel", "wall_ms": 378.3420539693907, "sampled_peak_rss_kib": 15612}
+{"prepare_ms": [0.460542, 0.738805], "compile_ms": [0.038461, 0.21987600000000002], "cases_ms": [362.299305, 362.523599], "mode": "process", "wall_ms": 370.1814770465717, "sampled_peak_rss_kib": 20180}
+{"prepare_ms": [0.569743], "compile_ms": [0.044483], "cases_ms": [718.5871040000001], "mode": "sequential", "wall_ms": 730.5455839959905, "sampled_peak_rss_kib": 14140}
