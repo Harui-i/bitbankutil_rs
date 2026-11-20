@@ -137,3 +137,66 @@ cargo run --release --example best_mm -- --backtest-commands \
 初回の解析・compileと反復実行時間を分けて出力する。戦略の注文判断と注文計画は通常のbest_mmと共有する。
 
 これはバックテスト用の実験API。実時計のライブ運用、実行記録の出力、戦略からの予約イベント・派生イベントの登録はまだ提供していない。記録付きengineは構築時に拒否する。新しいランナーは反復ごとに作り直す。未完了の要求IDは一意にし、応答待ちは戦略の状態で管理する。
+
+## 共有compiled入力で複数ケースを並列実行する
+
+`examples/shared_replay.rs` は1回のprepare/compileを、上限個のスコープ付きOSスレッドで共有する例です。
+各スレッドのcurrent-thread Tokio runtimeがケースを順に取得し、ケースごと（反復ごと）に戦略、
+`BotRunner`、venue、残高、注文・FIFOキュー、recorderを作り直します。
+`CompiledReplay`をcloneせず借用し、全スレッドの終了まで`PreparedReplay`を保持します。
+customイベントも共有可能な型（この例では`serde_json::Value`）にしてください。
+
+```sh
+cargo run --release --example shared_replay -- 2 8 100
+# workers cases iterations manifest first_case
+cargo build --locked --release --example shared_replay
+python3 scripts/bench_shared_replay.py --workers 2 --cases 8 --iterations 100
+```
+
+例の`run_cases`は投入順で結果を返し、`report.error`、`incomplete`、`interrupted`をケースごとに残します。
+他ケースの失敗で全体を打ち切りません。`Case.fail`と`response_ms`は戦略失敗と遅延の検証にも使えます。
+共有の`Arc<AtomicBool>`を別スレッド等からtrueにすると、実行中のリプレイと未開始のケースを中断状態にします。
+`cancel_on_event`はイベント処理中にキャンセルを起こす検証用設定です。
+キャンセルは協調的なので、戦略の同期処理が戻らない場合の強制停止はできません。
+worker自体のpanicは例全体の失敗です。通常のケースエラーとは区別します。
+
+比較用fixture `fixtures/shared-replay` は元の`market-data-v1`の切断前入力と、
+両sourceで評価終了+30msまで収録するheartbeatからなる合成入力です。
+最良買気配+0.1に注文し、部分約定、取消、未決注文を発生させます。
+テストはケースの入力ID・入力順、判断、約定、最終残高・注文、終了reportを含む記録を比較します。
+壁時計の記録時刻、操作の実時間計測、ケースをまたいで採番される診断用queue_stream_idのみ除外します。
+2/4/8 workerと逆順投入の一致、ケース失敗の独立性、不完全終了、実行中と投入前のキャンセルも確認します。
+
+### 比較方法と測定結果
+
+Linux専用の`python3 scripts/bench_shared_replay.py`は外部Pythonライブラリを使いません。
+同じrelease実行ファイル・manifest・ケースID・反復回数・記録方式で、共有compiledの逐次実行、
+上限個の別プロセスへケースを等分する方式、共有compiledの並列実行を比較します。
+各方式4回、逐次→プロセス→並列→並列→プロセス→逐次を2巡し、各結果の一致を確認します。
+`--manifest`で実際の市場入力へ差し替えられます（戦略の注文対象はbtc_jpy）。
+この例のデフォルトは回帰確認用の小さい合成入力であり、大規模履歴でのprepare/compile共有の効果は測れません。
+
+各行はprepare、compile、ケース実行のプロセスごとのms配列、全体の壁時計ms、
+1ms間隔で子プロセスのRSSを合算した観測ピークKiBをJSON出力します。
+壁時計はプロセス起動、結果のJSON出力と終了待ちを含み、Python側の結果読取・比較を除きます。
+RSSはサンプリングのため瞬間的ピークを見逃し、共有ページの重複計上があります。Python親のメモリは含みません。
+プロセスごとのフェーズ時間の合計は並行する仕事量であり、全体の壁時計とは異なります。
+反復は同一ケースを新しい状態で実行して短いfixtureの実行負荷を増やすもので、入力の長さを増やしません。
+ログはメモリに保持し、ケースごとの最終反復の結果を出力・比較します。記録コストもケース実行時間に含みます。
+
+2026-11-20、Linux x86_64、AMD Ryzen 5 8600G（6コア/12スレッド）、
+rustc 1.99.0、2 worker、8ケース×100反復、11入力レコードで測定した4試行の中央値:
+
+| 方式 | prepare合計ms | compile合計ms | ケース実行合計ms | 全体ms | 観測ピークRSS KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 共有逐次 | 0.518 | 0.042 | 718.766 | 730.013 | 14106 |
+| プロセス分割 | 1.058 | 0.075 | 724.537 | 370.278 | 19718 |
+| 共有並列 | 0.527 | 0.044 | 366.424 | 377.396 | 15662 |
+
+生データは[benchmarks/shared-replay.jsonl](benchmarks/shared-replay.jsonl)にあります。
+この小さいfixtureでは共有並列の壁時計は逐次の約52%でしたが、プロセス分割より速い結果ではありません。
+共有並列の観測RSSはプロセス分割より小さくなりました。
+下流での73.66秒のワークロードとは異なるため、その改善を主張する結果ではありません。
+大規模な実入力と実戦略で再測定してからAPIを判断できるようにし、今回は共通の並列実行APIを追加していません。
+EOF、不完全終了、キャンセルの意味は既存の`CompiledReplay::run`に従います。
+EOFで注文の取消や残りの操作を強制的に完了させません。
