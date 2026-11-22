@@ -45,7 +45,7 @@ impl DepthLevels {
         self.materialized
             .get_or_init(|| self.iter().map(|(&p, &q)| (p, q)).collect())
     }
-    pub fn iter(&self) -> impl Iterator<Item = (&Price, &Quantity)> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&Price, &Quantity)> {
         self.chunks
             .iter()
             .flat_map(|chunk| chunk.iter().map(|(p, q)| (p, q)))

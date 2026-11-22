@@ -557,6 +557,15 @@ impl PaperExecutionEngine {
         event: &MarketEvent,
         received_local_ms: Option<i64>,
     ) -> Vec<PaperEvent> {
+        self.apply_market_before_settlement(event, received_local_ms, |_, _| {})
+    }
+
+    fn apply_market_before_settlement(
+        &mut self,
+        event: &MarketEvent,
+        received_local_ms: Option<i64>,
+        before_settlement: impl FnOnce(&Self, i64),
+    ) -> Vec<PaperEvent> {
         let received_exchange_ms = match self.exchange_now_ms() {
             Ok(time) => time,
             Err(_) => {
@@ -640,10 +649,18 @@ impl PaperExecutionEngine {
                 return Vec::new();
             };
             if self.watermark_ms.is_none_or(|w| boundary >= w) {
+                before_settlement(self, boundary);
                 return self.advance_trade_watermark(boundary).unwrap_or_default();
             }
         }
         Vec::new()
+    }
+
+    fn has_due_settlement(&self, through_ms: i64) -> bool {
+        self.buffered_trades
+            .first_key_value()
+            .is_some_and(|(key, _)| key.0 <= through_ms)
+            || self.cancel_at.values().any(|&time| time <= through_ms)
     }
 
     /// through_msは取引所UTC Unix ms（オフセットを再適用しない）。
@@ -667,34 +684,36 @@ impl PaperExecutionEngine {
             .is_some_and(|(key, _)| key.0 <= through_ms)
         {
             let trade = self.buffered_trades.first_key_value().unwrap().1.clone();
-            let plan =
+            let mut plan =
                 self.queue_model
                     .plan_allocations(&trade, &self.open_orders, &self.cancel_at);
-            let allocations = plan.fills.clone();
-            let mut balances = self.balances.clone();
-            let mut orders = self.open_orders.clone();
+            let allocations = std::mem::take(&mut plan.fills);
             let mut staged = Vec::new();
-            for &(id, quantity) in &allocations {
-                let order = orders.remove(&id).expect("allocated order");
-                let (order, event) = settle_fill(
-                    &mut balances,
-                    &self.base_asset,
-                    &self.quote_asset,
-                    order,
-                    trade.clone(),
-                    quantity,
-                    self.config.fee_schedule.maker_fee_rate_quote,
-                )?;
-                if order.remaining_amount > Quantity::ZERO || self.cancel_at.contains_key(&id) {
-                    orders.insert(id, order);
+            if !allocations.is_empty() {
+                let mut balances = self.balances.clone();
+                let mut orders = self.open_orders.clone();
+                for &(id, quantity) in &allocations {
+                    let order = orders.remove(&id).expect("allocated order");
+                    let (order, event) = settle_fill(
+                        &mut balances,
+                        &self.base_asset,
+                        &self.quote_asset,
+                        order,
+                        trade.clone(),
+                        quantity,
+                        self.config.fee_schedule.maker_fee_rate_quote,
+                    )?;
+                    if order.remaining_amount > Quantity::ZERO || self.cancel_at.contains_key(&id) {
+                        orders.insert(id, order);
+                    }
+                    let account = self.stage_event_account(&event, &balances, &orders);
+                    staged.push((event, account));
                 }
-                let account = self.stage_event_account(&event, &balances, &orders);
-                staged.push((event, account));
+                self.balances = balances;
+                self.open_orders = orders;
             }
             self.buffered_trades.pop_first();
             self.queue_model.commit_allocations(plan);
-            self.balances = balances;
-            self.open_orders = orders;
             for (id, _) in &allocations {
                 if !self.open_orders.contains_key(id) {
                     self.queue_model.remove(*id);
