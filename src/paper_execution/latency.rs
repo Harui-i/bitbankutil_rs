@@ -327,10 +327,10 @@ fn settle_simulation(
         e.watermark_ms = Some(through);
         return Ok(());
     }
-    let before = snapshot(e);
+    let before = e.has_due_settlement(through).then(|| snapshot(e));
     e.advance_trade_watermark(through)
         .map_err(TradingVenueError::Paper)?;
-    if snapshot(e) != before {
+    if before.is_some_and(|before| snapshot(e) != before) {
         s.publish_market(e, local)?;
     }
     Ok(())
@@ -503,12 +503,12 @@ impl PaperTradingVenue {
                 .engine
                 .lock()
                 .map_err(|_| TradingVenueError::StatePoisoned)?;
-            let before = snapshot(&e);
+            let before = e.has_due_settlement(through_ms).then(|| snapshot(&e));
             let events = e
                 .advance_trade_watermark(through_ms)
                 .map_err(TradingVenueError::Paper)?;
             let now = local_now(&e)?;
-            if snapshot(&e) != before {
+            if before.is_some_and(|before| snapshot(&e) != before) {
                 s.publish_market(&e, now)?;
             }
             events
@@ -900,10 +900,13 @@ impl PaperTradingVenue {
                 .engine
                 .lock()
                 .map_err(|_| TradingVenueError::StatePoisoned)?;
-            // delay境界を自動確定しない入力登録では口座は変わらない。
-            // simulationの口座通知はsettle_simulationが確定時に生成する。
-            let before = e.max_trade_delay_ms.map(|_| snapshot(&e));
-            e.apply_timed_market_event(event, received_at_ms);
+            // 受信した約定を登録してから、自動確定の直前にだけ口座を取得する。
+            let mut before = None;
+            e.apply_market_before_settlement(event, received_at_ms, |engine, boundary| {
+                before = engine
+                    .has_due_settlement(boundary)
+                    .then(|| snapshot(engine));
+            });
             if before.is_some_and(|before| snapshot(&e) != before) {
                 s.publish_market(&e, local_now(&e)?)?;
             }

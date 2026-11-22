@@ -11,6 +11,7 @@ use crate::{
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap, VecDeque},
+    sync::Arc,
 };
 
 /// 同一の市場・操作・配送順序をasync戦略と同期戦略で共有する内部境界。
@@ -166,7 +167,7 @@ pub struct SimulationReport {
 
 #[derive(Clone)]
 enum MarketInput {
-    Compiled(Result<Option<MarketEvent>, String>),
+    Compiled(Result<Option<Arc<MarketEvent>>, String>),
     Raw {
         stream: String,
         pair: String,
@@ -298,7 +299,8 @@ impl<C: Send + 'static> SimulationDriver<C> {
         for index in order {
             let input = &mut events.markets[index].event.input;
             let raw = std::mem::replace(input, MarketInput::Compiled(Ok(None)));
-            *input = MarketInput::Compiled(self.convert_internal(raw));
+            *input =
+                MarketInput::Compiled(self.convert_internal(raw).map(|event| event.map(Arc::new)));
         }
     }
     pub(crate) fn admit_prepared(
@@ -608,7 +610,7 @@ impl<C: Send + 'static> SimulationDriver<C> {
     }
     fn convert_internal(&mut self, input: MarketInput) -> Result<Option<MarketEvent>, String> {
         match input {
-            MarketInput::Compiled(event) => event,
+            MarketInput::Compiled(_) => unreachable!("compiled inputs are already converted"),
             MarketInput::Event(event) => Ok(Some(event)),
             MarketInput::Raw {
                 stream,
@@ -732,12 +734,18 @@ impl<C: Send + 'static> SimulationDriver<C> {
                     }))
                     });
                 }
-                let event = entry
-                    .source_span
-                    .in_scope(|| self.convert_internal(entry.input))?;
-                if let Some(event) = event {
+                let (compiled, raw) = match entry.input {
+                    MarketInput::Compiled(event) => (event?, None),
+                    input => (
+                        None,
+                        entry
+                            .source_span
+                            .in_scope(|| self.convert_internal(input))?,
+                    ),
+                };
+                if let Some(event) = compiled.as_deref().or(raw.as_ref()) {
                     crate::execution_recording::sync_scope(context, || {
-                        runner.on_simulation_market(&event, entry.received_at_ms)
+                        runner.on_simulation_market(event, entry.received_at_ms)
                     })?;
                 }
             }

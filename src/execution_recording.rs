@@ -88,7 +88,6 @@ struct QueueHistory {
 struct State {
     recorder_id: u64,
     first_failure_sequence: Option<u64>,
-    profile: RecordingProfile,
     queues: std::collections::BTreeMap<u64, QueueHistory>,
     run_id: String,
     sequence: u64,
@@ -97,7 +96,7 @@ struct State {
     status: RecordingStatus,
 }
 #[derive(Clone)]
-pub struct ExecutionRecorder(Arc<Mutex<State>>);
+pub struct ExecutionRecorder(Arc<Mutex<State>>, RecordingProfile);
 impl std::fmt::Debug for ExecutionRecorder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecutionRecorder").finish_non_exhaustive()
@@ -175,17 +174,19 @@ impl ExecutionRecorder {
         profile: RecordingProfile,
         sink: impl EventSink + 'static,
     ) -> Self {
-        let r = Self(Arc::new(Mutex::new(State {
-            recorder_id: crate::telemetry::next_id(),
-            first_failure_sequence: None,
+        let r = Self(
+            Arc::new(Mutex::new(State {
+                recorder_id: crate::telemetry::next_id(),
+                first_failure_sequence: None,
+                queues: Default::default(),
+                run_id: run_id.into(),
+                sequence: 0,
+                next_id: 0,
+                sink: Box::new(sink),
+                status: RecordingStatus::default(),
+            })),
             profile,
-            queues: Default::default(),
-            run_id: run_id.into(),
-            sequence: 0,
-            next_id: 0,
-            sink: Box::new(sink),
-            status: RecordingStatus::default(),
-        })));
+        );
         r.record_lazy("run_started", || json!({"metadata":metadata,"recording":profile,
             "queue_evidence":"only paper_queue_diagnostic contains queue snapshots/deltas; financial records omit queue internals",
             "omitted_events": match profile {
@@ -202,7 +203,7 @@ impl ExecutionRecorder {
         s.next_id
     }
     pub fn profile(&self) -> RecordingProfile {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).profile
+        self.1
     }
     pub fn enabled(&self, kind: &str) -> bool {
         match self.profile() {
@@ -259,14 +260,14 @@ impl ExecutionRecorder {
         queue: impl FnOnce() -> Vec<Value>,
         counters: impl FnOnce() -> Value,
     ) {
-        let c = current_context();
-        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let mode = match s.profile {
+        let mode = match self.profile() {
             RecordingProfile::Disabled => return,
             RecordingProfile::Financial | RecordingProfile::Replay if !force => return,
             RecordingProfile::Financial | RecordingProfile::Replay => QueueRecording::Full,
             RecordingProfile::Diagnostic { queue } => queue,
         };
+        let c = current_context();
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let history = s.queues.entry(stream_id).or_default();
         if !force {
             history.observation += 1;
@@ -360,10 +361,10 @@ impl ExecutionRecorder {
             .clone()
     }
     pub fn flush(&self) -> io::Result<()> {
-        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(s.profile, RecordingProfile::Disabled) {
+        if matches!(self.profile(), RecordingProfile::Disabled) {
             return Ok(());
         }
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if s.status.error.is_none() {
             if let Err(e) = s.sink.flush() {
                 s.first_failure_sequence = Some(s.sequence);

@@ -72,7 +72,7 @@ pub struct MarketDepthSnapshot {
 
 impl MarketDepthSnapshot {
     /// 全板をBTreeMapへ実体化せず、指定sideを価格昇順に走査する。
-    pub fn levels(&self, side: OrderSide) -> impl Iterator<Item = (&Price, &Quantity)> {
+    pub fn levels(&self, side: OrderSide) -> impl DoubleEndedIterator<Item = (&Price, &Quantity)> {
         match side {
             OrderSide::Buy => &self.bids,
             OrderSide::Sell => &self.asks,
@@ -255,5 +255,32 @@ pub enum MarketEventConversionError {
 impl From<ParseOrderError> for MarketEventConversionError {
     fn from(err: ParseOrderError) -> Self {
         Self::InvalidTradeSide(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn levels_can_walk_from_either_end_across_chunks() {
+        let depth = MarketDepthSnapshot::new(
+            (21..=40).map(|price| (price.into(), 1.into())).collect(),
+            (1..=20).map(|price| (price.into(), 1.into())).collect(),
+            0,
+        );
+        let bids: Vec<_> = depth
+            .levels(OrderSide::Buy)
+            .rev()
+            .take(10)
+            .map(|(&price, _)| price)
+            .collect();
+        assert_eq!(bids, (11..=20).rev().map(Price::from).collect::<Vec<_>>());
+        let asks: Vec<_> = depth
+            .levels(OrderSide::Sell)
+            .take(10)
+            .map(|(&price, _)| price)
+            .collect();
+        assert_eq!(asks, (21..=30).map(Price::from).collect::<Vec<_>>());
     }
 }
