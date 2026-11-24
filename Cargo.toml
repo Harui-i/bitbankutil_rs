@@ -19,7 +19,7 @@ live-private-api = []
 live-private-order-api = ["live-private-api"]
 
 [dependencies]
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
 crypto-botters = { package = "crypto-botters-bitbank", version = "0.8.1", features = [
   "bitbank",
@@ -28,6 +28,7 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 serde_ignored = "0.1.14"
 serde_path_to_error = "0.1.20"
+zstd = "0.13.3"
 
 [[bench]]
 name = "queue_history"

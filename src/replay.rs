@@ -136,34 +136,17 @@ impl PreparedReplay {
         options: ReplayOptions,
         cancel: &std::sync::atomic::AtomicBool,
         custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
-    ) -> ReplayReport {
-        if runner.venue().simulation_config().is_none() {
-            return ReplayReport {
-                error: Some("prepared replay requires a simulation venue".into()),
-                incomplete: true,
-                end_reason: ReplayEndReason::Error,
-                ..Default::default()
-            };
+    ) -> ReplayReport
+    where
+        S::CustomEvent: Clone,
+    {
+        let Some(config) = runner.venue().simulation_config() else {
+            return replay_error("prepared replay requires a simulation venue");
+        };
+        match self.compile(config, runner.venue().simulation_time_model(), custom) {
+            Ok(compiled) => compiled.run(runner, options, cancel).await,
+            Err(error) => replay_error(error),
         }
-        run_validated_simulation_replay(
-            runner,
-            self.records
-                .iter()
-                .map(|r| Ok(SimulationRecord::Prepared(r))),
-            ReplaySetup {
-                validation: &self.validation,
-                tails: &self.tails,
-                report: ReplayReport {
-                    input_exhausted: true,
-                    ..Default::default()
-                },
-                options,
-                cancel,
-            },
-            custom,
-            |_| None,
-        )
-        .await
     }
 }
 
@@ -211,7 +194,6 @@ impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
                 options,
                 cancel,
             },
-            |_| Ok(None),
             |driver| {
                 admissions
                     .next()
@@ -255,7 +237,6 @@ impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
                 options,
                 cancel,
             },
-            |_| Ok(None),
             |driver| {
                 admissions
                     .next()
@@ -268,31 +249,24 @@ impl<C: Clone + Send + 'static> CompiledReplay<'_, C> {
     }
 }
 
-enum SimulationRecord<'a> {
-    Captured(usize, CaptureRecord),
+enum SimulationRecord<'a, C> {
     Prepared(&'a PreparedRecord),
+    Block {
+        block: std::sync::Arc<CompiledBlock<C>>,
+        index: usize,
+    },
 }
-impl<'a> SimulationRecord<'a> {
+impl<C> SimulationRecord<'_, C> {
     fn received_at_micros(&self) -> u64 {
-        match self {
-            Self::Captured(_, r) => r.received_at_micros,
-            Self::Prepared(r) => r.record.received_at_micros,
-        }
+        self.parts().1.received_at_micros
     }
-    fn parts(
-        self,
-    ) -> (
-        usize,
-        std::borrow::Cow<'a, CaptureRecord>,
-        Option<&'a DecodedBitbank>,
-    ) {
+    fn parts(&self) -> (usize, &CaptureRecord) {
         match self {
-            Self::Captured(s, r) => (s, std::borrow::Cow::Owned(r), None),
-            Self::Prepared(r) => (
-                r.source,
-                std::borrow::Cow::Borrowed(&r.record),
-                Some(&r.bitbank),
-            ),
+            Self::Prepared(r) => (r.source, &r.record),
+            Self::Block { block, index } => {
+                let (source, record) = &block.records[*index];
+                (*source, record)
+            }
         }
     }
 }
@@ -713,19 +687,91 @@ impl ReplayAdapter {
         }
     }
 }
-/// 市場データを検証し、受信時刻に従って戦略を逐次実行する。
+fn replay_error(error: impl std::fmt::Display) -> ReplayReport {
+    ReplayReport {
+        error: Some(error.to_string()),
+        incomplete: true,
+        end_reason: ReplayEndReason::Error,
+        ..Default::default()
+    }
+}
+/// Execute a simulation using lookahead-safe compiled blocks. Inspect immutable
+/// input once with StreamingReplayMetadata, then supply the same records here.
+/// No raw JSONL spool or full-period prepared allocation is created.
+pub async fn run_replay<S, V, I, D>(
+    runner: &mut BotRunner<S, V>,
+    input: I,
+    metadata: &StreamingReplayMetadata,
+    recovery: bool,
+    cancel: &std::sync::atomic::AtomicBool,
+    custom: D,
+) -> ReplayReport
+where
+    S: BotStrategy<V>,
+    V: TradingVenue,
+    S::CustomEvent: Clone + Sync,
+    I: IntoIterator<Item = io::Result<(usize, CaptureRecord)>> + Send + 'static,
+    I::IntoIter: Send,
+    D: FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>> + Send + 'static,
+{
+    run_replay_with_options(
+        runner,
+        input,
+        metadata,
+        ReplayOptions {
+            recovery,
+            end_time_ms: None,
+        },
+        cancel,
+        custom,
+    )
+    .await
+}
+/// As run_replay, with an explicit evaluation cutoff. Source validation and
+/// terminal receipt clocks come from the supplied preflight metadata.
+pub async fn run_replay_with_options<S, V, I, D>(
+    runner: &mut BotRunner<S, V>,
+    input: I,
+    metadata: &StreamingReplayMetadata,
+    options: ReplayOptions,
+    cancel: &std::sync::atomic::AtomicBool,
+    custom: D,
+) -> ReplayReport
+where
+    S: BotStrategy<V>,
+    V: TradingVenue,
+    S::CustomEvent: Clone + Sync,
+    I: IntoIterator<Item = io::Result<(usize, CaptureRecord)>> + Send + 'static,
+    I::IntoIter: Send,
+    D: FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>> + Send + 'static,
+{
+    run_streaming_compiled(
+        runner,
+        input,
+        metadata,
+        options,
+        cancel,
+        custom,
+        BlockOptions::default(),
+    )
+    .await
+}
+
+/// Deliver captures directly to a non-simulation runner. This is a transport/
+/// callback test adapter, not an exchange-timeline backtest implementation.
+/// 市場データを検証し、受信時刻に従って戦略へ配送する。
 /// `input` は `(受信時刻、source番号、sequence)` 順に渡す。`custom` はBitbank以外のメッセージを変換する。
 /// 切断時は `recovery` がfalseなら停止し、trueなら欠損を記録して継続する。
 /// `cancel` は入力の境界で確認する。入力や戦略のエラー、欠損、中断は戻り値に記録する。
 /// 詳しい入力形式と完了条件は `docs/offline-replay.md` を参照。
-pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
+pub async fn run_capture_replay<S: BotStrategy<V>, V: TradingVenue>(
     runner: &mut BotRunner<S, V>,
     input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
     recovery: bool,
     cancel: &std::sync::atomic::AtomicBool,
     custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
 ) -> ReplayReport {
-    run_replay_with_options(
+    run_capture_replay_with_options(
         runner,
         input,
         ReplayOptions {
@@ -740,7 +786,7 @@ pub async fn run_replay<S: BotStrategy<V>, V: TradingVenue>(
 
 /// 予約イベントと市場入力を交互に実行する。失敗・中断では予約を停止し、結果に残す。
 /// 同じms内は市場入力を元のマージ順で優先し、その後に予約を採番順で実行する。
-pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
+pub async fn run_capture_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
     runner: &mut BotRunner<S, V>,
     input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
     options: ReplayOptions,
@@ -748,7 +794,9 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
     mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
 ) -> ReplayReport {
     if runner.venue().simulation_config().is_some() {
-        return run_simulation_replay(runner, input, options, cancel, custom).await;
+        return replay_error(
+            "capture replay does not support simulation; use run_replay with preflight metadata",
+        );
     }
     let recovery = options.recovery;
     let mut report = ReplayReport::default();
@@ -939,140 +987,41 @@ pub async fn run_replay_with_options<S: BotStrategy<V>, V: TradingVenue>(
     report
 }
 
-// sourceごとの安全な終端を先に確定するための、一時ファイルによる2-pass入力。
-// 一般のIteratorを全件メモリ保持せず、元JSONも戦略への配送まで保持する。
-struct SimulationSpool {
-    file: Option<std::io::BufWriter<std::fs::File>>,
-    path: std::path::PathBuf,
+/// Source validation and terminal clocks for a preflight-scanned immutable replay.
+#[derive(Default)]
+pub struct StreamingReplayMetadata {
+    validation: ReplayValidation,
+    tails: BTreeMap<usize, i64>,
 }
-impl SimulationSpool {
-    fn new() -> io::Result<Self> {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        loop {
-            let path = std::env::temp_dir().join(format!(
-                "bb-simulation-{}-{}.jsonl",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            let mut options = std::fs::OpenOptions::new();
-            options.read(true).write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            match options.open(&path) {
-                Ok(file) => {
-                    return Ok(Self {
-                        file: Some(std::io::BufWriter::new(file)),
-                        path,
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
+impl StreamingReplayMetadata {
+    pub fn scan(
+        input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
+    ) -> io::Result<Self> {
+        let mut metadata = Self::default();
+        for record in input {
+            let (source, record) = record?;
+            metadata.observe(source, &record)?;
         }
+        Ok(metadata)
     }
-    fn append(&mut self, source: usize, record: &CaptureRecord) -> io::Result<()> {
-        use std::io::Write;
-        let file = self.file.as_mut().unwrap();
-        serde_json::to_writer(&mut *file, &(source, record)).map_err(invalid)?;
-        file.write_all(b"\n")
-    }
-    fn reader(
-        &mut self,
-    ) -> io::Result<impl Iterator<Item = io::Result<(usize, CaptureRecord)>> + '_> {
-        use std::io::{Seek, Write};
-        let file = self.file.as_mut().unwrap();
-        file.flush()?;
-        file.get_mut().rewind()?;
-        Ok(BufReader::new(file.get_ref())
-            .lines()
-            .map(|line| serde_json::from_str(&line?).map_err(invalid)))
-    }
-}
-impl Drop for SimulationSpool {
-    fn drop(&mut self) {
-        self.file.take();
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
 
-/// captureを検証してsourceごとの末尾を確定し、同じ先読みドライバへ渡す。
-async fn run_simulation_replay<S: BotStrategy<V>, V: TradingVenue>(
-    runner: &mut BotRunner<S, V>,
-    input: impl IntoIterator<Item = io::Result<(usize, CaptureRecord)>>,
-    options: ReplayOptions,
-    cancel: &std::sync::atomic::AtomicBool,
-    custom: impl FnMut(&CaptureRecord) -> io::Result<Option<S::CustomEvent>>,
-) -> ReplayReport {
-    let mut report = ReplayReport::default();
-    let mut validation = ReplayValidation::default();
-    let mut spool = match SimulationSpool::new() {
-        Ok(spool) => spool,
-        Err(error) => {
-            runner
-                .venue()
-                .mark_market_incomplete("simulation spool creation failed");
-            report.error = Some(error.to_string());
-            report.end_reason = ReplayEndReason::Error;
-            report.incomplete = true;
-            return report;
-        }
-    };
-    let mut tails = BTreeMap::new();
-    // EOFのsource別時刻を調べる。入力は一時ファイルへ退避し、メモリへ蓄積しない。
-    for item in input {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            report.interrupted = true;
-            break;
-        }
-        match item.and_then(|(source, record)| {
-            validation.validate(source, &record)?;
-            Ok((source, record))
-        }) {
-            Ok((source, record)) => {
-                let Ok(time) = i64::try_from(record.received_at_micros / 1000) else {
-                    report.error = Some("time overflow".into());
-                    break;
-                };
-                tails.insert(source, time);
-                if let Err(error) = spool.append(source, &record) {
-                    report.error = Some(error.to_string());
-                    break;
-                }
-            }
-            Err(e) => {
-                report.error = Some(e.to_string());
-                break;
-            }
+    /// For an explicitly clipped receive window whose caller has verified coverage.
+    /// The input MUST end with clock-only markers at this horizon for every source.
+    pub fn close_window(&mut self, horizon_ms: i64) {
+        for tail in self.tails.values_mut() {
+            *tail = horizon_ms;
         }
     }
-    report.input_exhausted = report.error.is_none() && !report.interrupted;
-    let reader = spool.reader();
-    if let Err(error) = &reader {
-        report.error = Some(error.to_string());
-    }
-    let records = reader
-        .into_iter()
-        .flatten()
-        .map(|r| r.map(|(source, record)| SimulationRecord::Captured(source, record)));
-    run_validated_simulation_replay(
-        runner,
-        records,
-        ReplaySetup {
-            validation: &validation,
-            tails: &tails,
-            report,
-            options,
-            cancel,
-        },
-        custom,
-        |_| None,
-    )
-    .await
-}
 
+    pub fn observe(&mut self, source: usize, record: &CaptureRecord) -> io::Result<()> {
+        self.validation.validate(source, record)?;
+        self.tails.insert(
+            source,
+            i64::try_from(record.received_at_micros / 1000).map_err(invalid)?,
+        );
+        Ok(())
+    }
+}
 struct ReplaySetup<'a> {
     validation: &'a ReplayValidation,
     tails: &'a BTreeMap<usize, i64>,
@@ -1083,9 +1032,8 @@ struct ReplaySetup<'a> {
 
 async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime>(
     runner: &mut R,
-    records: impl Iterator<Item = io::Result<SimulationRecord<'a>>>,
+    records: impl Iterator<Item = io::Result<SimulationRecord<'a, R::CustomEvent>>>,
     setup: ReplaySetup<'_>,
-    mut custom: impl FnMut(&CaptureRecord) -> io::Result<Option<R::CustomEvent>>,
     mut compiled: impl FnMut(
         &mut crate::simulation::SimulationDriver<R::CustomEvent>,
     ) -> Option<Result<(), String>>,
@@ -1110,6 +1058,7 @@ async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime
                 return report;
             }
         };
+    report.interrupted |= cancel.load(std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = runner.begin_simulation() {
         report.error = Some(e);
     }
@@ -1132,13 +1081,14 @@ async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime
                 report.interrupted = true;
                 break;
             }
-            let (source, record, decoded) = match item {
-                Ok(item) => item.parts(),
+            let item = match item {
+                Ok(item) => item,
                 Err(error) => {
                     report.error = Some(error.to_string());
                     break;
                 }
             };
+            let (source, record) = item.parts();
             let received = (record.received_at_micros / 1000) as i64;
             if end
                 .and_then(|t| t.checked_add(config.lookahead_ms))
@@ -1151,7 +1101,13 @@ async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime
                 sequence: record.sequence,
             };
             report.last_input = Some(id.clone());
-            let admitted = if let Some(result) = compiled(&mut driver) {
+            let precomputed = match &item {
+                SimulationRecord::Block { block, index } => {
+                    (block.apply)(block, *index, &mut driver)
+                }
+                _ => compiled(&mut driver),
+            };
+            let admitted = if let Some(result) = precomputed {
                 result
             } else {
                 match &record.payload {
@@ -1184,9 +1140,20 @@ async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime
                             source_index: source,
                             connection_id: record.connection_id.clone(),
                             reason: reason.clone(),
-                            subscriptions: validation.sources[&source].subscriptions
-                                [&record.connection_id]
-                                .clone(),
+                            subscriptions: match validation
+                                .sources
+                                .get(&source)
+                                .and_then(|s| s.subscriptions.get(&record.connection_id))
+                            {
+                                Some(subscriptions) => subscriptions.clone(),
+                                None => {
+                                    report.error = Some(
+                                        "compiled input does not match preflight subscriptions"
+                                            .into(),
+                                    );
+                                    break;
+                                }
+                            },
                             start: id.clone(),
                             end: None,
                         });
@@ -1195,28 +1162,7 @@ async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime
                         }
                         Ok(())
                     }
-                    CapturePayload::Message { message } if record.exchange == "bitbank" => {
-                        match decoded
-                            .map_or_else(|| decode_bitbank(message), |message| Ok(message.clone()))
-                        {
-                            Ok(Some((pair, message))) => driver.admit_bitbank(
-                                received,
-                                Some(id),
-                                format!("{source}:{}", record.connection_id),
-                                pair,
-                                message,
-                            ),
-                            Ok(None) => Ok(()),
-                            Err(e) => Err(e.to_string()),
-                        }
-                    }
-                    CapturePayload::Message { .. } => match custom(&record) {
-                        Ok(Some(event)) => {
-                            driver.admit_event(received, Some(id), BotEvent::Custom(event))
-                        }
-                        Ok(None) => Ok(()),
-                        Err(e) => Err(e.to_string()),
-                    },
+                    CapturePayload::Message { .. } => Ok(()),
                 }
             };
             report.records += 1;
@@ -1305,3 +1251,10 @@ async fn run_validated_simulation_replay<'a, R: crate::simulation::ReplayRuntime
     }
     report
 }
+
+mod blocks;
+pub use blocks::{
+    BlockCompiler, BlockOptions, CompiledBlock, CompiledBlockCache, CompiledBlockReader,
+    CompiledBlockStoreStats, SharedBlockResults, run_compiled_block_source,
+    run_prefetched_compiled, run_shared_blocks, run_streaming_compiled, write_compiled_blocks,
+};

@@ -4,7 +4,7 @@ use bitbankutil_rs::{
     bitbank_bot::{BotContext, BotEvent, BotRunner, BotStrategy},
     market_event::MarketEvent,
     order_domain::{DesiredLimitOrder, OrderId, OrderSide},
-    replay::{CapturePayload, CaptureRecord, ReplayOptions, run_replay_with_options},
+    replay::{CapturePayload, CaptureRecord, ReplayOptions},
     trading_venue::{
         AccountSnapshot, PlacedOrder, PlacementRequest, TradingVenue, TradingVenueError,
         TradingVenueFuture,
@@ -235,7 +235,7 @@ async fn joinset_orders_do_not_skip_intervening_input_or_sleep_in_realtime() {
         ),
     ];
     support::configure(runner.venue(), 0);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         input,
         ReplayOptions::default(),
@@ -280,7 +280,7 @@ async fn evaluation_boundary_reports_unfinished_handler_without_finishing_order(
         ),
     ];
     support::configure(runner.venue(), 0);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         input,
         ReplayOptions {
@@ -427,7 +427,7 @@ async fn same_ms_market_inputs_register_before_due_order_activation() {
     };
     input.push(Ok(heartbeat));
     support::configure(runner.venue(), 50);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         input,
         ReplayOptions::default(),

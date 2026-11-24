@@ -282,7 +282,7 @@ async fn end_boundary_retains_sent_operation_without_activating_or_unlocking_it(
         )),
     ];
     support::configure(runner.venue(), 0);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         input,
         ReplayOptions {

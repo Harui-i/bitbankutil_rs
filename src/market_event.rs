@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MarketTicker {
     pub sell: Option<String>,
     pub buy: Option<String>,
@@ -160,6 +160,82 @@ impl PartialEq for MarketDepthSnapshot {
     }
 }
 
+// Each disk block starts with a full snapshot. Later snapshots use the already
+// compiled price changes, preserving structural sharing and changes_since().
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) enum StoredDepth {
+    Full {
+        asks: crate::book_units::Levels,
+        bids: crate::book_units::Levels,
+        timestamp: i64,
+        complete: bool,
+    },
+    Delta {
+        levels: Vec<(OrderSide, Price, Quantity)>,
+        timestamp: i64,
+        complete: bool,
+    },
+}
+impl MarketDepthSnapshot {
+    pub(crate) fn store(&self, previous: Option<&Self>) -> StoredDepth {
+        if let Some(levels) = previous.and_then(|p| self.changes_since(p)) {
+            StoredDepth::Delta {
+                levels: levels.to_vec(),
+                timestamp: self.last_timestamp,
+                complete: self.is_complete,
+            }
+        } else {
+            StoredDepth::Full {
+                asks: self.asks.iter().map(|(&p, &q)| (p, q)).collect(),
+                bids: self.bids.iter().map(|(&p, &q)| (p, q)).collect(),
+                timestamp: self.last_timestamp,
+                complete: self.is_complete,
+            }
+        }
+    }
+    pub(crate) fn restore(stored: StoredDepth, previous: Option<&Self>) -> Result<Self, String> {
+        match stored {
+            StoredDepth::Full {
+                asks,
+                bids,
+                timestamp,
+                complete,
+            } => {
+                let mut result = Self::new(asks, bids, timestamp);
+                result.is_complete = complete;
+                Ok(result)
+            }
+            StoredDepth::Delta {
+                levels,
+                timestamp,
+                complete,
+            } => {
+                let previous = previous.ok_or("compiled depth delta without predecessor")?;
+                let mut result = previous.clone();
+                for &(side, price, quantity) in &levels {
+                    let book = Arc::make_mut(match side {
+                        OrderSide::Buy => &mut result.bids,
+                        OrderSide::Sell => &mut result.asks,
+                    });
+                    if quantity == Quantity::ZERO {
+                        book.remove(&price);
+                    } else {
+                        book.insert(price, quantity);
+                    }
+                }
+                result.revision = Arc::new(());
+                result.changes = Some(DepthDelta {
+                    previous: previous.revision.clone(),
+                    levels: levels.into(),
+                });
+                result.last_timestamp = timestamp;
+                result.is_complete = complete;
+                Ok(result)
+            }
+        }
+    }
+}
+
 impl Depth for MarketDepthSnapshot {
     fn asks(&self) -> &BTreeMap<Price, Quantity> {
         self.asks.materialize()
@@ -195,7 +271,7 @@ impl From<&BitbankDepth> for MarketDepthSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MarketCircuitBreakInfo {
     pub mode: String,
     pub estimated_itayose_price: Option<String>,

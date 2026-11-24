@@ -8,7 +8,7 @@ use bitbankutil_rs::{
         PaperClock, PaperEvent, PaperExecutionConfig, PaperExecutionEngine, PaperFeeSchedule,
         PaperTradingVenue,
     },
-    replay::{CapturePayload, CaptureRecord, run_replay},
+    replay::{CapturePayload, CaptureRecord},
     trading_venue::{AccountSnapshot, TradingVenue},
 };
 use serde_json::json;
@@ -451,7 +451,7 @@ async fn strategy_path(replay: bool) -> (Vec<(i64, AccountSnapshot)>, Vec<PaperE
         push(0, 1900, json!({"kind":"message","message":["heartbeat"]}));
         push(1, 1900, json!({"kind":"message","message":null}));
         support::configure(runner.venue(), 400);
-        let report = run_replay(
+        let report = support::run_replay(
             &mut runner,
             input,
             false,

@@ -9,7 +9,7 @@ use bitbankutil_rs::{
         PaperClock, PaperEvent, PaperExecutionConfig, PaperExecutionEngine, PaperExecutionError,
         PaperTimeModel, PaperTradingVenue,
     },
-    replay::{CaptureRecord, run_replay},
+    replay::CaptureRecord,
     trading_venue::{AccountSnapshot, TradingVenue},
 };
 use serde_json::json;
@@ -225,7 +225,7 @@ async fn replay(recording: bool, slow: bool, delta: i64) -> (AccountSnapshot, Ve
         Ok((0, serde_json::from_value::<CaptureRecord>(r).unwrap()))
     });
     support::configure(runner.venue(), 300);
-    let report = run_replay(&mut runner, input, false, &AtomicBool::new(false), |_| {
+    let report = support::run_replay(&mut runner, input, false, &AtomicBool::new(false), |_| {
         Ok(None)
     })
     .await;
