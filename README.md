@@ -5,7 +5,8 @@
 
 `bitbankutil_rs`は、RustでbitbankのAPI処理を複数サポートしたライブラリクレートです。 `bitbankutil_rs`を使うことで、以下のようなことが簡単に実現できます。
 
-詳しい利用方法は [APIドキュメント](https://docs.rs/bitbankutil_rs) を参照してください。
+- [crates.io のクレートページ](https://crates.io/crates/bitbankutil_rs)
+- [docs.rs の API ドキュメント](https://docs.rs/bitbankutil_rs)
 
 価格・数量・率・残高は専用の固定小数点整数型で扱います。型と精度・移行方法は[数値型ガイド](docs/numeric-types.md)を参照してください。
 
@@ -121,11 +122,10 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 
 ## 使い方
 
-`Cargo.toml`の`[dependencies]`に以下を追加してください。
+プロジェクトのディレクトリで以下を実行してください。
 
-```toml
-[dependencies]
-bitbankutil_rs = "0.6.0"
+```sh
+cargo add bitbankutil_rs
 ```
 
 API通信には、bitbank対応を追加した`crypto-botters`のforkである
