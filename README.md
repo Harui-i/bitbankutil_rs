@@ -2,11 +2,10 @@
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/Harui-i/bitbankutil_rs?style=social)](https://github.com/Harui-i/bitbankutil_rs)
 [![dependency status](https://deps.rs/repo/github/Harui-i/bitbankutil_rs/status.svg)](https://deps.rs/repo/github/Harui-i/bitbankutil_rs)
+[![crates.io](https://img.shields.io/crates/v/bitbankutil_rs)](https://crates.io/crates/bitbankutil_rs)
+[![docs.rs](https://img.shields.io/docsrs/bitbankutil_rs)](https://docs.rs/bitbankutil_rs)
 
 `bitbankutil_rs`は、RustでbitbankのAPI処理を複数サポートしたライブラリクレートです。 `bitbankutil_rs`を使うことで、以下のようなことが簡単に実現できます。
-
-- [crates.io のクレートページ](https://crates.io/crates/bitbankutil_rs)
-- [docs.rs の API ドキュメント](https://docs.rs/bitbankutil_rs)
 
 価格・数量・率・残高は専用の固定小数点整数型で扱います。型と精度・移行方法は[数値型ガイド](docs/numeric-types.md)を参照してください。
 
