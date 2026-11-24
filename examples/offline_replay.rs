@@ -113,9 +113,11 @@ async fn demo(
         };
         input.push((source, tail));
     }
+    let metadata = StreamingReplayMetadata::scan(input.iter().cloned().map(Ok))?;
     let report = run_replay(
         &mut runner,
         input.into_iter().map(Ok),
+        &metadata,
         false,
         &AtomicBool::new(false),
         |r| match &r.payload {

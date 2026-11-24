@@ -215,7 +215,7 @@ struct Delivery<C> {
 }
 
 /// 戦略・口座に依存しない入力処理を事前計算した結果。
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PreparedAdmission {
     sequence: u64,
     market_sequence: u64,
@@ -234,6 +234,30 @@ pub(crate) struct PreparedEvents<C> {
     issues: Vec<String>,
 }
 impl<C> PreparedEvents<C> {
+    #[cfg(test)]
+    pub(crate) fn compiled_signature(
+        &self,
+    ) -> Vec<((i64, u64, u64), Result<Option<MarketEvent>, String>)> {
+        let mut values: Vec<_> = self
+            .markets
+            .iter()
+            .map(|m| match &m.event.input {
+                MarketInput::Compiled(event) => (
+                    m.key,
+                    event
+                        .as_ref()
+                        .map(|e| e.as_deref().cloned())
+                        .map_err(Clone::clone),
+                ),
+                _ => panic!("uncompiled market"),
+            })
+            .collect();
+        values.sort_by_key(|v| v.0);
+        values
+    }
+    pub(crate) fn market_keys(&self) -> impl Iterator<Item = (usize, (i64, u64, u64))> + '_ {
+        self.markets.iter().enumerate().map(|(i, m)| (i, m.key))
+    }
     pub fn new(capacity: usize) -> Self {
         Self {
             admissions: Vec::with_capacity(capacity),
@@ -293,14 +317,16 @@ impl<C: Send + 'static> SimulationDriver<C> {
             error: result.err(),
         }
     }
+    pub(crate) fn compile_market_at(&mut self, events: &mut PreparedEvents<C>, index: usize) {
+        let input = &mut events.markets[index].event.input;
+        let raw = std::mem::replace(input, MarketInput::Compiled(Ok(None)));
+        *input = MarketInput::Compiled(self.convert_internal(raw).map(|e| e.map(Arc::new)));
+    }
     pub(crate) fn compile_markets(&mut self, events: &mut PreparedEvents<C>) {
         let mut order: Vec<_> = (0..events.markets.len()).collect();
         order.sort_unstable_by_key(|&index| events.markets[index].key);
         for index in order {
-            let input = &mut events.markets[index].event.input;
-            let raw = std::mem::replace(input, MarketInput::Compiled(Ok(None)));
-            *input =
-                MarketInput::Compiled(self.convert_internal(raw).map(|event| event.map(Arc::new)));
+            self.compile_market_at(events, index);
         }
     }
     pub(crate) fn admit_prepared(
@@ -832,3 +858,6 @@ mod queue_tests {
         );
     }
 }
+
+mod stored;
+pub(crate) use stored::StoredEvents;

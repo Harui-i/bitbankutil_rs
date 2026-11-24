@@ -219,7 +219,7 @@ pub mod bybit {
     use crate::depth::Depth;
 
     #[allow(dead_code, non_snake_case)]
-    #[derive(Deserialize, Debug)]
+    #[derive(serde::Serialize, Deserialize, Debug)]
     pub struct BybitTransactionDatum {
         pub BT: bool,    // ブロック取引かどうか
         pub S: String,   // サイド

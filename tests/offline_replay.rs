@@ -112,7 +112,7 @@ async fn derived_fifo_and_time_reversal() {
 async fn disconnect_recovery_and_cancel() {
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
     support::configure(runner.venue(), 30);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         ReplayInput::open(manifest()).unwrap(),
         false,
@@ -125,7 +125,7 @@ async fn disconnect_recovery_and_cancel() {
     assert!(report.error.is_none());
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
     support::configure(runner.venue(), 30);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         ReplayInput::open(manifest()).unwrap(),
         true,
@@ -137,7 +137,7 @@ async fn disconnect_recovery_and_cancel() {
     assert_eq!(report.records, 14);
     assert_eq!(report.gaps.len(), 2);
     support::configure(runner.venue(), 30);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         ReplayInput::open(manifest()).unwrap(),
         true,
@@ -406,7 +406,7 @@ async fn empty_input_and_application_failure() {
     }
     let mut runner = BotRunner::new(Unreachable, FailVenue);
     support::configure(runner.venue(), 30);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         std::iter::empty(),
         false,
@@ -459,7 +459,7 @@ fn disconnected() -> CapturePayload {
 }
 async fn custom_replay(records: Vec<(usize, CaptureRecord)>) -> ReplayReport {
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
-    run_replay(
+    support::run_replay(
         &mut runner,
         records.into_iter().map(Ok),
         true,
@@ -522,7 +522,7 @@ async fn custom_input_cannot_bypass_capture_validation() {
     invalid.format_version = 999;
     let mut runner = BotRunner::new(Probe(Arc::default()), NoTradingVenue);
     support::configure(runner.venue(), 30);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         vec![Ok((0, start.clone())), Ok((0, invalid))],
         true,
@@ -735,7 +735,7 @@ async fn paper_recovery_delivers_reconnected_market_and_records_later_gaps_witho
         venue.clone(),
     );
     support::configure(runner.venue(), 30);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         paper_recovery_input(),
         true,
@@ -775,7 +775,7 @@ async fn paper_strict_replay_still_stops_at_first_disconnect() {
         paper_recovery_venue(),
     );
     support::configure(runner.venue(), 30);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         paper_recovery_input(),
         false,
@@ -813,7 +813,7 @@ async fn paper_recovery_preserves_input_validation_and_strategy_errors_after_rec
             paper_recovery_venue(),
         );
         support::configure(runner.venue(), 30);
-        let report = run_replay(
+        let report = support::run_replay(
             &mut runner,
             input.into_iter().map(Ok),
             true,

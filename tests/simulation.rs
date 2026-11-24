@@ -1,3 +1,4 @@
+mod support;
 use bitbankutil_rs::book_units::{Price, literal};
 use bitbankutil_rs::{
     bitbank_bot::*, market_event::MarketEvent, order_domain::*, paper_execution::*, replay::*,
@@ -123,7 +124,7 @@ async fn prepared_and_compiled_replay_preserve_reports_accounts_delivery_and_fai
                     )
                 };
                 let (mut reference, seen) = runner(make_venue(), true);
-                let report = run_replay_with_options(
+                let report = support::run_replay_with_options(
                     &mut reference,
                     records.iter().cloned().map(Ok),
                     options,
@@ -587,7 +588,7 @@ async fn offline_end_uses_shortest_source_tail_and_preserves_original_receipt() 
             },
         ),
     ];
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         records.iter().cloned().map(Ok),
         false,
@@ -896,7 +897,7 @@ async fn fake_realtime_paper_and_offline_replay_have_identical_observations_and_
             },
         ),
     ];
-    let report = run_replay(&mut offline, input, false, &AtomicBool::new(false), |_| {
+    let report = support::run_replay(&mut offline, input, false, &AtomicBool::new(false), |_| {
         Ok(None)
     })
     .await;

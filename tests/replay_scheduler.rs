@@ -17,7 +17,7 @@ use std::{
 };
 use support::TestDiagnostics;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Event {
     Input(u8),
     Timer(u8),
@@ -264,7 +264,7 @@ async fn interleaves_timers_without_future_information_and_preserves_ties() {
                 ),
             )));
             support::configure(runner.venue(), 0);
-            let report = run_replay_with_options(
+            let report = support::run_replay_with_options(
                 &mut runner,
                 input,
                 ReplayOptions {
@@ -343,7 +343,7 @@ async fn eof_does_not_extend_period_and_explicit_boundary_can_precede_next_input
     for end in [None, Some(1250), Some(1600)] {
         let (mut runner, seen) = runner(0, None);
         support::configure(runner.venue(), 0);
-        let report = run_replay_with_options(
+        let report = support::run_replay_with_options(
             &mut runner,
             inputs(),
             ReplayOptions {
@@ -405,7 +405,7 @@ async fn failure_cancel_disconnect_and_bad_input_stop_reservations() {
             input[2] = Err(io::Error::other("invalid input"));
         }
         support::configure(runner.venue(), 0);
-        let report = run_replay_with_options(
+        let report = support::run_replay_with_options(
             &mut runner,
             input,
             ReplayOptions {
@@ -486,7 +486,7 @@ async fn cancellation_in_last_reservation_stops_before_input_or_end_time() {
             )));
         }
         support::configure(runner.venue(), 0);
-        let report = run_replay_with_options(
+        let report = support::run_replay_with_options(
             &mut runner,
             input,
             ReplayOptions {
@@ -513,7 +513,7 @@ async fn cancellation_in_last_reservation_stops_before_input_or_end_time() {
 async fn empty_input_boundary_and_invalid_clock_conversion() {
     let (mut runner, _) = runner(0, None);
     support::configure(runner.venue(), 0);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         [],
         ReplayOptions {
@@ -526,7 +526,7 @@ async fn empty_input_boundary_and_invalid_clock_conversion() {
     .await;
     assert_eq!(report.final_time_ms, None);
     support::configure(runner.venue(), 0);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         [],
         ReplayOptions {
@@ -540,7 +540,7 @@ async fn empty_input_boundary_and_invalid_clock_conversion() {
     assert_eq!(report.end_reason, ReplayEndReason::Eof);
     let (mut runner, _) = self::runner(i64::MAX, None);
     support::configure(runner.venue(), 0);
-    let report = run_replay(
+    let report = support::run_replay(
         &mut runner,
         inputs(),
         false,
@@ -598,7 +598,7 @@ async fn recovery_continues_timers_without_restoring_execution() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut runner = BotRunner::new(Recovery(seen.clone()), venue(0, None));
     support::configure(runner.venue(), 0);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         input,
         ReplayOptions {

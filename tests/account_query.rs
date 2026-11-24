@@ -319,7 +319,7 @@ async fn query_wait_preserves_receive_time_fifo_price_and_context_without_wall_s
                 v.clone(),
             );
             support::configure(runner.venue(), 0);
-            let report = run_replay_with_options(
+            let report = support::run_replay_with_options(
                 &mut runner,
                 inputs(delta),
                 ReplayOptions {
@@ -408,7 +408,7 @@ async fn query_end_disconnect_and_interruption_keep_pending_requests() {
             r
         });
         support::configure(runner.venue(), 0);
-        let report = run_replay_with_options(
+        let report = support::run_replay_with_options(
             &mut runner,
             iter,
             ReplayOptions {
@@ -546,7 +546,7 @@ async fn real_market_applies_once_during_query_and_same_ms_sampling_is_after_mar
     ));
     input.push(market_record(4, 1100, serde_json::json!(["heartbeat"])));
     support::configure(runner.venue(), 0);
-    let report = run_replay_with_options(
+    let report = support::run_replay_with_options(
         &mut runner,
         input,
         ReplayOptions {

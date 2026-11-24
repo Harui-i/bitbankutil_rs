@@ -7,7 +7,9 @@ Paperとバックテストは `SimulationDriver` を共有します。内部市�
 let venue = PaperTradingVenue::new(engine)
     .with_simulation_config(SimulationConfig { lookahead_ms: 10_000 })?;
 let mut runner = BotRunner::new(strategy, venue);
-let report = run_replay(&mut runner, ReplayInput::open(manifest)?, false, &cancel, custom).await;
+// Input files must remain immutable between preflight and execution.
+let metadata = StreamingReplayMetadata::scan(ReplayInput::open(manifest)?)?;
+let report = run_replay(&mut runner, ReplayInput::open(manifest)?, &metadata, false, &cancel, custom).await;
 ```
 
 `run_replay_with_options` の `end_time_ms` はローカル仮想時刻です。
@@ -16,9 +18,16 @@ let report = run_replay(&mut runner, ReplayInput::open(manifest)?, false, &cance
 EOFだけで市場のない区間や予約期限まで評価を延長しません。入力が空なら時計も進みません。
 同msの入力は元のus単位のマージ順を保持します。
 
-sourceごとの末尾を知るため、最初に入力を検証し、一時JSONLへ退避する2-pass方式です。
-全入力をRAMに保持せず、実行中は待機窓の入力を読み込みます。一時ファイルは終了時に削除します。
-入力検証中の中断・形式エラーでは戦略を開始しません。書き込み可能な一時ディレクトリと入力相当の空き容量が必要です。
+sourceごとの安全な末尾と購読・入力整合性は `StreamingReplayMetadata::scan` または
+同一の事前検査での `observe` により確定します。原本を再度読むので2-passですが、一時JSONLを
+書き出しません。`run_replay` は別スレッドで lookahead-safe な `CompiledBlock` を逐次生成し、
+使い終えたブロックを解放します。raw decode とsimulationを別経路にした旧方式は削除しました。
+customイベントは `Clone + Sync`、供給iterator/custom decoderは `Send + 'static` が必要です。
+変換は先読みするため、`custom` は戦略状態に依存しない関数にしてください。
+
+事前検査後の入力変更は許可しません。manifest、入力hash、compile設定、decoder/buildの識別は
+callerで管理してください。`close_window` は元のcoverageを確認したcallerが、sourceごとに
+同じhorizonの時計専用markerを末尾に付ける場合だけ使います。coverageの証明を作るAPIではありません。
 `records` と `last_input` は戦略へ配送した数ではなく、先読みとして取り込んだ入力の範囲です。
 
 戦略は `ctx.now_ms()` と `schedule_at` / `schedule_after` を使用します。
@@ -35,11 +44,55 @@ API待機中も市場・操作期限は進み、戦略ハンドラーは1件ず�
 `BotRunner::process` / `submit_replay` は低水準の受信順kernelドライバです。
 新しいPaper・バックテストには `run_replay` または `SimulationDriver` を使用してください。
 
+## Compiledブロックの逐次生成とディスク再利用
+
+simulation実行は常にcompile済みイベントを消費します。供給元だけを切り替えます。
+
+- `BlockCompiler`: converterの状態とexchange順heapをブロック間で継続し、未読受信時刻−lookaheadより厳密に古い市場イベントを確定する。同一ms境界や遅着で独立ソート・再初期化しない。
+- `CompiledBlockReader`: 保存済みcompiledを1ブロックずつ復元する。raw decoder/市場変換は再実行しない。展開・デシリアライズは必要。
+- `CompiledBlockCache::iter()`: 同じブロックを全件RAMに保持する任意の供給元。
+
+いずれも `run_compiled_block_source` の同じsimulation consumerを使います。
+単発は `run_prefetched_compiled`、複数ケースは `run_shared_blocks` で供給と実行を重ねられます。
+
+```rust,ignore
+let config = SimulationConfig { lookahead_ms: 180_000 };
+let compiler = BlockCompiler::new(input, config, time_model, custom_decoder, BlockOptions::default())?;
+// 逐次生成。戦略・venue・注文・口座・recorderはfactoryごとに新規生成。
+let results = run_shared_blocks(compiler, factories, &metadata, options, &cancel);
+
+// 別の実行で事前生成する場合。identityは入力hash・compile設定・decoder/buildを含める。
+write_compiled_blocks(new_cache_path, identity, compiler)?;
+// 再利用。全期間をRAMに保持せず、同じconsumerへ供給する。
+let blocks = CompiledBlockReader::open(cache_path, identity)?;
+let results = run_shared_blocks(blocks, fresh_factories, &metadata, options, &cancel);
+// results.source_error と全caseの ReplayReport.error/interrupted/incomplete を検査する。
+```
+
+`write_compiled_blocks` は新規ファイルだけ作り、既存ファイルを上書きしません。失敗時は削除します。
+永続cacheを公開するcallerは専用partialパスへ生成し、完成後にatomicに公開してください。
+formatはversion付き・checksum付きzstdフレーム（内部の型付きイベントはserde JSON）。
+各ブロックの先頭に板checkpoint、後続にはcompile済み差分を保存し、復元でもCOW共有を保持します。
+未完成footer、checksum、範囲不正、identity不一致はエラーです。cross-version互換は保証しません。
+cache化するcustomイベントにはさらに `Serialize + DeserializeOwned` が必要です。
+metadataのpreflight/coverageとcache identityの管理はcallerの責任です。
+
+既定4096 records/block、compile確定前の入力上限65536 records、待機queueはconsumerごと1 blockです。
+上限を超えるlookaheadでは明示的に失敗します。供給側は最も遅いcaseでbackpressureが掛かります。
+検証履歴・1通知のサイズ・strategy/simulation/記録の状態は別であり、プロセス全体の固定RAM上限ではありません。
+case数ぶんのスレッドと状態を使うため、runner側で同時ケース数を制限してください。
+
+非simulationの受信順callback検査には `run_capture_replay` / `run_capture_replay_with_options` を使います。
+simulation venueはこれらに渡せません。既存 `run_replay` 呼び出しはmetadata引数を追加し、
+custom型を共有可能にするか、非simulation用途を `run_capture_replay` へ移行してください。
+
+[compiled_blocks example](../examples/compiled_blocks.rs) で逐次生成・保存・再利用を試せます。
+
 ## 反復backtest
 
 同じ入力で複数の戦略・パラメータを評価する場合は、`PreparedReplay`で検証とJSON解析を一度だけ行い、
 `compile`で板の復元と重複検証も事前計算できます。入力・復元板をRAMに保持するため、
-逐次読み込みの`run_replay`よりメモリを使います。ディスクへのキャッシュ保存は行いません。
+逐次compiledの`run_replay`よりメモリを使います。省メモリで再利用する場合は次節のディスクブロックを使います。
 
 ```rust,ignore
 let prepared = PreparedReplay::new(ReplayInput::open(manifest)?)?;
