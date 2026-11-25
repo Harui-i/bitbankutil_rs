@@ -1,15 +1,24 @@
 use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankApiResponse, BitbankAssetsData, BitbankCancelOrderResponse,
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
-    BitbankGetOrderResponse, BitbankTradeHistoryResponse, BitbankWithdrawal,
-    BitbankWithdrawalAccountsResponse, BitbankWithdrawalHistoryResponse,
+    BitbankDepositConfirmation, BitbankDepositHistoryResponse, BitbankDepositOriginatorsResponse,
+    BitbankGetOrderResponse, BitbankTradeHistoryResponse, BitbankUnconfirmedDepositsResponse,
+    BitbankWithdrawal, BitbankWithdrawalAccountsResponse, BitbankWithdrawalHistoryResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption, BitbankOptions},
     http::Method,
     traits::HandlerOptions,
 };
+use serde_json::{Value, json};
 use std::time::Instant;
+
+#[cfg(test)]
+mod deposit_tests;
+
+#[derive(serde::Deserialize)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+struct EmptyDepositResponse {}
 
 fn assert_valid(condition: bool, field: &'static str, reason_code: &'static str) {
     if !condition {
@@ -129,6 +138,126 @@ impl BitbankPrivateApiClient {
         tracing::debug!(
             event = "api_call_finished",
             api = "get_assets",
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
+        );
+        result
+    }
+
+    /// 資産、件数、期間で絞り込んで入金履歴を取得する。
+    ///
+    /// `count` の上限は100件。`since` と `end` はUnixタイムスタンプ。
+    /// `asset` を省略すると全暗号資産が対象となる。日本円の履歴には `"jpy"` を指定する。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn get_deposit_history(
+        &self,
+        asset: Option<&str>,
+        count: Option<u64>,
+        since: Option<u64>,
+        end: Option<u64>,
+    ) -> Result<BitbankDepositHistoryResponse, Option<BitbankHandleError>> {
+        let mut query = serde_json::Map::new();
+        query.extend(
+            [
+                ("asset", asset.map(Value::from)),
+                ("count", count.map(Value::from)),
+                ("since", since.map(Value::from)),
+                ("end", end.map(Value::from)),
+            ]
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value))),
+        );
+        self.deposit_request(
+            "get_deposit_history",
+            Method::GET,
+            "/user/deposit_history",
+            (!query.is_empty()).then_some(Value::Object(query)),
+            None,
+        )
+        .await
+    }
+
+    /// 送付元情報の登録が必要な未反映入金を取得する。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn get_unconfirmed_deposits(
+        &self,
+    ) -> Result<BitbankUnconfirmedDepositsResponse, Option<BitbankHandleError>> {
+        self.deposit_request(
+            "get_unconfirmed_deposits",
+            Method::GET,
+            "/user/unconfirmed_deposits",
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// 未反映入金に登録できる送付元候補を取得する。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn get_deposit_originators(
+        &self,
+    ) -> Result<BitbankDepositOriginatorsResponse, Option<BitbankHandleError>> {
+        self.deposit_request(
+            "get_deposit_originators",
+            Method::GET,
+            "/user/deposit_originators",
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// 指定した未反映入金ごとに送付元を登録する。成功時は `Ok(())` を返す。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn post_confirm_deposits(
+        &self,
+        deposits: &[BitbankDepositConfirmation<'_>],
+    ) -> Result<(), Option<BitbankHandleError>> {
+        self.deposit_request::<EmptyDepositResponse>(
+            "post_confirm_deposits",
+            Method::POST,
+            "/user/confirm_deposits",
+            None,
+            Some(json!({ "deposits": deposits })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// すべての未反映入金に同じ送付元を登録する。成功時は `Ok(())` を返す。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn post_confirm_deposits_all(
+        &self,
+        originator_uuid: &str,
+    ) -> Result<(), Option<BitbankHandleError>> {
+        self.deposit_request::<EmptyDepositResponse>(
+            "post_confirm_deposits_all",
+            Method::POST,
+            "/user/confirm_deposits_all",
+            None,
+            Some(json!({ "originator_uuid": originator_uuid })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn deposit_request<T: serde::de::DeserializeOwned>(
+        &self,
+        api: &str,
+        method: Method,
+        path: &str,
+        query: Option<Value>,
+        body: Option<Value>,
+    ) -> Result<T, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+        let response = self
+            .transport
+            .request(&self.options, method, path, query.as_ref(), body)
+            .await;
+        let result = crate::response_handler::handle_response(api, response);
+        tracing::debug!(
+            event = "api_call_finished",
+            api,
             success = result.is_ok(),
             elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
