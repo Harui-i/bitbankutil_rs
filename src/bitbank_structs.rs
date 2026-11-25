@@ -428,7 +428,7 @@ pub struct BitbankDepositHistoryDatum {
     /// 入金ネットワーク。レスポンスに含まれない場合は `None`。
     pub network: Option<String>,
     /// 入金額。APIがJSON数値を返す場合も文字列に変換する。
-    #[serde(deserialize_with = "deserialize_deposit_amount")]
+    #[serde(deserialize_with = "deserialize_string_or_number")]
     pub amount: String,
     /// 暗号資産のトランザクションID。
     pub txid: Option<String>,
@@ -442,7 +442,7 @@ pub struct BitbankDepositHistoryDatum {
     pub confirmed_at: Option<u64>,
 }
 
-fn deserialize_deposit_amount<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn deserialize_string_or_number<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     #[derive(Deserialize)]
@@ -749,14 +749,21 @@ pub struct BitbankActiveOrdersResponse {
     pub orders: Vec<BitbankGetOrderResponse>,
 }
 
-/// WebSocket用のチャンネル・トークン情報。
-#[derive(Deserialize, Debug, Clone)]
+/// Private Stream 用のチャンネル・トークン情報。
+#[derive(Deserialize, Clone)]
 #[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
 pub struct BitbankChannelAndTokenResponse {
     /// PubNubチャンネル名。
     pub pubnub_channel: String,
     /// PubNubトークン。
     pub pubnub_token: String,
+}
+
+impl fmt::Debug for BitbankChannelAndTokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BitbankChannelAndTokenResponse")
+            .finish_non_exhaustive()
+    }
 }
 
 /// 現物取引のステータス情報。

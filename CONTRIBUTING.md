@@ -29,6 +29,12 @@ cargo test --features live-public-api --test live_public_api
 cargo test --features live-private-api --test live_private_api -- --test-threads=1
 ```
 
+実際のPrivate Streamへの接続と継続購読を検証する場合は、`BITBANK_API_KEY` と `BITBANK_API_SECRET` を設定して以下を実行します。通知がない場合、PubNub のロングポーリングが完了するまで数分かかります。
+
+```sh
+cargo test --features live-private-api --lib live_private_stream_subscribe -- --nocapture
+```
+
 実注文・キャンセルを伴うPrivate APIテストを実行する場合:
 
 ```sh

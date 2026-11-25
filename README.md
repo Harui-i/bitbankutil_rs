@@ -128,7 +128,7 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 
 | 機能 | 実装状況 |
 | --- | --- |
-| PubNub での購読・通知受信 | ❌ 未実装 ([#99](https://github.com/Harui-i/bitbankutil_rs/issues/99)) |
+| PubNub での購読・通知受信 | ✅ `BitbankPrivateStream` |
 
 ## 使い方
 
@@ -142,6 +142,36 @@ API通信には、bitbank対応を追加した`crypto-botters`のforkである
 [`crypto-botters-bitbank`](https://crates.io/crates/crypto-botters-bitbank)を使用しています。
 
 開発・テスト手順は [開発ガイド](CONTRIBUTING.md) を参照してください。
+
+
+### Private Stream の購読
+
+`BitbankPrivateApiClient` を使って PubNub の購読を開始します。`next_event` を繰り返し呼び出すと、残高・注文・約定・入出金・信用取引の通知を `BitbankPrivateEvent` として受信できます。
+
+```rust
+use bitbankutil_rs::{
+    bitbank_private::BitbankPrivateApiClient,
+    bitbank_private_stream::{BitbankPrivateEvent, BitbankPrivateStream},
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = BitbankPrivateApiClient::new(
+        std::env::var("BITBANK_API_KEY")?,
+        std::env::var("BITBANK_API_SECRET")?,
+        None,
+    );
+    let mut stream = BitbankPrivateStream::connect(&client).await?;
+    if let BitbankPrivateEvent::SpotOrder(orders) = stream.next_event().await? {
+        // バッチ内の注文更新を処理する。
+        println!("更新された注文: {} 件", orders.len());
+    }
+    stream.close();
+    Ok(())
+}
+```
+
+通信断後は直前の受信位置から再試行します。PubNub がトークンを拒否すると、bitbank から再取得して購読を再開します。通信断中に受信できなかった通知がある場合に備え、ローカルで管理する残高や注文は必要に応じて REST API で照合してください。
 
 ## ライセンス
 
