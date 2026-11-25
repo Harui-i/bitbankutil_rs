@@ -66,7 +66,12 @@ pub fn handle_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bitbank_structs::BitbankApiResponse, telemetry::tests::Capture};
+    use crate::{
+        bitbank_structs::{
+            BitbankActiveOrdersResponse, BitbankApiResponse, BitbankGetOrderResponse,
+        },
+        telemetry::tests::Capture,
+    };
     use serde_json::json;
     #[derive(serde::Deserialize)]
     struct Data {
@@ -122,5 +127,44 @@ mod tests {
         assert_eq!(events[0]["fields"]["count"], 20);
         assert_eq!(events[0]["fields"]["truncated"], true);
         assert!(!capture.text().contains("secret-sentinel"));
+    }
+
+    #[test]
+    fn order_responses_deserialize_optional_triggered_at() {
+        let limit_order = json!({
+            "order_id": 1,
+            "pair": "btc_jpy",
+            "side": "buy",
+            "type": "limit",
+            "start_amount": "0.001",
+            "remaining_amount": "0.001",
+            "executed_amount": "0",
+            "price": "15000000",
+            "user_cancelable": true,
+            "average_price": "0",
+            "ordered_at": 1795542400000_u64,
+            "status": "UNFILLED"
+        });
+        let triggered_at = 1795542400123_u64;
+        let mut stop_limit_order = limit_order.clone();
+        stop_limit_order["order_id"] = json!(2);
+        stop_limit_order["type"] = json!("stop_limit");
+        stop_limit_order["trigger_price"] = json!("14900000");
+        stop_limit_order["triggered_at"] = json!(triggered_at);
+
+        let single: BitbankGetOrderResponse =
+            handle_response("get_order", response(limit_order.clone())).unwrap();
+        assert_eq!(single.triggered_at, None);
+        let single: BitbankGetOrderResponse =
+            handle_response("get_order", response(stop_limit_order.clone())).unwrap();
+        assert_eq!(single.triggered_at, Some(triggered_at.into()));
+
+        let active: BitbankActiveOrdersResponse = handle_response(
+            "get_active_orders",
+            response(json!({"orders": [limit_order, stop_limit_order]})),
+        )
+        .unwrap();
+        assert_eq!(active.orders[0].triggered_at, None);
+        assert_eq!(active.orders[1].triggered_at, Some(triggered_at.into()));
     }
 }

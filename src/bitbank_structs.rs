@@ -440,6 +440,8 @@ pub struct BitbankGetOrderResponse {
     pub ordered_at: Number,
     /// 有効期限のUnixタイムスタンプ（ミリ秒）。
     pub expire_at: Option<Number>,
+    /// 注文が発動した時刻のUnixタイムスタンプ（ミリ秒）。レスポンスに含まれない場合は `None`。
+    pub triggered_at: Option<Number>,
     /// トリガー価格。
     pub trigger_price: Option<String>,
     /// ステータス: `INACTIVE`、`UNFILLED`、`PARTIALLY_FILLED`、`FULLY_FILLED`、`CANCELED_UNFILLED`、`CANCELED_PARTIALLY_FILLED`。
