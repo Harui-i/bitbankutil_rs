@@ -1,24 +1,41 @@
 use serde::de::IntoDeserializer;
 use serde_json::Value;
 
+use crate::bitbank_structs::BitbankApiResponse;
+use crypto_botters::{bitbank::BitbankHandleError, http::RequestError};
+
+type ApiResponse<'a> = Result<BitbankApiResponse, RequestError<&'a str, BitbankHandleError>>;
+
 pub fn handle_response<T: serde::de::DeserializeOwned>(
     api_name: &str,
-    res: Result<
-        crate::bitbank_structs::BitbankApiResponse,
-        crypto_botters::http::RequestError<&str, crypto_botters::bitbank::BitbankHandleError>,
-    >,
-) -> Result<T, Option<crypto_botters::bitbank::BitbankHandleError>> {
+    res: ApiResponse<'_>,
+) -> Result<T, Option<BitbankHandleError>> {
+    handle_response_inner(api_name, res, false)
+}
+
+pub(crate) fn handle_sensitive_response<T: serde::de::DeserializeOwned>(
+    api_name: &str,
+    res: ApiResponse<'_>,
+) -> Result<T, Option<BitbankHandleError>> {
+    handle_response_inner(api_name, res, true)
+}
+
+fn handle_response_inner<T: serde::de::DeserializeOwned>(
+    api_name: &str,
+    res: ApiResponse<'_>,
+    sensitive: bool,
+) -> Result<T, Option<BitbankHandleError>> {
     match res {
         Ok(api_response) => {
             // デシリアライズ
-            let de: Value = api_response.data.clone().into_deserializer();
+            let de: Value = api_response.data.into_deserializer();
             let mut ignored = Vec::new();
             let mut count = 0;
             let mut track = serde_path_to_error::Track::new();
             let de = serde_path_to_error::Deserializer::new(de, &mut track);
             let ret = serde_ignored::deserialize(de, |path| {
                 count += 1;
-                if ignored.len() < 8 {
+                if !sensitive && ignored.len() < 8 {
                     ignored.push(crate::telemetry::safe(&path.to_string()));
                 }
             });
@@ -26,13 +43,20 @@ pub fn handle_response<T: serde::de::DeserializeOwned>(
             match ret {
                 Ok(ret) => {
                     // api_responseにあったフィールドが、retには含まれていなかった場合警告する
-                    if !ignored.is_empty() {
+                    if sensitive && count > 0 {
+                        tracing::warn!(event = "response_unknown_fields", api = %crate::telemetry::safe(api_name), count);
+                    } else if !ignored.is_empty() {
                         tracing::warn!(event = "response_unknown_fields", api = %crate::telemetry::safe(api_name), count, fields = ?ignored, truncated = count > ignored.len());
                     }
                     Ok(ret)
                 }
                 Err(err) => {
-                    tracing::error!(event = "response_decode_failed", api = %crate::telemetry::safe(api_name), reason_code = crate::telemetry::decode_reason(&err), field = %crate::telemetry::decode_path(&err, &track.path().to_string()), action = "reject_response");
+                    let reason_code = crate::telemetry::decode_reason(&err);
+                    if sensitive {
+                        tracing::error!(event = "response_decode_failed", api = %crate::telemetry::safe(api_name), reason_code, action = "reject_response");
+                    } else {
+                        tracing::error!(event = "response_decode_failed", api = %crate::telemetry::safe(api_name), reason_code, field = %crate::telemetry::decode_path(&err, &track.path().to_string()), action = "reject_response");
+                    }
 
                     Err(None)
                 }

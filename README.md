@@ -107,9 +107,9 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 | `GET /user/deposit_originators` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
 | `POST /user/confirm_deposits` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
 | `POST /user/confirm_deposits_all` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
-| `GET /user/withdrawal_account` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
-| `POST /user/request_withdrawal` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
-| `GET /user/withdrawal_history` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
+| `GET /user/withdrawal_account` | ✅ |
+| `POST /user/request_withdrawal` | ✅ |
+| `GET /user/withdrawal_history` | ✅ |
 | `GET /spot/status` | ✅ `BitbankPublicApiClient::get_status` で API キーなしで取得可能 |
 | `GET /spot/pairs` | ✅ `BitbankPublicApiClient::get_pairs` で API キーなしで取得可能 |
 | `GET /user/subscribe` | ✅ `get_channel_and_token` で PubNub のチャンネル名とトークンを取得可能 |

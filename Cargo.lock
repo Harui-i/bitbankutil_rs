@@ -22,6 +22,7 @@ name = "bitbankutil_rs"
 version = "0.8.0"
 dependencies = [
  "crypto-botters-bitbank",
+ "reqwest",
  "serde",
  "serde_ignored",
  "serde_json",
