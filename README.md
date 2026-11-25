@@ -102,11 +102,11 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 | `GET /user/margin/status` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
 | `GET /user/margin/positions` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
 | `GET /user/spot/trade_history` | ✅ |
-| `GET /user/deposit_history` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
-| `GET /user/unconfirmed_deposits` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
-| `GET /user/deposit_originators` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
-| `POST /user/confirm_deposits` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
-| `POST /user/confirm_deposits_all` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
+| `GET /user/deposit_history` | ✅ 資産・件数・期間で絞り込み可能 |
+| `GET /user/unconfirmed_deposits` | ✅ |
+| `GET /user/deposit_originators` | ✅ |
+| `POST /user/confirm_deposits` | ✅ 入金ごとに送付元を登録 |
+| `POST /user/confirm_deposits_all` | ✅ 同一の送付元を一括登録 |
 | `GET /user/withdrawal_account` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
 | `POST /user/request_withdrawal` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
 | `GET /user/withdrawal_history` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
