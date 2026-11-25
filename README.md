@@ -68,56 +68,59 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 
 ## API カバレッジ
 
-### Public API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api.md))
+### Public API ([公式仕様](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-api_JP.md))
 
-| エンドポイント                    | 実装状況 |
-| --------------------------- | ----------- |
-|`GET /{pair}/ticker`        | ✅         |
-|`GET /tickers`| ✅         |
-|`GET /tickers_jpy`|✅ |
-|`GET /{pair}/depth`|✅ |
-|`GET /{pair}/transactions/{YYYYMMDD}`|✅ |
-|`GET /{pair}/candlestick/{candle-type}/{YYYY}`|✅ |
-|`GET /{pair}/circuit_break_info`| ✅ |
+| エンドポイント | 実装状況 |
+| --- | --- |
+| `GET /{pair}/ticker` | ✅ |
+| `GET /tickers` | ✅ |
+| `GET /tickers_jpy` | ✅ |
+| `GET /{pair}/depth` | ✅ |
+| `GET /{pair}/transactions/{YYYYMMDD}` | ✅ 日付は省略可能。省略時は最新60件 |
+| `GET /{pair}/candlestick/{candle-type}/{date}` | ✅ `1min`、`5min`、`15min`、`30min`、`1hour` は `YYYYMMDD`、`4hour`、`8hour`、`12hour`、`1day`、`1week`、`1month` は `YYYY` を指定 |
+| `GET /{pair}/circuit_break_info` | ✅ |
 
-### REST API ([Doc](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md))
+### REST API ([公式仕様](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api_JP.md))
 
-| エンドポイント                    | 実装状況 |
-| --------------------------- | ----------- |
-|`GET /user/assets`|✅ |
-|`GET /user/spot/order`|✅ |
-|`POST /user/spot/order`|✅ |
-|`POST /user/spot/cancel_order`|✅ |
-|`POST /user/spot/cancel_orders`|✅ |
-|`POST /user/spot/orders_info`|❌️ |
-|`GET /user/spot/active_orders`|✅|
-|`GET /user/margin/positions`|❌️ |
-|`GET /user/spot/trade_history`|✅|
-|`GET /user/deposit_history`|❌️ |
-|`GET /user/unconfirmed_deposits`|❌️ |
-|`GET /user/deposit_originators`|❌️ |
-|`POST /user/confirm_deposits`|❌️ |
-|`POST /user/confirm_deposits_all`|❌️ |
-|`GET /user/withdrawal_account`|❌️ |
-|`POST /user/request_withdrawal`|❌️ |
-|`GET /user/withdrawal_history`|❌️ |
-|`GET /spot/status`|️✅ |
-|`GET /spot/pairs`|❌️ |
-|`GET /user/subscribe`| ✅ |
+| エンドポイント | 実装状況 |
+| --- | --- |
+| `GET /user/assets` | ✅ |
+| `GET /user/spot/order` | ✅ 発動時刻 `triggered_at` を任意項目として取得可能 ([#93](https://github.com/Harui-i/bitbankutil_rs/issues/93)) |
+| `POST /user/spot/order` | ✅ 現物の指値・成行・逆指値・逆指値指値に対応。信用発注は未対応 ([#95](https://github.com/Harui-i/bitbankutil_rs/issues/95)) |
+| `POST /user/spot/cancel_order` | ✅ |
+| `POST /user/spot/cancel_orders` | ✅ |
+| `POST /user/spot/orders_info` | ❌ 未実装 ([#92](https://github.com/Harui-i/bitbankutil_rs/issues/92)) |
+| `GET /user/spot/active_orders` | ✅ 単一注文照会と同様に `triggered_at` を取得可能 ([#93](https://github.com/Harui-i/bitbankutil_rs/issues/93)) |
+| `GET /user/margin/status` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
+| `GET /user/margin/positions` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
+| `GET /user/spot/trade_history` | ✅ |
+| `GET /user/deposit_history` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
+| `GET /user/unconfirmed_deposits` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
+| `GET /user/deposit_originators` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
+| `POST /user/confirm_deposits` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
+| `POST /user/confirm_deposits_all` | ❌ 未実装 ([#97](https://github.com/Harui-i/bitbankutil_rs/issues/97)) |
+| `GET /user/withdrawal_account` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
+| `POST /user/request_withdrawal` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
+| `GET /user/withdrawal_history` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
+| `GET /spot/status` | ✅ 公式仕様では認証不要。現行の `BitbankPrivateApiClient::get_status` を使うには API キーとシークレットが必要 ([#96](https://github.com/Harui-i/bitbankutil_rs/issues/96)) |
+| `GET /spot/pairs` | ❌ 未実装 ([#96](https://github.com/Harui-i/bitbankutil_rs/issues/96)) |
+| `GET /user/subscribe` | ✅ `get_channel_and_token` で PubNub のチャンネル名とトークンを取得可能 |
 
-### Public Stream API
+### Public Stream API ([公式仕様](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-stream_JP.md))
 
-|チャンネル | 実装状況 |
-| --------------------------- | ----------- |
-|`ticker_{pair}`|✅ |
-|`transactions_{pair}`|✅ |
-|`depth_diff_{pair}`|✅ |
-|`depth_whole_{pair}`|✅ |
-|`circuit_break_info_{pair}`|✅ |
+| チャンネル | 実装状況 |
+| --- | --- |
+| `ticker_{pair}` | ✅ |
+| `transactions_{pair}` | ✅ |
+| `depth_diff_{pair}` | ✅ |
+| `depth_whole_{pair}` | ✅ |
+| `circuit_break_info_{pair}` | ✅ |
 
-## 今後の実装予定
+### Private Stream API ([公式仕様](https://github.com/bitbankinc/bitbank-api-docs/blob/master/private-stream_JP.md))
 
-- Private Streaming APIへの対応
+| 機能 | 実装状況 |
+| --- | --- |
+| PubNub での購読・通知受信 | ❌ 未実装 ([#99](https://github.com/Harui-i/bitbankutil_rs/issues/99)) |
 
 ## 使い方
 
