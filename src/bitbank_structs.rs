@@ -138,6 +138,109 @@ pub struct BitbankCandlestickResponse {
     pub timestamp: i64,
 }
 
+/// 登録済みの出金先。
+#[derive(Deserialize, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankWithdrawalAccount {
+    /// 出金申請に指定する出金先ID。
+    pub uuid: String,
+    /// 出金先のラベル（暗号資産）。
+    pub label: Option<String>,
+    /// 出金ネットワーク（暗号資産）。
+    pub network: Option<String>,
+    /// 出金先アドレス（暗号資産）。
+    pub address: Option<String>,
+    /// 出金先の銀行名（JPY）。
+    pub bank_name: Option<String>,
+    /// 出金先の支店名（JPY）。
+    pub branch_name: Option<String>,
+    /// 出金先の口座種別（JPY）。
+    pub account_type: Option<String>,
+    /// 出金先の口座番号（JPY）。
+    pub account_number: Option<String>,
+    /// 出金先の口座名義（JPY）。
+    pub account_owner: Option<String>,
+}
+
+impl fmt::Debug for BitbankWithdrawalAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BitbankWithdrawalAccount")
+            .finish_non_exhaustive()
+    }
+}
+
+/// 出金先照会の結果。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankWithdrawalAccountsResponse {
+    /// 指定アセットの出金先一覧。
+    pub accounts: Vec<BitbankWithdrawalAccount>,
+}
+
+/// 出金先に付随する宛先タグまたはメモ。
+#[derive(Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum BitbankWithdrawalDestinationTag {
+    /// 数値で返る宛先タグ。
+    Number(Number),
+    /// 文字列で返る宛先タグまたはメモ。
+    Text(String),
+}
+
+/// 出金申請の結果、または出金履歴の1件。
+#[derive(Deserialize, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankWithdrawal {
+    /// 出金ID。
+    pub uuid: String,
+    /// アセット名。
+    pub asset: String,
+    /// 出金先ID。
+    pub account_uuid: String,
+    /// 出金数量の十進文字列。
+    pub amount: String,
+    /// 出金手数料の十進文字列。
+    pub fee: String,
+    /// 出金先のラベル（暗号資産）。
+    pub label: Option<String>,
+    /// 出金先アドレス（暗号資産）。
+    pub address: Option<String>,
+    /// 出金ネットワーク（暗号資産）。
+    pub network: Option<String>,
+    /// 宛先タグまたはメモ（指定のある暗号資産）。
+    pub destination_tag: Option<BitbankWithdrawalDestinationTag>,
+    /// 出金トランザクションID（暗号資産。未反映の場合はNone）。
+    pub txid: Option<String>,
+    /// 出金先の銀行名（JPY）。
+    pub bank_name: Option<String>,
+    /// 出金先の支店名（JPY）。
+    pub branch_name: Option<String>,
+    /// 出金先の口座種別（JPY）。
+    pub account_type: Option<String>,
+    /// 出金先の口座番号（JPY）。
+    pub account_number: Option<String>,
+    /// 出金先の口座名義（JPY）。
+    pub account_owner: Option<String>,
+    /// 出金のステータス。
+    pub status: String,
+    /// 申請時点のUnixタイムスタンプ（ミリ秒）。
+    pub requested_at: i64,
+}
+
+impl fmt::Debug for BitbankWithdrawal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BitbankWithdrawal").finish_non_exhaustive()
+    }
+}
+
+/// 出金履歴照会の結果。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankWithdrawalHistoryResponse {
+    /// 条件に一致する出金履歴。
+    pub withdrawals: Vec<BitbankWithdrawal>,
+}
+
 /// 資産情報のエントリ。
 ///
 /// 仕様: <https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#assets>

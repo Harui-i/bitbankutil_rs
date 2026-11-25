@@ -9,7 +9,7 @@ use crypto_botters::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tracing::Instrument;
 #[derive(Clone, Default)]
 pub(crate) struct Transport {
@@ -110,7 +110,17 @@ impl Transport {
             options.clone(),
         );
         let config = <_ as RequestHandler<&B>>::request_config(&handler);
-        assert!(config.max_try > 0);
+        let withdrawal = matches!(
+            path,
+            "/user/withdrawal_account" | "/user/request_withdrawal" | "/user/withdrawal_history"
+        );
+        // 応答を受信できなくても、出金申請が既に受理されている可能性がある。
+        let max_try = if withdrawal && method == Method::POST {
+            1
+        } else {
+            config.max_try
+        };
+        assert!(max_try > 0);
         let observed = Observed {
             inner: handler,
             response_clock: Mutex::new(None),
@@ -153,7 +163,7 @@ impl Transport {
                 RequestError::BuildRequestError("invalid query")
             })?
             .map(query_strings);
-        for attempt in 1..=config.max_try {
+        for attempt in 1..=max_try {
             *observed.response_clock.lock().unwrap() = None;
             *observed.status.lock().unwrap() = None;
             *observed.code.lock().unwrap() = None;
@@ -169,17 +179,15 @@ impl Transport {
                     })
                 });
             }
-            let result = self
-                .http
-                .request(
-                    method.clone(),
-                    path,
-                    query.as_ref(),
-                    body.as_ref(),
-                    &observed,
-                )
-                .instrument(tracing::info_span!(parent: &request_span, "venue_http_attempt", venue_attempt = attempt))
-                .await;
+            let result = async {
+                if withdrawal {
+                    request_without_redirects(method.clone(), path, query.as_ref(), body.as_ref(), &observed).await
+                } else {
+                    self.http.request(method.clone(), path, query.as_ref(), body.as_ref(), &observed).await
+                }
+            }
+            .instrument(tracing::info_span!(parent: &request_span, "venue_http_attempt", venue_attempt = attempt))
+            .await;
             if options.http_auth {
                 let state = match &result {
                     Ok(_) => Some((1, "authenticated", "success")),
@@ -207,7 +215,7 @@ impl Transport {
                 _ => false,
             };
             let will_retry =
-                matches!(result, Err(RequestError::SendRequest(_))) && attempt < config.max_try;
+                matches!(result, Err(RequestError::SendRequest(_))) && attempt < max_try;
             let stage = match &result {
                 Ok(_) => "success",
                 Err(RequestError::SendRequest(_)) => "send",
@@ -284,6 +292,48 @@ impl Transport {
         }
         unreachable!()
     }
+}
+
+// 出金先情報と認証情報をリダイレクト先へ転送しない。署名とレスポンス処理は共通のハンドラーを使う。
+async fn request_without_redirects<B, H: RequestHandler<B>>(
+    method: Method,
+    path: &str,
+    query: Option<&Value>,
+    body: Option<B>,
+    handler: &H,
+) -> Result<H::Successful, RequestError<H::BuildError, H::Unsuccessful>> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("failed to build HTTP client")
+    });
+
+    let config = handler.request_config();
+    let mut builder = client
+        .request(method, config.url_prefix + path)
+        .timeout(config.timeout);
+    if let Some(query) = query {
+        builder = builder.query(query);
+    }
+    let request = handler
+        .build_request(builder, &body, 1)
+        .map_err(RequestError::BuildRequestError)?;
+    let mut response = client
+        .execute(request)
+        .await
+        .map_err(RequestError::SendRequest)?;
+    let status = response.status();
+    let headers = std::mem::take(response.headers_mut());
+    let body = response
+        .bytes()
+        .await
+        .map_err(RequestError::ReceiveResponse)?;
+    handler
+        .handle_response(status, headers, body)
+        .map_err(RequestError::ResponseHandleError)
 }
 
 fn safe_result(path: &str, data: &Value) -> Value {

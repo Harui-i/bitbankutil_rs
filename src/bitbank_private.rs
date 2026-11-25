@@ -3,6 +3,7 @@ use crate::bitbank_structs::{
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
     BitbankDepositConfirmation, BitbankDepositHistoryResponse, BitbankDepositOriginatorsResponse,
     BitbankGetOrderResponse, BitbankTradeHistoryResponse, BitbankUnconfirmedDepositsResponse,
+    BitbankWithdrawal, BitbankWithdrawalAccountsResponse, BitbankWithdrawalHistoryResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption, BitbankOptions},
@@ -46,6 +47,27 @@ fn validate_post_order_args(side: &str, r#type: &str, post_only: Option<bool>) {
         "requires_limit_order",
     );
 }
+
+/// 出金APIの失敗を示す。取引所のレスポンス本文は保持しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BitbankWithdrawalError {
+    /// ライブラリが分類した失敗理由。
+    pub reason_code: &'static str,
+    /// bitbankが返したエラーコード（取得できた場合）。
+    pub exchange_code: Option<u64>,
+}
+
+impl std::fmt::Display for BitbankWithdrawalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "bitbank withdrawal: {}", self.reason_code)?;
+        if let Some(code) = self.exchange_code {
+            write!(f, " ({code})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BitbankWithdrawalError {}
 
 #[derive(Clone)]
 pub struct BitbankPrivateApiClient {
@@ -592,6 +614,103 @@ impl BitbankPrivateApiClient {
         result
     }
 
+    /// 指定したアセットの登録済み出金先を取得する。
+    /// `jpy` を指定すると、出金先の銀行口座情報を取得する。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn get_withdrawal_accounts(
+        &self,
+        asset: &str,
+    ) -> Result<BitbankWithdrawalAccountsResponse, BitbankWithdrawalError> {
+        let query = serde_json::json!({ "asset": asset });
+        self.withdrawal_request(Method::GET, "/user/withdrawal_account", Some(&query), None)
+            .await
+    }
+
+    /// 登録済みの出金先 `uuid` に十進文字列で指定した数量を出金申請する。
+    ///
+    /// 口座で有効になっている認証に応じて `otp_token` と `sms_token` を渡す。
+    /// 通信エラー時は、再申請する前に履歴で受理状況を確認する。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn request_withdrawal(
+        &self,
+        asset: &str,
+        uuid: &str,
+        amount: &str,
+        otp_token: Option<&str>,
+        sms_token: Option<&str>,
+    ) -> Result<BitbankWithdrawal, BitbankWithdrawalError> {
+        let mut body = serde_json::json!({ "asset": asset, "uuid": uuid, "amount": amount });
+        if let Some(token) = otp_token {
+            body["otp_token"] = serde_json::json!(token);
+        }
+        if let Some(token) = sms_token {
+            body["sms_token"] = serde_json::json!(token);
+        }
+        self.withdrawal_request(Method::POST, "/user/request_withdrawal", None, Some(body))
+            .await
+    }
+
+    /// 出金履歴を取得する。件数上限は100件。時刻はUnixタイムスタンプ（ミリ秒）。
+    ///
+    /// `asset` を省略すると全暗号資産が対象になる。日本円の履歴には `jpy` を指定する。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn get_withdrawal_history(
+        &self,
+        asset: Option<&str>,
+        count: Option<i64>,
+        since: Option<i64>,
+        end: Option<i64>,
+    ) -> Result<BitbankWithdrawalHistoryResponse, BitbankWithdrawalError> {
+        #[derive(serde::Serialize)]
+        struct Query<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            asset: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            count: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            since: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            end: Option<i64>,
+        }
+        let query = serde_json::json!(Query {
+            asset,
+            count,
+            since,
+            end
+        });
+        self.withdrawal_request(Method::GET, "/user/withdrawal_history", Some(&query), None)
+            .await
+    }
+
+    async fn withdrawal_request<T: serde::de::DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &'static str,
+        query: Option<&serde_json::Value>,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, BitbankWithdrawalError> {
+        let start_time = Instant::now();
+        let response = self
+            .transport
+            .request(&self.options, method, path, query, body)
+            .await;
+        let result =
+            crate::response_handler::handle_sensitive_response(path, response).map_err(|error| {
+                let (reason_code, exchange_code, _) = crate::error_diagnostics::api(&error);
+                BitbankWithdrawalError {
+                    reason_code,
+                    exchange_code,
+                }
+            });
+        tracing::debug!(
+            event = "api_call_finished",
+            api = path,
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
+        );
+        result
+    }
+
     // プライベートストリーム用のチャンネルとトークンを取得する。 cf: https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#private-stream
     #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
     pub async fn get_channel_and_token(
@@ -673,6 +792,23 @@ mod recording_tests {
         ExecutionRecorder,
         std::thread::JoinHandle<()>,
     ) {
+        let replies = replies
+            .into_iter()
+            .map(|reply| reply.map(|(status, body)| (status, body.to_owned())))
+            .collect();
+        client_with_request_observer(replies, retries, |_, _| {})
+    }
+
+    fn client_with_request_observer(
+        replies: Vec<Option<(u16, String)>>,
+        retries: u8,
+        mut observe_request: impl FnMut(&str, &[u8]) + Send + 'static,
+    ) -> (
+        BitbankPrivateApiClient,
+        Memory,
+        ExecutionRecorder,
+        std::thread::JoinHandle<()>,
+    ) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -688,6 +824,19 @@ mod recording_tests {
                     assert!(n > 0);
                     request.extend_from_slice(&b[..n]);
                 }
+                let header_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                let body_len = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map_or(0, |(_, value)| value.trim().parse::<usize>().unwrap());
+                while request.len() < header_end + body_len {
+                    let n = stream.read(&mut b).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&b[..n]);
+                }
+                observe_request(&headers, &request[header_end..header_end + body_len]);
                 if let Some((status, mut body)) = reply {
                     if body == "__timeout__" {
                         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -698,7 +847,8 @@ mod recording_tests {
                             r#"{"success":1,"data":{"assets":[]}}"#
                         } else {
                             r#"{"success":1,"data":{"orders":[]}}"#
-                        };
+                        }
+                        .to_owned();
                     }
                     let body = if body == "__order__" || body == "__latency_order__" {
                         let request = String::from_utf8_lossy(&request);
@@ -729,9 +879,14 @@ mod recording_tests {
                         }
                         serde_json::json!({"success":1,"data":order}).to_string()
                     } else {
-                        body.to_owned()
+                        body
                     };
-                    write!(stream,"HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                    let location = if status == 307 {
+                        "Location: /redirect-private\r\n"
+                    } else {
+                        ""
+                    };
+                    write!(stream,"HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n{location}\r\n{body}",body.len()).unwrap();
                 }
             }
         });
@@ -751,6 +906,272 @@ mod recording_tests {
         let r = ExecutionRecorder::new("http-test", serde_json::json!({}), JsonlSink(m.clone()));
         (c.with_recorder(r.clone()), m, r, server)
     }
+    #[tokio::test]
+    async fn withdrawal_requests_and_responses_keep_private_data_out_of_logs_and_records() {
+        use crate::{bitbank_structs::BitbankWithdrawalDestinationTag, telemetry::tests::Capture};
+        use serde_json::{Value, json};
+
+        let capture = Capture::default();
+        let _guard = tracing::subscriber::set_default(capture.subscriber());
+        let accounts = r#"{"success":1,"data":{"accounts":[{"uuid":"destination-private","label":"label-private","network":"xrp","address":"address-private"}]}}"#;
+        let jpy_accounts = r#"{"success":1,"data":{"accounts":[{"uuid":"destination-private","bank_name":"bank-private","branch_name":"branch-private","account_type":"ordinary","account_number":"0012345","account_owner":"owner-private"}]}}"#;
+        let crypto = r#"{"uuid":"withdrawal-private","asset":"xrp","account_uuid":"destination-private","amount":"12.3400","fee":"0.1","label":"label-private","address":"address-private","network":"xrp","destination_tag":9007199254740993,"txid":null,"status":"CONFIRMING","requested_at":1700000000000}"#;
+        let jpy = r#"{"uuid":"withdrawal-private","asset":"jpy","account_uuid":"destination-private","amount":"1000","fee":"550","bank_name":"bank-private","branch_name":"branch-private","account_type":"ordinary","account_number":"0012345","account_owner":"owner-private","status":"DONE","requested_at":1700000000001}"#;
+        let crypto_request = format!(r#"{{"success":1,"data":{crypto}}}"#);
+        let jpy_request = format!(r#"{{"success":1,"data":{jpy}}}"#);
+        let crypto_memo = crypto.replace("9007199254740993", r#""memo-private""#);
+        let crypto_history =
+            format!(r#"{{"success":1,"data":{{"withdrawals":[{crypto},{crypto_memo}]}}}}"#);
+        let jpy_history = format!(r#"{{"success":1,"data":{{"withdrawals":[{jpy}]}}}}"#);
+        let denied = r#"{"success":0,"data":{"code":20011,"echo":"otp-private"}}"#;
+        let unknown = r#"{"success":1,"data":{"accounts":[],"unknown-private":"value-private"}}"#;
+        let malformed = r#"{"success":1,"data":{"accounts":[{"uuid":"destination-private","label":"label-private","network":"xrp","address":{"nested-private":"address-private"}}]}}"#;
+
+        let expected = [
+            (
+                "GET /user/withdrawal_account?asset=xrp HTTP/1.1",
+                Value::Null,
+            ),
+            (
+                "GET /user/withdrawal_account?asset=jpy HTTP/1.1",
+                Value::Null,
+            ),
+            (
+                "POST /user/request_withdrawal HTTP/1.1",
+                json!({
+                    "asset":"xrp","uuid":"destination-private","amount":"12.3400",
+                    "otp_token":"otp-private","sms_token":"sms-private"
+                }),
+            ),
+            (
+                "POST /user/request_withdrawal HTTP/1.1",
+                json!({
+                    "asset":"jpy","uuid":"destination-private","amount":"1000"
+                }),
+            ),
+            ("GET /user/withdrawal_history HTTP/1.1", Value::Null),
+            (
+                "GET /user/withdrawal_history?asset=jpy&count=100&end=1700000000002&since=1700000000000 HTTP/1.1",
+                Value::Null,
+            ),
+            (
+                "POST /user/request_withdrawal HTTP/1.1",
+                json!({
+                    "asset":"xrp","uuid":"destination-private","amount":"12.3400","otp_token":"otp-private"
+                }),
+            ),
+            (
+                "GET /user/withdrawal_account?asset=xrp HTTP/1.1",
+                Value::Null,
+            ),
+            (
+                "GET /user/withdrawal_account?asset=xrp HTTP/1.1",
+                Value::Null,
+            ),
+            (
+                "POST /user/request_withdrawal HTTP/1.1",
+                json!({
+                    "asset":"jpy","uuid":"destination-private","amount":"1000","sms_token":"sms-private"
+                }),
+            ),
+            (
+                "POST /user/request_withdrawal HTTP/1.1",
+                json!({
+                    "asset":"jpy","uuid":"destination-private","amount":"1000","sms_token":"sms-private"
+                }),
+            ),
+        ];
+        let mut expected = expected.into_iter();
+        let (client, memory, recorder, server) = client_with_request_observer(
+            vec![
+                Some((200, accounts.to_owned())),
+                Some((200, jpy_accounts.to_owned())),
+                Some((200, crypto_request)),
+                Some((200, jpy_request)),
+                Some((200, crypto_history)),
+                Some((200, jpy_history)),
+                Some((400, denied.to_owned())),
+                Some((200, unknown.to_owned())),
+                Some((200, malformed.to_owned())),
+                None,
+                Some((307, "{}".to_owned())),
+            ],
+            3,
+            move |headers, body| {
+                let (line, expected_body) = expected.next().unwrap();
+                assert_eq!(headers.lines().next(), Some(line));
+                let headers = headers.to_ascii_lowercase();
+                for header in [
+                    "access-key: secret-key-sentinel",
+                    "access-request-time:",
+                    "access-time-window:",
+                    "access-signature:",
+                ] {
+                    assert!(headers.contains(header));
+                }
+                if expected_body.is_null() {
+                    assert!(body.is_empty());
+                } else {
+                    assert!(headers.contains("content-type: application/json"));
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(body).unwrap(),
+                        expected_body
+                    );
+                }
+            },
+        );
+
+        let accounts = client.get_withdrawal_accounts("xrp").await.unwrap();
+        assert_eq!(accounts.accounts[0].uuid, "destination-private");
+        assert_eq!(
+            accounts.accounts[0].address.as_deref(),
+            Some("address-private")
+        );
+        assert!(accounts.accounts[0].bank_name.is_none());
+        tracing::trace!(?accounts);
+
+        let jpy_accounts = client.get_withdrawal_accounts("jpy").await.unwrap();
+        assert_eq!(
+            jpy_accounts.accounts[0].account_number.as_deref(),
+            Some("0012345")
+        );
+        assert!(jpy_accounts.accounts[0].address.is_none());
+        tracing::trace!(?jpy_accounts);
+
+        let submitted = client
+            .request_withdrawal(
+                "xrp",
+                &accounts.accounts[0].uuid,
+                "12.3400",
+                Some("otp-private"),
+                Some("sms-private"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(submitted.amount, "12.3400");
+        assert_eq!(submitted.network.as_deref(), Some("xrp"));
+        assert!(submitted.bank_name.is_none());
+        assert!(submitted.txid.is_none());
+        tracing::trace!(?submitted);
+
+        let submitted = client
+            .request_withdrawal("jpy", "destination-private", "1000", None, None)
+            .await
+            .unwrap();
+        assert_eq!(submitted.account_number.as_deref(), Some("0012345"));
+        assert!(submitted.address.is_none());
+
+        let crypto_history = client
+            .get_withdrawal_history(None, None, None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &crypto_history.withdrawals[0].destination_tag,
+            Some(BitbankWithdrawalDestinationTag::Number(tag)) if tag.as_u64() == Some(9_007_199_254_740_993)
+        ));
+        assert!(matches!(
+            &crypto_history.withdrawals[1].destination_tag,
+            Some(BitbankWithdrawalDestinationTag::Text(memo)) if memo == "memo-private"
+        ));
+        tracing::trace!(?crypto_history);
+
+        let jpy_history = client
+            .get_withdrawal_history(
+                Some("jpy"),
+                Some(100),
+                Some(1700000000000),
+                Some(1700000000002),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            jpy_history.withdrawals[0].account_owner.as_deref(),
+            Some("owner-private")
+        );
+        assert!(jpy_history.withdrawals[0].destination_tag.is_none());
+        tracing::trace!(?jpy_history);
+
+        let denied = client
+            .request_withdrawal(
+                "xrp",
+                "destination-private",
+                "12.3400",
+                Some("otp-private"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(denied.reason_code, "mfa_failed");
+        assert_eq!(denied.exchange_code, Some(20011));
+        tracing::trace!(?denied);
+
+        let unknown = client.get_withdrawal_accounts("xrp").await;
+        assert_eq!(unknown.is_err(), cfg!(feature = "strict-validation"));
+        assert!(client.get_withdrawal_accounts("xrp").await.is_err());
+        assert!(
+            client
+                .request_withdrawal(
+                    "jpy",
+                    "destination-private",
+                    "1000",
+                    None,
+                    Some("sms-private")
+                )
+                .await
+                .is_err()
+        );
+
+        let redirected = client
+            .request_withdrawal(
+                "jpy",
+                "destination-private",
+                "1000",
+                None,
+                Some("sms-private"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(redirected.reason_code, "api_error");
+
+        server.join().unwrap();
+        recorder.finish().unwrap();
+        let bytes = memory.0.lock().unwrap();
+        let records = read_records(&bytes[..]).unwrap();
+        let attempts: Vec<_> = records
+            .iter()
+            .filter(|r| r.kind == "http_finished")
+            .collect();
+        assert_eq!(attempts.len(), 11);
+        assert_eq!(attempts[10].data["http_status"], 307);
+        assert_eq!(attempts[9].data["stage"], "send");
+        assert_eq!(attempts[9].data["will_retry"], false);
+        assert!(attempts.iter().all(|r| r.data["result"].is_null()));
+        assert!(
+            records
+                .iter()
+                .filter(|r| r.kind == "http_started")
+                .all(|r| r.data["request"] == json!({}))
+        );
+
+        let logs = capture.text();
+        assert!(logs.contains("response_decode_failed"));
+        assert!(logs.contains("api_call_finished"));
+        assert!(logs.contains("crypto_history"));
+        for private in [
+            "-private",
+            "0012345",
+            "9007199254740993",
+            "secret-key-sentinel",
+            "secret-value-sentinel",
+        ] {
+            assert!(!logs.contains(private), "log leaked {private}");
+            assert!(
+                !std::str::from_utf8(&bytes).unwrap().contains(private),
+                "record leaked {private}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn snapshot_is_one_operation_two_http_calls() {
         // 同じ応答を並行する両方のエンドポイント要求に返す。
