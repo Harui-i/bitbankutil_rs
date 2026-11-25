@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::time::Instant;
 
 #[cfg(test)]
-mod http_tests;
+pub(crate) mod http_tests;
 
 #[derive(serde::Deserialize)]
 #[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
@@ -788,7 +788,8 @@ impl BitbankPrivateApiClient {
                 None::<()>,
             )
             .await;
-        let result = crate::response_handler::handle_response("get_channel_and_token", res);
+        let result =
+            crate::response_handler::handle_sensitive_response("get_channel_and_token", res);
         tracing::debug!(
             event = "api_call_finished",
             api = "get_channel_and_token",

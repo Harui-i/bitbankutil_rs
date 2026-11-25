@@ -25,7 +25,7 @@ crypto-botters = { package = "crypto-botters-bitbank", version = "0.8.1", featur
   "bitbank",
 ] }
 reqwest = { version = "0.11.27", default-features = false }
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
 serde_ignored = "0.1.14"
 serde_path_to_error = "0.1.20"

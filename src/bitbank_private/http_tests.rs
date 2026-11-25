@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-fn serve<const N: usize>(
+pub(crate) fn serve<const N: usize>(
     exchanges: [(&'static str, Option<Value>, &'static str); N],
 ) -> (BitbankPrivateApiClient, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
