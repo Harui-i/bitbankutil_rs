@@ -547,8 +547,18 @@ pub struct BitbankGetOrderResponse {
     pub triggered_at: Option<Number>,
     /// トリガー価格。
     pub trigger_price: Option<String>,
+    /// キャンセル時のUnixタイムスタンプ（ミリ秒）。
+    pub canceled_at: Option<Number>,
     /// ステータス: `INACTIVE`、`UNFILLED`、`PARTIALLY_FILLED`、`FULLY_FILLED`、`CANCELED_UNFILLED`、`CANCELED_PARTIALLY_FILLED`。
     pub status: String,
+}
+
+/// 複数注文照会レスポンス。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankOrdersInfoResponse {
+    /// bitbank が返した注文の一覧。
+    pub orders: Vec<BitbankGetOrderResponse>,
 }
 
 /// 注文キャンセルレスポンス。

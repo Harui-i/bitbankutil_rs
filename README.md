@@ -97,7 +97,7 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 | `POST /user/spot/order` | ✅ 現物の指値・成行・逆指値・逆指値指値に対応。信用発注は未対応 ([#95](https://github.com/Harui-i/bitbankutil_rs/issues/95)) |
 | `POST /user/spot/cancel_order` | ✅ |
 | `POST /user/spot/cancel_orders` | ✅ |
-| `POST /user/spot/orders_info` | ❌ 未実装 ([#92](https://github.com/Harui-i/bitbankutil_rs/issues/92)) |
+| `POST /user/spot/orders_info` | ✅ |
 | `GET /user/spot/active_orders` | ✅ 各注文の発動時刻 `triggered_at` を取得可能 |
 | `GET /user/margin/status` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
 | `GET /user/margin/positions` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
