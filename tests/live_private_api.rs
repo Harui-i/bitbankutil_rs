@@ -62,3 +62,47 @@ async fn test_private_get_channel_and_token() {
         bb_client.get_channel_and_token().await.unwrap();
     tracing::info!(event = "channel_token_received", success = true);
 }
+
+#[tokio::test]
+async fn test_private_withdrawal_accounts() {
+    let client = init_client();
+    for asset in ["btc", "xrp"] {
+        let accounts = client.get_withdrawal_accounts(asset).await.unwrap();
+        println!("{asset} withdrawal accounts: {}", accounts.accounts.len());
+    }
+}
+
+#[tokio::test]
+async fn test_private_withdrawal_history() {
+    let client = init_client();
+    let crypto = client
+        .get_withdrawal_history(None, Some(100), None, None)
+        .await
+        .unwrap();
+    assert!(crypto.withdrawals.iter().all(|entry| entry.asset != "jpy"));
+    println!("crypto withdrawals: {}", crypto.withdrawals.len());
+
+    let jpy = client
+        .get_withdrawal_history(Some("jpy"), Some(100), None, None)
+        .await
+        .unwrap();
+    assert!(jpy.withdrawals.iter().all(|entry| entry.asset == "jpy"));
+    println!("JPY withdrawals: {}", jpy.withdrawals.len());
+}
+
+#[tokio::test]
+#[ignore = "sends an intentionally invalid request to the production withdrawal endpoint"]
+async fn test_private_withdrawal_rejects_invalid_request() {
+    let client = init_client();
+    let error = client
+        .request_withdrawal("xrp", "", "0", None, None)
+        .await
+        .unwrap_err();
+    let code = error
+        .exchange_code
+        .expect("expected an error code from bitbank");
+    println!(
+        "invalid withdrawal request rejected: {} ({code})",
+        error.reason_code
+    );
+}
