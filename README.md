@@ -36,6 +36,14 @@
     tracing::debug!("{:?}", res);
 ```
 
+取引所ステータスと取引ペア設定も、同じクライアントで API キーなしで取得できます。
+`get_status` の呼び出しは `BitbankPublicApiClient` に移行してください。
+
+```rust
+    let statuses = public_client.get_status().await.unwrap().statuses;
+    let pairs = public_client.get_pairs().await.unwrap().pairs;
+```
+
 以上のような処理には、取引所のjson形式のAPIレスポンスをRustで扱えるようにするために`serde_json`などを使ってデシリアライズする必要がありますが、そういった処理は`src/bitbank_structs.rs`で実装されているため、簡単に利用できます。
 
 ### bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
@@ -101,8 +109,8 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 |`GET /user/withdrawal_account`|❌️ |
 |`POST /user/request_withdrawal`|❌️ |
 |`GET /user/withdrawal_history`|❌️ |
-|`GET /spot/status`|️✅ |
-|`GET /spot/pairs`|❌️ |
+|`GET /spot/status`|✅ （API キー不要） |
+|`GET /spot/pairs`|✅ （API キー不要） |
 |`GET /user/subscribe`| ✅ |
 
 ### Public Stream API

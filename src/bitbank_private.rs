@@ -1,7 +1,7 @@
 use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankApiResponse, BitbankAssetsData, BitbankCancelOrderResponse,
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
-    BitbankGetOrderResponse, BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
+    BitbankGetOrderResponse, BitbankTradeHistoryResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption, BitbankOptions},
@@ -456,37 +456,6 @@ impl BitbankPrivateApiClient {
         tracing::debug!(
             event = "api_call_finished",
             api = "get_active_orders",
-            success = result.is_ok(),
-            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
-        );
-        result
-    }
-
-    // 取引所のステータスを取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-exchange-status
-    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
-    pub async fn get_status(
-        &self,
-    ) -> Result<BitbankSpotStatusResponse, Option<BitbankHandleError>> {
-        let start_time = Instant::now();
-
-        let res: Result<
-            BitbankApiResponse,
-            crypto_botters::http::RequestError<&str, BitbankHandleError>,
-        > = self
-            .transport
-            .request(
-                &self.options,
-                crypto_botters::http::Method::GET,
-                "/spot/status",
-                None::<&()>,
-                None::<()>,
-            )
-            .await;
-
-        let result = crate::response_handler::handle_response("get_status", res);
-        tracing::debug!(
-            event = "api_call_finished",
-            api = "get_status",
             success = result.is_ok(),
             elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
         );
