@@ -70,6 +70,16 @@ async fn test_private_withdrawal_accounts() {
         let accounts = client.get_withdrawal_accounts(asset).await.unwrap();
         println!("{asset} withdrawal accounts: {}", accounts.accounts.len());
     }
+
+    let jpy = client.get_withdrawal_accounts("jpy").await.unwrap();
+    assert!(
+        jpy.accounts
+            .iter()
+            .all(|account| account.account_number.is_some()
+                && account.account_owner.is_some()
+                && account.address.is_none())
+    );
+    println!("JPY withdrawal accounts: {}", jpy.accounts.len());
 }
 
 #[tokio::test]

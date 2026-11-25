@@ -144,12 +144,22 @@ pub struct BitbankCandlestickResponse {
 pub struct BitbankWithdrawalAccount {
     /// 出金申請に指定する出金先ID。
     pub uuid: String,
-    /// 出金先のラベル。
-    pub label: String,
-    /// 出金ネットワーク。
-    pub network: String,
-    /// 出金先アドレス。
-    pub address: String,
+    /// 出金先のラベル（暗号資産）。
+    pub label: Option<String>,
+    /// 出金ネットワーク（暗号資産）。
+    pub network: Option<String>,
+    /// 出金先アドレス（暗号資産）。
+    pub address: Option<String>,
+    /// 出金先の銀行名（JPY）。
+    pub bank_name: Option<String>,
+    /// 出金先の支店名（JPY）。
+    pub branch_name: Option<String>,
+    /// 出金先の口座種別（JPY）。
+    pub account_type: Option<String>,
+    /// 出金先の口座番号（JPY）。
+    pub account_number: Option<String>,
+    /// 出金先の口座名義（JPY）。
+    pub account_owner: Option<String>,
 }
 
 impl fmt::Debug for BitbankWithdrawalAccount {

@@ -486,6 +486,7 @@ impl BitbankPrivateApiClient {
     }
 
     /// 指定したアセットの登録済み出金先を取得する。
+    /// `jpy` を指定すると、出金先の銀行口座情報を取得する。
     #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
     pub async fn get_withdrawal_accounts(
         &self,
@@ -784,6 +785,7 @@ mod recording_tests {
         let capture = Capture::default();
         let _guard = tracing::subscriber::set_default(capture.subscriber());
         let accounts = r#"{"success":1,"data":{"accounts":[{"uuid":"destination-private","label":"label-private","network":"xrp","address":"address-private"}]}}"#;
+        let jpy_accounts = r#"{"success":1,"data":{"accounts":[{"uuid":"destination-private","bank_name":"bank-private","branch_name":"branch-private","account_type":"ordinary","account_number":"0012345","account_owner":"owner-private"}]}}"#;
         let crypto = r#"{"uuid":"withdrawal-private","asset":"xrp","account_uuid":"destination-private","amount":"12.3400","fee":"0.1","label":"label-private","address":"address-private","network":"xrp","destination_tag":9007199254740993,"txid":null,"status":"CONFIRMING","requested_at":1700000000000}"#;
         let jpy = r#"{"uuid":"withdrawal-private","asset":"jpy","account_uuid":"destination-private","amount":"1000","fee":"550","bank_name":"bank-private","branch_name":"branch-private","account_type":"ordinary","account_number":"0012345","account_owner":"owner-private","status":"DONE","requested_at":1700000000001}"#;
         let crypto_request = format!(r#"{{"success":1,"data":{crypto}}}"#);
@@ -799,6 +801,10 @@ mod recording_tests {
         let expected = [
             (
                 "GET /user/withdrawal_account?asset=xrp HTTP/1.1",
+                Value::Null,
+            ),
+            (
+                "GET /user/withdrawal_account?asset=jpy HTTP/1.1",
                 Value::Null,
             ),
             (
@@ -850,6 +856,7 @@ mod recording_tests {
         let (client, memory, recorder, server) = client_with_request_observer(
             vec![
                 Some((200, accounts.to_owned())),
+                Some((200, jpy_accounts.to_owned())),
                 Some((200, crypto_request)),
                 Some((200, jpy_request)),
                 Some((200, crypto_history)),
@@ -887,8 +894,20 @@ mod recording_tests {
 
         let accounts = client.get_withdrawal_accounts("xrp").await.unwrap();
         assert_eq!(accounts.accounts[0].uuid, "destination-private");
-        assert_eq!(accounts.accounts[0].address, "address-private");
+        assert_eq!(
+            accounts.accounts[0].address.as_deref(),
+            Some("address-private")
+        );
+        assert!(accounts.accounts[0].bank_name.is_none());
         tracing::trace!(?accounts);
+
+        let jpy_accounts = client.get_withdrawal_accounts("jpy").await.unwrap();
+        assert_eq!(
+            jpy_accounts.accounts[0].account_number.as_deref(),
+            Some("0012345")
+        );
+        assert!(jpy_accounts.accounts[0].address.is_none());
+        tracing::trace!(?jpy_accounts);
 
         let submitted = client
             .request_withdrawal(
@@ -993,10 +1012,10 @@ mod recording_tests {
             .iter()
             .filter(|r| r.kind == "http_finished")
             .collect();
-        assert_eq!(attempts.len(), 10);
-        assert_eq!(attempts[9].data["http_status"], 307);
-        assert_eq!(attempts[8].data["stage"], "send");
-        assert_eq!(attempts[8].data["will_retry"], false);
+        assert_eq!(attempts.len(), 11);
+        assert_eq!(attempts[10].data["http_status"], 307);
+        assert_eq!(attempts[9].data["stage"], "send");
+        assert_eq!(attempts[9].data["will_retry"], false);
         assert!(attempts.iter().all(|r| r.data["result"].is_null()));
         assert!(
             records
