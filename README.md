@@ -36,6 +36,14 @@
     tracing::debug!("{:?}", res);
 ```
 
+取引所ステータスと取引ペア設定も、同じクライアントで API キーなしで取得できます。
+`get_status` の呼び出しは `BitbankPublicApiClient` に移行してください。
+
+```rust
+    let statuses = public_client.get_status().await.unwrap().statuses;
+    let pairs = public_client.get_pairs().await.unwrap().pairs;
+```
+
 以上のような処理には、取引所のjson形式のAPIレスポンスをRustで扱えるようにするために`serde_json`などを使ってデシリアライズする必要がありますが、そういった処理は`src/bitbank_structs.rs`で実装されているため、簡単に利用できます。
 
 ### bitbankのWebSocketでの約定や板情報の更新などに応じた非同期イベント駆動botの制作
@@ -102,8 +110,8 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 | `GET /user/withdrawal_account` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
 | `POST /user/request_withdrawal` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
 | `GET /user/withdrawal_history` | ❌ 未実装 ([#98](https://github.com/Harui-i/bitbankutil_rs/issues/98)) |
-| `GET /spot/status` | ✅ 公式仕様では認証不要。現行の `BitbankPrivateApiClient::get_status` を使うには API キーとシークレットが必要 ([#96](https://github.com/Harui-i/bitbankutil_rs/issues/96)) |
-| `GET /spot/pairs` | ❌ 未実装 ([#96](https://github.com/Harui-i/bitbankutil_rs/issues/96)) |
+| `GET /spot/status` | ✅ `BitbankPublicApiClient::get_status` で API キーなしで取得可能 |
+| `GET /spot/pairs` | ✅ `BitbankPublicApiClient::get_pairs` で API キーなしで取得可能 |
 | `GET /user/subscribe` | ✅ `get_channel_and_token` で PubNub のチャンネル名とトークンを取得可能 |
 
 単一注文照会とアクティブ注文照会のレスポンスに `triggered_at` が含まれる場合、通常設定ではこの項目を読み飛ばし、`strict-validation` ではデシリアライズに失敗します。

@@ -388,6 +388,100 @@ pub struct BitbankSpotStatusResponse {
     pub statuses: Vec<BitbankSpotStatus>,
 }
 
+/// 取引ペアの設定。
+///
+/// 手数料率や数量などの十進値は API の文字列形式で保持する。
+///
+/// 仕様: <https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#get-all-pairs-info>
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankSpotPair {
+    /// 通貨ペア名。
+    pub name: String,
+    /// 基軸通貨。
+    pub base_asset: String,
+    /// 決済通貨。
+    pub quote_asset: String,
+    /// 基軸通貨建てのメイカー手数料率。
+    pub maker_fee_rate_base: String,
+    /// 基軸通貨建てのテイカー手数料率。
+    pub taker_fee_rate_base: String,
+    /// 決済通貨建てのメイカー手数料率。
+    pub maker_fee_rate_quote: String,
+    /// 決済通貨建てのテイカー手数料率。
+    pub taker_fee_rate_quote: String,
+    /// 信用新規注文の決済通貨建てメイカー手数料率。
+    pub margin_open_maker_fee_rate_quote: Option<String>,
+    /// 信用新規注文の決済通貨建てテイカー手数料率。
+    pub margin_open_taker_fee_rate_quote: Option<String>,
+    /// 信用返済注文の決済通貨建てメイカー手数料率。
+    pub margin_close_maker_fee_rate_quote: Option<String>,
+    /// 信用返済注文の決済通貨建てテイカー手数料率。
+    pub margin_close_taker_fee_rate_quote: Option<String>,
+    /// ロング建玉の日次金利。
+    pub margin_long_interest: Option<String>,
+    /// ショート建玉の日次金利。
+    pub margin_short_interest: Option<String>,
+    /// 個人の現在のリスク想定比率。
+    pub margin_current_individual_ratio: Option<String>,
+    /// 個人の現在のリスク想定比率の適用終了時刻（UNIX ミリ秒）。
+    pub margin_current_individual_until: Option<i64>,
+    /// 法人の現在のリスク想定比率。
+    pub margin_current_company_ratio: Option<String>,
+    /// 法人の現在のリスク想定比率の適用終了時刻（UNIX ミリ秒）。
+    pub margin_current_company_until: Option<i64>,
+    /// 個人の次回のリスク想定比率。
+    pub margin_next_individual_ratio: Option<String>,
+    /// 個人の次回のリスク想定比率の適用終了時刻（UNIX ミリ秒）。
+    pub margin_next_individual_until: Option<i64>,
+    /// 法人の次回のリスク想定比率。
+    pub margin_next_company_ratio: Option<String>,
+    /// 法人の次回のリスク想定比率の適用終了時刻（UNIX ミリ秒）。
+    pub margin_next_company_until: Option<i64>,
+    /// 最小発注数量。
+    pub unit_amount: String,
+    /// 指値注文の最大数量。
+    pub limit_max_amount: String,
+    /// 成行注文の最大数量。
+    pub market_max_amount: String,
+    /// 成行注文の許容率。
+    pub market_allowance_rate: String,
+    /// サーキットブレーカー中の成行注文の許容率。実 API が返す追加フィールド。
+    pub market_in_cb_allowance_rate: Option<String>,
+    /// 価格の小数桁数。
+    pub price_digits: u32,
+    /// 数量の小数桁数。
+    pub amount_digits: u32,
+    /// ペアが有効か。
+    pub is_enabled: bool,
+    /// 注文受付を停止しているか。
+    pub stop_order: bool,
+    /// 注文受付と取消を停止しているか。
+    pub stop_order_and_cancel: bool,
+    /// 成行注文を停止しているか。
+    pub stop_market_order: bool,
+    /// 逆指値成行注文を停止しているか。
+    pub stop_stop_order: bool,
+    /// 逆指値指値注文を停止しているか。
+    pub stop_stop_limit_order: bool,
+    /// 新規ロング注文を停止しているか。
+    pub stop_margin_long_order: bool,
+    /// 新規ショート注文を停止しているか。
+    pub stop_margin_short_order: bool,
+    /// 買い注文を停止しているか。
+    pub stop_buy_order: bool,
+    /// 売り注文を停止しているか。
+    pub stop_sell_order: bool,
+}
+
+/// 取引ペアの設定一覧レスポンス。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankSpotPairsResponse {
+    /// 全ペアの設定。
+    pub pairs: Vec<BitbankSpotPair>,
+}
+
 #[allow(non_snake_case)]
 #[derive(Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]

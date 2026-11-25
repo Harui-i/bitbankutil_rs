@@ -87,3 +87,22 @@ async fn test_public_get_circuit_break_info() {
     let circuit_break_info = res.unwrap();
     tracing::debug!("Circuit Break Info: {:?}", circuit_break_info);
 }
+
+#[tokio::test]
+async fn test_public_get_status() {
+    logging_init();
+    let response = BitbankPublicApiClient::new().get_status().await.unwrap();
+    assert!(
+        response
+            .statuses
+            .iter()
+            .any(|status| status.pair == "btc_jpy")
+    );
+}
+
+#[tokio::test]
+async fn test_public_get_pairs() {
+    logging_init();
+    let response = BitbankPublicApiClient::new().get_pairs().await.unwrap();
+    assert!(response.pairs.iter().any(|pair| pair.name == "btc_jpy"));
+}

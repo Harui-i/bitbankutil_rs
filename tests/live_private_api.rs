@@ -5,7 +5,7 @@ use std::env;
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankAssetsData, BitbankChannelAndTokenResponse,
-    BitbankSpotStatusResponse, BitbankTradeHistoryResponse,
+    BitbankTradeHistoryResponse,
 };
 
 fn logging_init() {
@@ -51,15 +51,6 @@ async fn test_private_get_trade_history() {
         .await
         .unwrap();
     tracing::info!("Bitbank trade history: {:?}", history);
-}
-
-#[tokio::test]
-async fn test_private_get_status() {
-    logging_init();
-    let bb_client = init_client();
-
-    let status: BitbankSpotStatusResponse = bb_client.get_status().await.unwrap();
-    tracing::info!("Bitbank spot status: {:?}", status);
 }
 
 #[tokio::test]
