@@ -2,9 +2,9 @@ use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankApiResponse, BitbankAssetsData, BitbankCancelOrderResponse,
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
     BitbankDepositConfirmation, BitbankDepositHistoryResponse, BitbankDepositOriginatorsResponse,
-    BitbankGetOrderResponse, BitbankOrdersInfoResponse, BitbankTradeHistoryResponse,
-    BitbankUnconfirmedDepositsResponse, BitbankWithdrawal, BitbankWithdrawalAccountsResponse,
-    BitbankWithdrawalHistoryResponse,
+    BitbankGetOrderResponse, BitbankMarginPositionsResponse, BitbankMarginStatusResponse,
+    BitbankOrdersInfoResponse, BitbankTradeHistoryResponse, BitbankUnconfirmedDepositsResponse,
+    BitbankWithdrawal, BitbankWithdrawalAccountsResponse, BitbankWithdrawalHistoryResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption, BitbankOptions},
@@ -631,6 +631,46 @@ impl BitbankPrivateApiClient {
         result
     }
 
+    /// 信用取引の口座状態、証拠金、新規建ての余力を取得する。
+    ///
+    /// 口座状態が `NORMAL` でも、信用取引の申込が完了しているとは限らない。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn get_margin_status(
+        &self,
+    ) -> Result<BitbankMarginStatusResponse, Option<BitbankHandleError>> {
+        self.margin_request("get_margin_status", "/user/margin/status")
+            .await
+    }
+
+    /// 信用取引の建玉、追証などの通知、不足金、ロスカット基準を取得する。
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
+    pub async fn get_margin_positions(
+        &self,
+    ) -> Result<BitbankMarginPositionsResponse, Option<BitbankHandleError>> {
+        self.margin_request("get_margin_positions", "/user/margin/positions")
+            .await
+    }
+
+    async fn margin_request<T: serde::de::DeserializeOwned>(
+        &self,
+        api: &str,
+        path: &str,
+    ) -> Result<T, Option<BitbankHandleError>> {
+        let start_time = Instant::now();
+        let response = self
+            .transport
+            .request(&self.options, Method::GET, path, None::<&()>, None::<()>)
+            .await;
+        let result = crate::response_handler::handle_sensitive_response(api, response);
+        tracing::debug!(
+            event = "api_call_finished",
+            api,
+            success = result.is_ok(),
+            elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0
+        );
+        result
+    }
+
     /// 指定したアセットの登録済み出金先を取得する。
     /// `jpy` を指定すると、出金先の銀行口座情報を取得する。
     #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty))]
@@ -923,6 +963,7 @@ mod recording_tests {
         let r = ExecutionRecorder::new("http-test", serde_json::json!({}), JsonlSink(m.clone()));
         (c.with_recorder(r.clone()), m, r, server)
     }
+
     #[tokio::test]
     async fn withdrawal_requests_and_responses_keep_private_data_out_of_logs_and_records() {
         use crate::{bitbank_structs::BitbankWithdrawalDestinationTag, telemetry::tests::Capture};

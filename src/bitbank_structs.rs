@@ -138,6 +138,134 @@ pub struct BitbankCandlestickResponse {
     pub timestamp: i64,
 }
 
+/// 信用取引の口座状態、証拠金、新規建ての余力。
+///
+/// 仕様: <https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-margin-trading-status>
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankMarginStatusResponse {
+    /// 口座状態（`NORMAL`、`LOSSCUT`、`CALL`、`DEBT`、`SETTLED`）。
+    pub status: String,
+    /// 保証金維持率（%）。建玉がない場合は `None`。
+    pub total_margin_balance_percentage: Option<String>,
+    /// 受入保証金。
+    pub total_margin_balance: String,
+    /// 建玉の評価損益。
+    pub margin_position_profit_loss: String,
+    /// 未実現費用。
+    pub unrealized_cost: String,
+    /// 建玉総額。
+    pub total_margin_position_product: String,
+    /// 未決済建玉総額。
+    pub open_margin_position_product: String,
+    /// 未約定注文総額。
+    pub open_margin_order_product: String,
+    /// 全建玉の維持必要保証金。
+    pub total_position_maintenance_margin: String,
+    /// 買建玉の維持必要保証金。
+    pub total_long_position_maintenance_margin: String,
+    /// 売建玉の維持必要保証金。
+    pub total_short_position_maintenance_margin: String,
+    /// 全未約定注文の維持必要保証金。
+    pub total_open_order_maintenance_margin: String,
+    /// 買いの未約定注文の維持必要保証金。
+    pub total_long_open_order_maintenance_margin: String,
+    /// 売りの未約定注文の維持必要保証金。
+    pub total_short_open_order_maintenance_margin: String,
+    /// 追証基準（%）。建玉がない場合は `None`。
+    pub margin_call_percentage: Option<String>,
+    /// ロスカット基準（%）。建玉がない場合は `None`。
+    pub losscut_percentage: Option<String>,
+    /// 買い信用枠。
+    pub buy_credit: String,
+    /// 売り信用枠。
+    pub sell_credit: String,
+    /// 通貨ペア別の新規建て可能額。
+    pub available_balances: Vec<BitbankMarginAvailableBalance>,
+}
+
+/// 通貨ペア別の新規建て可能額。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankMarginAvailableBalance {
+    /// 通貨ペア。
+    pub pair: String,
+    /// 新規買建て可能額。
+    pub long: String,
+    /// 新規売建て可能額。
+    pub short: String,
+}
+
+/// 信用取引の建玉照会結果。
+///
+/// 仕様: <https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-positions-information>
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankMarginPositionsResponse {
+    /// 追証、不足金、または精算の通知。
+    pub notice: BitbankMarginNotice,
+    /// 不足金。
+    pub payables: BitbankMarginPayables,
+    /// 建玉一覧。
+    pub positions: Vec<BitbankMarginPosition>,
+    /// 個人・法人のロスカット基準。
+    pub losscut_threshold: BitbankMarginLosscutThreshold,
+}
+
+/// 追証、不足金、または精算の通知。通知がない場合は全項目が `None`。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankMarginNotice {
+    /// 通知種別（`margin_call`、`debt`、`settled`）。
+    pub what: Option<String>,
+    /// 通知発生日時のUnixタイムスタンプ。
+    pub occurred_at: Option<Number>,
+    /// 通知金額（JPY）。精算通知では `None`。
+    pub amount: Option<String>,
+    /// 対応期限のUnixタイムスタンプ。精算通知では `None`。
+    pub due_date_at: Option<Number>,
+}
+
+/// 信用取引の不足金。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankMarginPayables {
+    /// 不足金額。
+    pub amount: String,
+}
+
+/// 信用取引の建玉。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankMarginPosition {
+    /// 通貨ペア。
+    pub pair: String,
+    /// 建玉の方向（`long` または `short`）。
+    pub position_side: String,
+    /// 建玉数量。
+    pub open_amount: String,
+    /// 有効な返済注文に拘束されている数量（各注文の `remaining_amount` の合計）。
+    pub locked_amount: String,
+    /// 決済通貨建ての建玉金額。
+    pub product: String,
+    /// 平均約定価格。
+    pub average_price: String,
+    /// 未確定の手数料。
+    pub unrealized_fee_amount: String,
+    /// 未確定の利息。
+    pub unrealized_interest_amount: String,
+}
+
+/// 信用取引のロスカット基準。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankMarginLosscutThreshold {
+    /// 個人口座の基準。
+    pub individual: String,
+    /// 法人口座の基準。
+    pub company: String,
+}
+
 /// 登録済みの出金先。
 #[derive(Deserialize, Clone)]
 #[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
