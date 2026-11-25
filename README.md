@@ -85,12 +85,12 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 | エンドポイント | 実装状況 |
 | --- | --- |
 | `GET /user/assets` | ✅ |
-| `GET /user/spot/order` | ✅ 発動時刻 `triggered_at` を任意項目として取得可能 ([#93](https://github.com/Harui-i/bitbankutil_rs/issues/93)) |
+| `GET /user/spot/order` | ✅ 発動時刻 `triggered_at` は未対応 ([#93](https://github.com/Harui-i/bitbankutil_rs/issues/93)) |
 | `POST /user/spot/order` | ✅ 現物の指値・成行・逆指値・逆指値指値に対応。信用発注は未対応 ([#95](https://github.com/Harui-i/bitbankutil_rs/issues/95)) |
 | `POST /user/spot/cancel_order` | ✅ |
 | `POST /user/spot/cancel_orders` | ✅ |
 | `POST /user/spot/orders_info` | ❌ 未実装 ([#92](https://github.com/Harui-i/bitbankutil_rs/issues/92)) |
-| `GET /user/spot/active_orders` | ✅ 単一注文照会と同様に `triggered_at` を取得可能 ([#93](https://github.com/Harui-i/bitbankutil_rs/issues/93)) |
+| `GET /user/spot/active_orders` | ✅ 単一注文照会と同様に `triggered_at` は未対応 ([#93](https://github.com/Harui-i/bitbankutil_rs/issues/93)) |
 | `GET /user/margin/status` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
 | `GET /user/margin/positions` | ❌ 未実装 ([#94](https://github.com/Harui-i/bitbankutil_rs/issues/94)) |
 | `GET /user/spot/trade_history` | ✅ |
@@ -105,6 +105,8 @@ cargo run --example best_mm -- --paper mona_jpy 0.001 8000 0.001 0.002 0 10000 1
 | `GET /spot/status` | ✅ 公式仕様では認証不要。現行の `BitbankPrivateApiClient::get_status` を使うには API キーとシークレットが必要 ([#96](https://github.com/Harui-i/bitbankutil_rs/issues/96)) |
 | `GET /spot/pairs` | ❌ 未実装 ([#96](https://github.com/Harui-i/bitbankutil_rs/issues/96)) |
 | `GET /user/subscribe` | ✅ `get_channel_and_token` で PubNub のチャンネル名とトークンを取得可能 |
+
+単一注文照会とアクティブ注文照会のレスポンスに `triggered_at` が含まれる場合、通常設定ではこの項目を読み飛ばし、`strict-validation` ではデシリアライズに失敗します。
 
 ### Public Stream API ([公式仕様](https://github.com/bitbankinc/bitbank-api-docs/blob/master/public-stream_JP.md))
 
