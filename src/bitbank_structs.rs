@@ -176,6 +176,154 @@ pub struct BitbankAssetsData {
     pub assets: Vec<BitbankAssetDatum>,
 }
 
+/// 入金履歴レスポンス。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankDepositHistoryResponse {
+    /// 入金履歴の一覧。
+    pub deposits: Vec<BitbankDepositHistoryDatum>,
+}
+
+/// 入金履歴の1件。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankDepositHistoryDatum {
+    /// 入金UUID。
+    pub uuid: String,
+    /// 入金アドレス。レスポンスに含まれない場合は `None`。
+    pub address: Option<String>,
+    /// 資産コード。
+    pub asset: String,
+    /// 入金ネットワーク。レスポンスに含まれない場合は `None`。
+    pub network: Option<String>,
+    /// 入金額。APIがJSON数値を返す場合も文字列に変換する。
+    #[serde(deserialize_with = "deserialize_deposit_amount")]
+    pub amount: String,
+    /// 暗号資産のトランザクションID。
+    pub txid: Option<String>,
+    /// 入金ステータス（`FOUND`、`CONFIRMED`、`DONE`）。
+    pub status: String,
+    /// 入金区分（`NORMAL`、`MANUAL`、`STAKING`）。
+    pub category: String,
+    /// 入金検知時刻のUnixタイムスタンプ（ミリ秒）。
+    pub found_at: u64,
+    /// 入金確認時刻のUnixタイムスタンプ（ミリ秒）。確認前は `None`。
+    pub confirmed_at: Option<u64>,
+}
+
+fn deserialize_deposit_amount<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Amount {
+        Text(String),
+        Number(Number),
+    }
+
+    match Amount::deserialize(deserializer)? {
+        Amount::Text(text) => Ok(text),
+        Amount::Number(number) => Ok(number.to_string()),
+    }
+}
+
+/// 未反映入金レスポンス。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankUnconfirmedDepositsResponse {
+    /// 送付元情報の登録が必要な入金の一覧。
+    pub deposits: Vec<BitbankUnconfirmedDepositDatum>,
+}
+
+/// 未反映入金の1件。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankUnconfirmedDepositDatum {
+    /// 未反映入金のUUID。
+    pub uuid: String,
+    /// 資産コード。
+    pub asset: String,
+    /// 入金額。
+    pub amount: String,
+    /// 入金ネットワーク。
+    pub network: String,
+    /// トランザクションID。
+    pub txid: String,
+    /// 作成時刻のUnixタイムスタンプ（ミリ秒）。
+    pub created_at: u64,
+}
+
+/// 入金の送付元候補一覧レスポンス。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankDepositOriginatorsResponse {
+    /// 送付元候補の一覧。
+    pub originators: Vec<BitbankDepositOriginatorDatum>,
+}
+
+/// 未反映入金に登録できる送付元候補。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankDepositOriginatorDatum {
+    /// 送付元UUID。
+    pub uuid: String,
+    /// 送付元のラベル。
+    pub label: String,
+    /// 送付元の区分（`WALLET` または `ELSE`）。
+    pub deposit_type: String,
+    /// 入金目的。
+    pub deposit_purpose: Option<String>,
+    /// 送付元の審査ステータス。
+    pub originator_status: String,
+    /// 送付元の種別（`OWN`、`PERSON`、`COMPANY`）。
+    pub originator_type: String,
+    /// 送付人の姓。
+    pub originator_last_name: Option<String>,
+    /// 送付人の名。
+    pub originator_first_name: Option<String>,
+    /// 送付元の国。
+    pub originator_country: Option<String>,
+    /// 送付元の都道府県、州、地域。
+    pub originator_prefecture: Option<String>,
+    /// 送付元の市区町村。
+    pub originator_city: Option<String>,
+    /// 送付元の住所。
+    pub originator_address: Option<String>,
+    /// 送付元の建物名。
+    pub originator_building: Option<String>,
+    /// 送付元の法人名。
+    pub originator_company_name: Option<String>,
+    /// 送付元の法人種別。
+    pub originator_company_type: Option<String>,
+    /// 法人種別を法人名の前後どちらに付けるか。
+    pub originator_company_type_position: Option<String>,
+    /// 法人の実質的支配者の一覧。
+    pub originator_substantial_controllers: Option<Vec<BitbankDepositOriginatorController>>,
+}
+
+/// 法人の送付元の実質的支配者。
+#[derive(Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
+pub struct BitbankDepositOriginatorController {
+    /// 実質的支配者のUUID。
+    pub uuid: String,
+    /// 実質的支配者の氏名。
+    pub name: String,
+    /// 実質的支配者の国。
+    pub country: String,
+    /// 実質的支配者の都道府県、州、地域。
+    pub prefecture: Option<String>,
+}
+
+/// 未反映入金と、登録する送付元の組み合わせ。
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct BitbankDepositConfirmation<'a> {
+    /// 未反映入金のUUID。
+    pub uuid: &'a str,
+    /// 送付元候補のUUID。
+    pub originator_uuid: &'a str,
+}
+
 /// 約定履歴のエントリ。
 #[derive(Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]

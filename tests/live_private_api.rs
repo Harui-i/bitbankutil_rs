@@ -54,6 +54,49 @@ async fn test_private_get_trade_history() {
 }
 
 #[tokio::test]
+async fn test_private_get_deposits() {
+    logging_init();
+    let bb_client = init_client();
+
+    let crypto_history = bb_client
+        .get_deposit_history(None, Some(1), None, None)
+        .await;
+    let jpy_history = bb_client
+        .get_deposit_history(Some("jpy"), Some(1), None, None)
+        .await;
+    let unconfirmed = bb_client.get_unconfirmed_deposits().await;
+    let originators = bb_client.get_deposit_originators().await;
+
+    let mut failed = Vec::new();
+    for (api, result) in [
+        (
+            "get_deposit_history (crypto)",
+            crypto_history.map(|data| !data.deposits.is_empty()),
+        ),
+        (
+            "get_deposit_history (jpy)",
+            jpy_history.map(|data| !data.deposits.is_empty()),
+        ),
+        (
+            "get_unconfirmed_deposits",
+            unconfirmed.map(|data| !data.deposits.is_empty()),
+        ),
+        (
+            "get_deposit_originators",
+            originators.map(|data| !data.originators.is_empty()),
+        ),
+    ] {
+        if let Ok(has_records) = result {
+            tracing::info!(api, has_records);
+        } else {
+            failed.push(api);
+        }
+    }
+    // APIエラーの本文や口座データをテスト出力に表示しない。
+    assert!(failed.is_empty(), "deposit API requests failed: {failed:?}");
+}
+
+#[tokio::test]
 async fn test_private_get_channel_and_token() {
     logging_init();
     let bb_client = init_client();
