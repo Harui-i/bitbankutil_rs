@@ -2,8 +2,7 @@ use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankApiResponse, BitbankAssetsData, BitbankCancelOrderResponse,
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
     BitbankDepositConfirmation, BitbankDepositHistoryResponse, BitbankDepositOriginatorsResponse,
-    BitbankGetOrderResponse, BitbankTradeHistoryResponse,
-    BitbankUnconfirmedDepositsResponse,
+    BitbankGetOrderResponse, BitbankTradeHistoryResponse, BitbankUnconfirmedDepositsResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption, BitbankOptions},
