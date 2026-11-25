@@ -261,3 +261,91 @@ async fn orders_info_sends_ids_and_preserves_partial_and_empty_results() {
     assert!(result.orders.is_empty());
     server.join().unwrap();
 }
+
+#[tokio::test]
+async fn margin_queries_decode_status_positions_and_nullable_notices() {
+    let (client, server) = serve([
+        (
+            "GET /v1/user/margin/status HTTP/1.1",
+            None,
+            r#"{"success":1,"data":{
+                "status":"NORMAL",
+                "total_margin_balance_percentage":null,
+                "total_margin_balance":"12.3400",
+                "margin_position_profit_loss":"0.0000",
+                "unrealized_cost":"0.0000",
+                "total_margin_position_product":"0.0000",
+                "open_margin_position_product":"0.0000",
+                "open_margin_order_product":"0.0000",
+                "total_position_maintenance_margin":"0.0000",
+                "total_long_position_maintenance_margin":"0.0000",
+                "total_short_position_maintenance_margin":"0.0000",
+                "total_open_order_maintenance_margin":"0.0000",
+                "total_long_open_order_maintenance_margin":"0.0000",
+                "total_short_open_order_maintenance_margin":"0.0000",
+                "margin_call_percentage":null,
+                "losscut_percentage":null,
+                "buy_credit":"50000",
+                "sell_credit":"10000",
+                "available_balances":[{"pair":"btc_jpy","long":"24.6800","short":"10.0000"}]
+            }}"#,
+        ),
+        (
+            "GET /v1/user/margin/positions HTTP/1.1",
+            None,
+            r#"{"success":1,"data":{
+                "notice":{"what":null,"occurred_at":null,"amount":null,"due_date_at":null},
+                "payables":{"amount":"0"},
+                "positions":[],
+                "losscut_threshold":{"individual":"50","company":"100"}
+            }}"#,
+        ),
+        (
+            "GET /v1/user/margin/positions HTTP/1.1",
+            None,
+            r#"{"success":1,"data":{
+                "notice":{"what":"margin_call","occurred_at":1795507200000,
+                    "amount":"1000.12","due_date_at":1795593600000},
+                "payables":{"amount":"10.9900"},
+                "positions":[{"pair":"btc_jpy","position_side":"long","open_amount":"0.0200",
+                    "locked_amount":"0.0100","product":"200000","average_price":"10000000",
+                    "unrealized_fee_amount":"0.0010","unrealized_interest_amount":"0.0020"}],
+                "losscut_threshold":{"individual":"50","company":"100"}
+            }}"#,
+        ),
+    ]);
+
+    let status = client.get_margin_status().await.unwrap();
+    assert_eq!(status.status, "NORMAL");
+    assert_eq!(status.total_margin_balance, "12.3400");
+    assert_eq!(status.total_margin_balance_percentage, None);
+    assert_eq!(status.margin_call_percentage, None);
+    assert_eq!(status.losscut_percentage, None);
+    assert_eq!(status.available_balances[0].pair, "btc_jpy");
+    assert_eq!(status.available_balances[0].long, "24.6800");
+    assert_eq!(status.available_balances[0].short, "10.0000");
+
+    let empty = client.get_margin_positions().await.unwrap();
+    assert!(empty.positions.is_empty());
+    assert_eq!(empty.notice.what, None);
+    assert_eq!(empty.notice.occurred_at, None);
+    assert_eq!(empty.notice.amount, None);
+    assert_eq!(empty.notice.due_date_at, None);
+
+    let populated = client.get_margin_positions().await.unwrap();
+    assert_eq!(populated.positions[0].locked_amount, "0.0100");
+    assert_eq!(populated.notice.what.as_deref(), Some("margin_call"));
+    assert_eq!(populated.notice.amount.as_deref(), Some("1000.12"));
+    assert_eq!(
+        populated.notice.occurred_at.unwrap().as_u64(),
+        Some(1795507200000)
+    );
+    assert_eq!(
+        populated.notice.due_date_at.unwrap().as_u64(),
+        Some(1795593600000)
+    );
+    assert_eq!(populated.payables.amount, "10.9900");
+    assert_eq!(populated.losscut_threshold.individual, "50");
+    assert_eq!(populated.losscut_threshold.company, "100");
+    server.join().unwrap();
+}

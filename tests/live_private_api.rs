@@ -156,6 +156,35 @@ async fn test_private_get_channel_and_token() {
 }
 
 #[tokio::test]
+async fn test_private_margin_queries() {
+    logging_init();
+    let client = init_client();
+    let status = client.get_margin_status().await;
+    let positions = client.get_margin_positions().await;
+
+    // テスト出力には照会結果と、建玉・通知の有無だけを出す。
+    println!(
+        "get_margin_status: {}",
+        if status.is_ok() { "ok" } else { "failed" }
+    );
+    println!(
+        "get_margin_positions: {}",
+        if positions.is_ok() { "ok" } else { "failed" }
+    );
+    if let Ok(response) = &positions {
+        println!(
+            "response coverage: positions_present={}, notice_present={}",
+            !response.positions.is_empty(),
+            response.notice.what.is_some()
+        );
+    }
+    assert!(
+        status.is_ok() && positions.is_ok(),
+        "margin API requests failed"
+    );
+}
+
+#[tokio::test]
 async fn test_private_withdrawal_accounts() {
     let client = init_client();
     for asset in ["btc", "xrp"] {
