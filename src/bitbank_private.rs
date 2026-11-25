@@ -2,8 +2,9 @@ use crate::bitbank_structs::{
     BitbankActiveOrdersResponse, BitbankApiResponse, BitbankAssetsData, BitbankCancelOrderResponse,
     BitbankCancelOrdersResponse, BitbankChannelAndTokenResponse, BitbankCreateOrderResponse,
     BitbankDepositConfirmation, BitbankDepositHistoryResponse, BitbankDepositOriginatorsResponse,
-    BitbankGetOrderResponse, BitbankTradeHistoryResponse, BitbankUnconfirmedDepositsResponse,
-    BitbankWithdrawal, BitbankWithdrawalAccountsResponse, BitbankWithdrawalHistoryResponse,
+    BitbankGetOrderResponse, BitbankOrdersInfoResponse, BitbankTradeHistoryResponse,
+    BitbankUnconfirmedDepositsResponse, BitbankWithdrawal, BitbankWithdrawalAccountsResponse,
+    BitbankWithdrawalHistoryResponse,
 };
 use crypto_botters::{
     bitbank::{BitbankHandleError, BitbankHttpUrl, BitbankOption, BitbankOptions},
@@ -14,7 +15,7 @@ use serde_json::{Value, json};
 use std::time::Instant;
 
 #[cfg(test)]
-mod deposit_tests;
+mod http_tests;
 
 #[derive(serde::Deserialize)]
 #[cfg_attr(feature = "strict-validation", serde(deny_unknown_fields))]
@@ -167,7 +168,7 @@ impl BitbankPrivateApiClient {
             .into_iter()
             .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value))),
         );
-        self.deposit_request(
+        self.request(
             "get_deposit_history",
             Method::GET,
             "/user/deposit_history",
@@ -182,7 +183,7 @@ impl BitbankPrivateApiClient {
     pub async fn get_unconfirmed_deposits(
         &self,
     ) -> Result<BitbankUnconfirmedDepositsResponse, Option<BitbankHandleError>> {
-        self.deposit_request(
+        self.request(
             "get_unconfirmed_deposits",
             Method::GET,
             "/user/unconfirmed_deposits",
@@ -197,7 +198,7 @@ impl BitbankPrivateApiClient {
     pub async fn get_deposit_originators(
         &self,
     ) -> Result<BitbankDepositOriginatorsResponse, Option<BitbankHandleError>> {
-        self.deposit_request(
+        self.request(
             "get_deposit_originators",
             Method::GET,
             "/user/deposit_originators",
@@ -213,7 +214,7 @@ impl BitbankPrivateApiClient {
         &self,
         deposits: &[BitbankDepositConfirmation<'_>],
     ) -> Result<(), Option<BitbankHandleError>> {
-        self.deposit_request::<EmptyDepositResponse>(
+        self.request::<EmptyDepositResponse>(
             "post_confirm_deposits",
             Method::POST,
             "/user/confirm_deposits",
@@ -230,7 +231,7 @@ impl BitbankPrivateApiClient {
         &self,
         originator_uuid: &str,
     ) -> Result<(), Option<BitbankHandleError>> {
-        self.deposit_request::<EmptyDepositResponse>(
+        self.request::<EmptyDepositResponse>(
             "post_confirm_deposits_all",
             Method::POST,
             "/user/confirm_deposits_all",
@@ -241,7 +242,7 @@ impl BitbankPrivateApiClient {
         .map(|_| ())
     }
 
-    async fn deposit_request<T: serde::de::DeserializeOwned>(
+    async fn request<T: serde::de::DeserializeOwned>(
         &self,
         api: &str,
         method: Method,
@@ -550,10 +551,26 @@ impl BitbankPrivateApiClient {
         result
     }
 
-    // TODO
-    // 複数の注文を取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-multiple-orders
-    pub fn post_orders_info(&self) {
-        todo!();
+    /// 同じ通貨ペアの複数の注文を ID で照会する。
+    ///
+    /// 約定またはキャンセルから3か月を超えた注文は bitbank の応答から省かれる。
+    /// 結果の `orders` には bitbank が返した注文だけが入り、空になることもある。
+    ///
+    /// [bitbank 公式仕様](https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-multiple-orders)
+    #[tracing::instrument(skip_all, fields(api_call_id = crate::telemetry::next_id(), venue_request_id = tracing::field::Empty, pair = %crate::telemetry::safe(pair)))]
+    pub async fn post_orders_info(
+        &self,
+        pair: &str,
+        order_ids: &[u64],
+    ) -> Result<BitbankOrdersInfoResponse, Option<BitbankHandleError>> {
+        self.request(
+            "post_orders_info",
+            Method::POST,
+            "/user/spot/orders_info",
+            None,
+            Some(json!({ "pair": pair, "order_ids": order_ids })),
+        )
+        .await
     }
 
     // 有効な注文を取得する。 https://github.com/bitbankinc/bitbank-api-docs/blob/master/rest-api.md#fetch-active-orders

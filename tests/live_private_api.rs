@@ -1,6 +1,6 @@
 #![cfg(feature = "live-private-api")]
 
-use std::env;
+use std::{collections::HashMap, env};
 
 use bitbankutil_rs::bitbank_private::BitbankPrivateApiClient;
 use bitbankutil_rs::bitbank_structs::{
@@ -51,6 +51,55 @@ async fn test_private_get_trade_history() {
         .await
         .unwrap();
     tracing::info!("Bitbank trade history: {:?}", history);
+}
+
+#[tokio::test]
+async fn test_private_post_orders_info() {
+    let client = init_client();
+    let history = client
+        .get_trade_history(None, Some(100), None, None, None, Some("desc"))
+        .await
+        .unwrap_or_else(|_| panic!("failed to fetch trade history for orders_info"));
+
+    // 同じ注文の分割約定が履歴に並ぶことがあるため、異なる注文IDを選ぶ。
+    let mut first_id_by_pair = HashMap::new();
+    let (pair, mut requested_ids) = history
+        .trades
+        .into_iter()
+        .find_map(|trade| {
+            let id = trade
+                .order_id
+                .as_u64()
+                .expect("expected a numeric order ID");
+            let first = *first_id_by_pair.entry(trade.pair.clone()).or_insert(id);
+            (first != id).then_some((trade.pair, [first, id]))
+        })
+        .expect("orders_info live test requires two recent filled orders for one pair");
+
+    let result = client
+        .post_orders_info(&pair, &requested_ids)
+        .await
+        .unwrap_or_else(|_| panic!("orders_info request failed"));
+    assert!(
+        result.orders.iter().all(|order| order.pair == pair),
+        "orders_info returned an unexpected pair"
+    );
+    let mut returned_ids = result
+        .orders
+        .iter()
+        .map(|order| {
+            order
+                .order_id
+                .as_u64()
+                .expect("expected a numeric order ID")
+        })
+        .collect::<Vec<_>>();
+    requested_ids.sort_unstable();
+    returned_ids.sort_unstable();
+    assert!(
+        returned_ids == requested_ids,
+        "orders_info did not return both requested orders"
+    );
 }
 
 #[tokio::test]

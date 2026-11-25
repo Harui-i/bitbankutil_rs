@@ -215,3 +215,49 @@ async fn confirm_deposits_sends_expected_bodies_and_propagates_api_error() {
     ));
     server.join().unwrap();
 }
+
+#[tokio::test]
+async fn orders_info_sends_ids_and_preserves_partial_and_empty_results() {
+    let request_line = "POST /v1/user/spot/orders_info HTTP/1.1";
+    let (client, server) = serve([
+        (
+            request_line,
+            Some(json!({"pair": "btc_jpy", "order_ids": [101, 102, 103]})),
+            r#"{"success":1,"data":{"orders":[
+                {"order_id":103,"pair":"btc_jpy","side":"sell","type":"limit",
+                    "executed_amount":"0","user_cancelable":false,"average_price":"0",
+                    "ordered_at":1000,"canceled_at":2000,"status":"CANCELED_UNFILLED"},
+                {"order_id":101,"pair":"btc_jpy","side":"buy","type":"stop",
+                    "executed_amount":"1","user_cancelable":false,"average_price":"100",
+                    "ordered_at":1000,"triggered_at":1500,"status":"FULLY_FILLED"}
+            ]}}"#,
+        ),
+        (
+            request_line,
+            Some(json!({"pair": "btc_jpy", "order_ids": [102]})),
+            r#"{"success":1,"data":{"orders":[]}}"#,
+        ),
+    ]);
+
+    let result = client
+        .post_orders_info("btc_jpy", &[101, 102, 103])
+        .await
+        .unwrap();
+    let [canceled, triggered] = result.orders.as_slice() else {
+        panic!("expected two orders");
+    };
+    assert_eq!(canceled.order_id.as_u64(), Some(103));
+    assert_eq!(
+        canceled.canceled_at.as_ref().and_then(|ts| ts.as_u64()),
+        Some(2000)
+    );
+    assert_eq!(triggered.order_id.as_u64(), Some(101));
+    assert_eq!(
+        triggered.triggered_at.as_ref().and_then(|ts| ts.as_u64()),
+        Some(1500)
+    );
+
+    let result = client.post_orders_info("btc_jpy", &[102]).await.unwrap();
+    assert!(result.orders.is_empty());
+    server.join().unwrap();
+}
